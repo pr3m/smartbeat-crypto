@@ -1,0 +1,317 @@
+import { NextResponse } from 'next/server';
+import { prisma } from '@/lib/db';
+import { calculateSimulatedFees, calculateMarginRequired } from '@/lib/trading/simulated-pnl';
+
+/**
+ * DELETE /api/simulated/orders
+ * Cancel a simulated order or all open orders
+ */
+export async function DELETE(request: Request) {
+  try {
+    const body = await request.json();
+    const { orderId, cancelAll } = body;
+
+    if (cancelAll) {
+      // Cancel all open orders
+      const result = await prisma.simulatedOrder.updateMany({
+        where: { status: 'open' },
+        data: { status: 'cancelled' },
+      });
+
+      return NextResponse.json({
+        success: true,
+        cancelled: result.count,
+        message: `${result.count} orders cancelled`,
+      });
+    }
+
+    if (!orderId) {
+      return NextResponse.json(
+        { error: 'orderId or cancelAll required' },
+        { status: 400 }
+      );
+    }
+
+    // Cancel specific order
+    const order = await prisma.simulatedOrder.findUnique({
+      where: { id: orderId },
+    });
+
+    if (!order) {
+      return NextResponse.json(
+        { error: 'Order not found' },
+        { status: 404 }
+      );
+    }
+
+    if (order.status !== 'open') {
+      return NextResponse.json(
+        { error: `Cannot cancel order with status: ${order.status}` },
+        { status: 400 }
+      );
+    }
+
+    await prisma.simulatedOrder.update({
+      where: { id: orderId },
+      data: { status: 'cancelled' },
+    });
+
+    return NextResponse.json({
+      success: true,
+      cancelled: 1,
+      message: 'Order cancelled',
+    });
+  } catch (error) {
+    console.error('Error cancelling simulated order:', error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to cancel order' },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * GET /api/simulated/orders
+ * List simulated orders with optional filters
+ */
+export async function GET(request: Request) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const status = searchParams.get('status'); // open, filled, cancelled
+    const limit = parseInt(searchParams.get('limit') || '50');
+
+    const where: Record<string, unknown> = {};
+    if (status) {
+      where.status = status;
+    }
+
+    const orders = await prisma.simulatedOrder.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      include: {
+        fills: true,
+        position: true,
+      },
+    });
+
+    return NextResponse.json({ orders });
+  } catch (error) {
+    console.error('Error fetching simulated orders:', error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to fetch orders' },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * POST /api/simulated/orders
+ * Create a new simulated order (market orders fill immediately)
+ */
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    const {
+      pair = 'XRPEUR',
+      type, // 'buy' | 'sell'
+      orderType = 'market', // 'market' | 'limit'
+      price, // Limit price (required for limit orders)
+      volume, // Position size in XRP
+      leverage = 10,
+      marketPrice, // Current market price
+      entryConditions, // JSON snapshot of indicators
+    } = body;
+
+    // Validation
+    if (!type || !['buy', 'sell'].includes(type)) {
+      return NextResponse.json({ error: 'Invalid order type' }, { status: 400 });
+    }
+    if (!volume || volume <= 0) {
+      return NextResponse.json({ error: 'Invalid volume' }, { status: 400 });
+    }
+    if (!marketPrice || marketPrice <= 0) {
+      return NextResponse.json({ error: 'Market price required' }, { status: 400 });
+    }
+    if (orderType === 'limit' && (!price || price <= 0)) {
+      return NextResponse.json({ error: 'Limit price required for limit orders' }, { status: 400 });
+    }
+
+    // Get current balance
+    const balance = await prisma.simulatedBalance.findUnique({
+      where: { id: 'default' },
+    });
+
+    if (!balance) {
+      return NextResponse.json({ error: 'Balance not initialized' }, { status: 400 });
+    }
+
+    // Calculate required margin
+    const executionPrice = orderType === 'market' ? marketPrice : price;
+    const marginRequired = calculateMarginRequired(volume, executionPrice, leverage);
+
+    // Check available margin (considering open positions)
+    const openPositions = await prisma.simulatedPosition.findMany({
+      where: { isOpen: true },
+    });
+    let currentMarginUsed = 0;
+    for (const pos of openPositions) {
+      currentMarginUsed += pos.totalCost / pos.leverage;
+    }
+
+    const equity = balance.eurBalance + balance.cryptoValue;
+    const freeMargin = equity * 10 - currentMarginUsed; // 10x max leverage
+
+    if (marginRequired > freeMargin) {
+      return NextResponse.json(
+        { error: `Insufficient margin. Required: €${marginRequired.toFixed(2)}, Available: €${freeMargin.toFixed(2)}` },
+        { status: 400 }
+      );
+    }
+
+    // Create the order
+    const order = await prisma.simulatedOrder.create({
+      data: {
+        pair,
+        type,
+        orderType,
+        price: orderType === 'limit' ? price : null,
+        volume,
+        leverage,
+        status: orderType === 'market' ? 'filled' : 'open',
+        filledVolume: orderType === 'market' ? volume : 0,
+        marketPriceAtOrder: marketPrice,
+        entryConditions: entryConditions ? JSON.stringify(entryConditions) : null,
+      },
+    });
+
+    // For market orders, execute immediately
+    if (orderType === 'market') {
+      const result = await executeOrder(order.id, marketPrice);
+      return NextResponse.json({
+        success: true,
+        order: result.order,
+        position: result.position,
+        fill: result.fill,
+        message: `Market ${type} order filled at €${marketPrice.toFixed(4)}`,
+      });
+    }
+
+    // For limit orders, return the pending order
+    return NextResponse.json({
+      success: true,
+      order,
+      message: `Limit ${type} order placed at €${price.toFixed(4)}`,
+    });
+  } catch (error) {
+    console.error('Error creating simulated order:', error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to create order' },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * Execute an order (fill it and create/update position)
+ */
+async function executeOrder(orderId: string, fillPrice: number) {
+  const order = await prisma.simulatedOrder.findUnique({
+    where: { id: orderId },
+  });
+
+  if (!order) {
+    throw new Error('Order not found');
+  }
+
+  // Calculate fee
+  const fee = calculateSimulatedFees(
+    order.volume,
+    fillPrice,
+    order.orderType as 'market' | 'limit',
+    order.leverage > 0
+  );
+
+  // Create fill record
+  const fill = await prisma.simulatedFill.create({
+    data: {
+      orderId,
+      price: fillPrice,
+      volume: order.volume,
+      fee,
+    },
+  });
+
+  // Determine position side
+  const side = order.type === 'buy' ? 'long' : 'short';
+
+  // Check for existing open position on the same pair and side
+  let position = await prisma.simulatedPosition.findFirst({
+    where: {
+      pair: order.pair,
+      side,
+      isOpen: true,
+    },
+  });
+
+  const totalCost = order.volume * fillPrice;
+
+  if (position) {
+    // Add to existing position (average down/up)
+    const newVolume = position.volume + order.volume;
+    const newTotalCost = position.totalCost + totalCost;
+    const newAvgPrice = newTotalCost / newVolume;
+
+    position = await prisma.simulatedPosition.update({
+      where: { id: position.id },
+      data: {
+        volume: newVolume,
+        avgEntryPrice: newAvgPrice,
+        totalCost: newTotalCost,
+        totalFees: position.totalFees + fee,
+      },
+    });
+  } else {
+    // Create new position
+    position = await prisma.simulatedPosition.create({
+      data: {
+        pair: order.pair,
+        side,
+        volume: order.volume,
+        avgEntryPrice: fillPrice,
+        leverage: order.leverage,
+        totalCost,
+        totalFees: fee,
+        entryConditions: order.entryConditions,
+      },
+    });
+  }
+
+  // Link order to position
+  const updatedOrder = await prisma.simulatedOrder.update({
+    where: { id: orderId },
+    data: {
+      status: 'filled',
+      filledVolume: order.volume,
+      positionId: position.id,
+    },
+    include: {
+      fills: true,
+      position: true,
+    },
+  });
+
+  // Update balance (deduct fee)
+  await prisma.simulatedBalance.update({
+    where: { id: 'default' },
+    data: {
+      totalFeesPaid: { increment: fee },
+    },
+  });
+
+  return {
+    order: updatedOrder,
+    position,
+    fill,
+  };
+}

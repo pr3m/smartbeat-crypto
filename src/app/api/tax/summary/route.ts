@@ -1,0 +1,218 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { prisma } from '@/lib/db';
+import { getTaxRate } from '@/lib/tax/estonia-rules';
+
+/**
+ * GET /api/tax/summary - Get tax summary for a year
+ */
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const yearParam = searchParams.get('year');
+    const year = yearParam ? parseInt(yearParam) : new Date().getFullYear();
+    const taxRate = getTaxRate(year);
+
+    const yearStart = new Date(year, 0, 1);
+    const yearEnd = new Date(year, 11, 31, 23, 59, 59);
+
+    // Get all transactions for the year
+    const transactions = await prisma.transaction.findMany({
+      where: {
+        timestamp: { gte: yearStart, lte: yearEnd },
+      },
+      include: {
+        taxEvents: true,
+      },
+    });
+
+    // Get tax events for the year
+    const taxEvents = await prisma.taxEvent.findMany({
+      where: { taxYear: year },
+    });
+
+    // Calculate totals
+    let totalProceeds = 0;
+    let totalCostBasis = 0;
+    let totalGains = 0;
+    let totalLosses = 0;
+    let tradingGains = 0;
+    let tradingLosses = 0;
+    let marginGains = 0;
+    let marginLosses = 0;
+    let stakingIncome = 0;
+    let earnIncome = 0;
+    let airdropIncome = 0;
+    let totalTransactions = transactions.length;
+    let taxableTransactions = 0;
+
+    // Process tax events (for spot trades FIFO calculation)
+    for (const event of taxEvents) {
+      totalProceeds += event.disposalProceeds;
+      totalCostBasis += event.acquisitionCost;
+
+      // Only add spot trade gains to totalGains (margin is handled separately)
+      const tx = transactions.find(t => t.id === event.transactionId);
+      if (tx && tx.type === 'TRADE') {
+        if (event.gain > 0) {
+          totalGains += event.gain;
+          tradingGains += event.gain;
+        } else {
+          totalLosses += Math.abs(event.gain);
+          tradingLosses += Math.abs(event.gain);
+        }
+      }
+    }
+
+    // Track processed margin order IDs to avoid double-counting
+    const processedMarginOrderIds = new Set<string>();
+
+    // Process transactions for breakdown
+    for (const tx of transactions) {
+      if (tx.type === 'TRADE' && tx.side === 'sell') {
+        // Spot trades are handled via tax events above
+        taxableTransactions++;
+      } else if (tx.type === 'MARGIN_TRADE') {
+        // For margin trades, use netPnl from opening trades (posstatus = 'closed')
+        // These are the authoritative P&L values from Kraken
+        // Group by krakenOrderId to avoid double-counting fills from the same order
+        if (tx.posstatus === 'closed' && tx.netPnl !== null) {
+          const orderId = tx.krakenOrderId || tx.id;
+          if (!processedMarginOrderIds.has(orderId)) {
+            processedMarginOrderIds.add(orderId);
+
+            const pnl = tx.netPnl;
+            if (pnl > 0) {
+              marginGains += pnl;
+              totalGains += pnl;
+            } else {
+              marginLosses += Math.abs(pnl);
+              totalLosses += Math.abs(pnl);
+            }
+            taxableTransactions++;
+          }
+        }
+      } else if (tx.type === 'STAKING_REWARD') {
+        // For staking, the income is the value at time of receipt
+        const income = Math.abs(tx.amount) * (tx.price || 0);
+        stakingIncome += income;
+        totalGains += income;
+        taxableTransactions++;
+      } else if (tx.type === 'EARN_REWARD') {
+        // Kraken Earn rewards - taxable income
+        const income = Math.abs(tx.amount) * (tx.price || 0);
+        earnIncome += income;
+        totalGains += income;
+        taxableTransactions++;
+      } else if (tx.type === 'AIRDROP' || tx.type === 'FORK') {
+        const income = Math.abs(tx.amount) * (tx.price || 0);
+        airdropIncome += income;
+        totalGains += income;
+        taxableTransactions++;
+      }
+    }
+
+    // In Estonia, only gains are taxable
+    const taxableAmount = totalGains;
+    const estimatedTax = taxableAmount * taxRate;
+
+    const summary = {
+      taxYear: year,
+      taxRate,
+      totalProceeds,
+      totalCostBasis,
+      totalGains,
+      totalLosses,
+      taxableAmount,
+      estimatedTax,
+      tradingGains,
+      tradingLosses,
+      marginGains,
+      marginLosses,
+      stakingIncome,
+      earnIncome,
+      airdropIncome,
+      otherIncome: 0,
+      totalTransactions,
+      taxableTransactions,
+    };
+
+    return NextResponse.json(summary);
+  } catch (error) {
+    console.error('Get tax summary error:', error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to get tax summary' },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * GET tax breakdown by asset
+ */
+export async function POST(request: NextRequest) {
+  try {
+    const { year } = await request.json();
+    const taxYear = year || new Date().getFullYear();
+
+    const yearStart = new Date(taxYear, 0, 1);
+    const yearEnd = new Date(taxYear, 11, 31, 23, 59, 59);
+
+    // Get breakdown by asset
+    const byAsset = await prisma.transaction.groupBy({
+      by: ['asset'],
+      where: {
+        timestamp: { gte: yearStart, lte: yearEnd },
+        side: 'sell',
+      },
+      _sum: {
+        gain: true,
+        cost: true,
+      },
+      _count: true,
+    });
+
+    // Get breakdown by month
+    const transactions = await prisma.transaction.findMany({
+      where: {
+        timestamp: { gte: yearStart, lte: yearEnd },
+        side: 'sell',
+      },
+      select: {
+        timestamp: true,
+        gain: true,
+      },
+    });
+
+    const byMonth = new Array(12).fill(null).map((_, i) => ({
+      month: i + 1,
+      gains: 0,
+      losses: 0,
+    }));
+
+    for (const tx of transactions) {
+      const month = tx.timestamp.getMonth();
+      const gain = tx.gain || 0;
+      if (gain > 0) {
+        byMonth[month].gains += gain;
+      } else {
+        byMonth[month].losses += Math.abs(gain);
+      }
+    }
+
+    return NextResponse.json({
+      byAsset: byAsset.map(item => ({
+        asset: item.asset,
+        totalGain: item._sum.gain || 0,
+        totalCost: item._sum.cost || 0,
+        count: item._count,
+      })),
+      byMonth,
+    });
+  } catch (error) {
+    console.error('Get tax breakdown error:', error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to get tax breakdown' },
+      { status: 500 }
+    );
+  }
+}

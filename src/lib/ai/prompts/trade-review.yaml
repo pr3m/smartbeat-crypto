@@ -1,0 +1,66 @@
+# Trade Review Prompts
+# Used by LangChain for backtesting trade analysis
+
+single_trade_system_prompt: |
+  You are an expert trading coach analyzing paper trades to help a retail trader improve their strategy.
+  Be constructive, specific, and actionable in your feedback.
+  Focus on lessons that can be applied to future trades.
+
+single_trade_user_prompt: |
+  Analyze this completed trade to identify what worked and what didn't.
+
+  ## Trade Details
+  - **Trade Type**: {trade_type}
+  - **Entry Price**: €{entry_price}
+  - **Exit Price**: {exit_price}
+  - **P&L**: {pnl}
+  - **P&L %**: {pnl_percent}
+  - **Outcome**: {outcome}
+  - **Duration**: {duration}
+
+  ## Entry Conditions (snapshot when trade was opened)
+  ```json
+  {entry_conditions}
+  ```
+
+  Analyze this trade and respond with ONLY valid JSON:
+  {
+    "entryQuality": "excellent" | "good" | "fair" | "poor",
+    "whatWorked": ["signal 1", "signal 2"],
+    "whatDidntWork": ["red flag 1", "red flag 2"],
+    "lessonsLearned": ["lesson 1", "lesson 2"],
+    "suggestedImprovements": ["improvement 1", "improvement 2"],
+    "narrative": "Brief 2-3 sentence summary..."
+  }
+
+batch_analysis_system_prompt: |
+  You are a quantitative analyst reviewing a trader's performance over multiple trades.
+  Identify patterns in winning and losing trades.
+  Provide actionable recommendations for improvement.
+
+batch_analysis_user_prompt: |
+  Analyze this batch of trades to identify patterns in the trader's performance.
+
+  ## Summary
+  - **Total Trades**: {total_trades}
+  - **Wins**: {wins} ({win_rate}%)
+  - **Losses**: {losses} ({loss_rate}%)
+  - **Total P&L**: €{total_pnl}
+  - **Avg Win**: €{avg_win}
+  - **Avg Loss**: €{avg_loss}
+
+  ## Recent Trades
+  ```json
+  {trade_summaries}
+  ```
+
+  Analyze the patterns and respond with ONLY valid JSON:
+  {
+    "overallGrade": "A" | "B" | "C" | "D" | "F",
+    "winningPatterns": ["pattern 1", "pattern 2"],
+    "losingPatterns": ["pattern 1", "pattern 2"],
+    "riskManagement": "assessment...",
+    "entryTiming": "assessment...",
+    "topRecommendations": ["rec 1", "rec 2", "rec 3"],
+    "narrative": "2-3 sentence summary..."
+  }

@@ -1,0 +1,354 @@
+// Prisma schema for SmartBeatCrypto
+// SQLite database for local development (single user)
+// Can migrate to PostgreSQL/Firestore later if needed
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// All transactions from Kraken
+model Transaction {
+  id              String   @id @default(cuid())
+  krakenRefId     String?  @unique // Kraken's transaction reference
+  krakenOrderId   String?           // Related order ID
+
+  // Type: TRADE, DEPOSIT, WITHDRAWAL, TRANSFER, MARGIN_TRADE, MARGIN_SETTLEMENT,
+  //       ROLLOVER, STAKING_REWARD, STAKING_DEPOSIT, STAKING_WITHDRAWAL, AIRDROP, FORK, FEE, ADJUSTMENT
+  type            String
+
+  // Category: TAXABLE_INCOME, NON_TAXABLE, FEE, COST_BASIS_ADJUSTMENT
+  category        String
+
+  // Asset details
+  asset           String            // e.g., "XRP", "EUR", "BTC"
+  amount          Float             // Positive for buys/deposits, negative for sells/withdrawals
+
+  // Trade details (if applicable)
+  pair            String?           // e.g., "XRPEUR"
+  side            String?           // "buy" or "sell"
+  price           Float?            // Price per unit
+  cost            Float?            // Total cost in quote currency
+  fee             Float?            // Fee amount
+  feeAsset        String?           // Fee currency (usually EUR)
+
+  // Margin details (if applicable)
+  leverage        String?           // e.g., "3:1"
+  margin          Float?            // Margin amount
+  posstatus       String?           // Position status: "open", "closed"
+
+  // Position linking (for margin trades)
+  positionTxId    String?           // Kraken's position transaction ID (postxid)
+  openingTradeId  String?           // Reference to opening trade (for closing trades)
+  closingTradeId  String?           // Reference to closing trade (for opening trades)
+
+  // Close data (from Kraken - only on opening trades)
+  closePrice      Float?            // cprice - close price
+  closeCost       Float?            // ccost - close total cost
+  closeFee        Float?            // cfee - close fee
+  closeVolume     Float?            // cvol - close volume
+  closeMargin     Float?            // cmargin - close margin
+  netPnl          Float?            // net - Kraken's calculated P&L (authoritative!)
+
+  // Calculated tax fields (fallback if Kraken data unavailable)
+  costBasis       Float?            // Cost basis for this transaction
+  proceeds        Float?            // Proceeds from sale
+  gain            Float?            // Calculated gain/loss
+
+  // Metadata
+  timestamp       DateTime
+  syncedAt        DateTime          @default(now())
+  notes           String?
+
+  // Relations
+  taxEvents       TaxEvent[]
+
+  @@index([timestamp])
+  @@index([asset])
+  @@index([type])
+}
+
+// FIFO tracking - acquisition lots
+model AssetHolding {
+  id              String   @id @default(cuid())
+  asset           String            // e.g., "XRP"
+
+  // Acquisition details
+  amount          Float             // Original amount acquired
+  acquisitionDate DateTime
+  acquisitionCost Float             // Total cost in EUR
+  costPerUnit     Float             // Cost per unit in EUR
+
+  // FIFO tracking
+  remainingAmount Float             // Amount not yet disposed
+  isFullyDisposed Boolean           @default(false)
+
+  // Reference
+  transactionId   String?           // Source transaction
+
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([asset, isFullyDisposed])
+  @@index([acquisitionDate])
+}
+
+// Tax events for reporting
+model TaxEvent {
+  id              String   @id @default(cuid())
+  transactionId   String
+  transaction     Transaction       @relation(fields: [transactionId], references: [id])
+
+  // Tax year
+  taxYear         Int
+
+  // Cost basis details
+  acquisitionDate DateTime
+  acquisitionCost Float             // Original cost
+
+  // Disposal details
+  disposalDate    DateTime
+  disposalProceeds Float            // Sale proceeds
+
+  // Gain calculation
+  gain            Float             // Can be negative (loss)
+  taxableAmount   Float             // In Estonia: gain if positive, 0 if negative
+  taxRate         Float             @default(0.24) // 24% for Estonia from 2026
+  taxDue          Float             // taxableAmount * taxRate
+
+  // Method used: FIFO or WEIGHTED_AVERAGE
+  costBasisMethod String            @default("FIFO")
+
+  createdAt       DateTime          @default(now())
+
+  @@index([taxYear])
+  @@index([transactionId])
+}
+
+// Open margin positions
+model Position {
+  id               String   @id @default(cuid())
+  krakenPositionId String?  @unique
+
+  pair            String            // e.g., "XRPEUR"
+  side            String            // "long" or "short"
+  volume          Float             // Position size
+  entryPrice      Float             // Average entry price
+  currentPrice    Float?            // Last known price
+
+  // Margin details
+  leverage        String            // e.g., "3:1"
+  margin          Float             // Margin used
+
+  // P&L tracking
+  unrealizedPnl   Float?
+
+  // Timestamps
+  openedAt        DateTime
+  closedAt        DateTime?
+
+  isOpen          Boolean           @default(true)
+
+  updatedAt       DateTime          @updatedAt
+
+  @@index([isOpen])
+  @@index([pair])
+}
+
+// Generated tax reports
+model TaxReport {
+  id              String   @id @default(cuid())
+
+  taxYear         Int
+
+  // Summary
+  totalProceeds   Float
+  totalCostBasis  Float
+  totalGains      Float             // Sum of positive gains only
+  totalLosses     Float             // Sum of losses (not deductible in Estonia)
+  netGain         Float             // totalGains (losses not counted for Estonia)
+
+  taxableAmount   Float             // For Estonia: same as totalGains
+  taxRate         Float             @default(0.24)
+  estimatedTax    Float
+
+  // Report data
+  reportData      String            // JSON with full report details
+
+  // Export files
+  table83Export   String?           // Table 8.3 format data
+  csvExport       String?           // CSV export path
+
+  generatedAt     DateTime          @default(now())
+
+  @@unique([taxYear])
+}
+
+// App settings
+model Settings {
+  id              String   @id @default("default")
+
+  // Tax settings
+  defaultTaxYear  Int               @default(2024)
+  costBasisMethod String            @default("FIFO") // FIFO or WEIGHTED_AVERAGE
+  taxRate         Float             @default(0.24)
+  country         String            @default("EE")   // Estonia
+
+  // Trading settings
+  defaultPair     String            @default("XRPEUR")
+  maxPositionSize Float             @default(2000)   // EUR
+  stopLossPercent Float             @default(8)      // 8%
+  maxDailyLoss    Float             @default(150)    // EUR
+  maxHoldHours    Int               @default(72)
+
+  // Sync settings
+  lastSyncAt      DateTime?
+  autoSyncEnabled Boolean           @default(true)
+  syncIntervalMin Int               @default(60)     // minutes
+
+  updatedAt       DateTime          @updatedAt
+}
+
+// Sync log for tracking Kraken data imports
+model SyncLog {
+  id              String   @id @default(cuid())
+
+  syncType        String            // "trades", "ledgers", "positions"
+  status          String            // "started", "completed", "failed"
+
+  recordsFound    Int               @default(0)
+  recordsImported Int               @default(0)
+  recordsSkipped  Int               @default(0)
+
+  startedAt       DateTime          @default(now())
+  completedAt     DateTime?
+
+  error           String?
+
+  @@index([syncType, startedAt])
+}
+
+// ============================================
+// Simulated Trading Models
+// ============================================
+
+// Simulated orders for test mode trading
+model SimulatedOrder {
+  id                String   @id @default(cuid())
+  pair              String
+  type              String   // "buy" | "sell"
+  orderType         String   // "market", "limit", etc.
+  price             Float?
+  volume            Float
+  leverage          Int      @default(10)
+  status            String   // "open", "filled", "cancelled"
+  filledVolume      Float    @default(0)
+  marketPriceAtOrder Float
+  entryConditions   String?  // JSON snapshot of indicators/recommendation
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  fills             SimulatedFill[]
+  position          SimulatedPosition? @relation(fields: [positionId], references: [id])
+  positionId        String?
+  @@index([status, createdAt])
+}
+
+// Fill records for simulated orders
+model SimulatedFill {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     SimulatedOrder @relation(fields: [orderId], references: [id])
+  price     Float
+  volume    Float
+  fee       Float
+  filledAt  DateTime @default(now())
+  @@index([orderId])
+}
+
+// Simulated positions for paper trading
+model SimulatedPosition {
+  id             String   @id @default(cuid())
+  pair           String
+  side           String   // "long" | "short"
+  volume         Float
+  avgEntryPrice  Float
+  leverage       Int      @default(10)
+  totalCost      Float
+  totalFees      Float
+  isOpen         Boolean  @default(true)
+  realizedPnl    Float?
+  entryConditions String? // JSON snapshot
+  openedAt       DateTime @default(now())
+  closedAt       DateTime?
+  orders         SimulatedOrder[]
+  @@index([isOpen, pair])
+}
+
+// Simulated balance for paper trading
+model SimulatedBalance {
+  id              String @id @default("default")
+
+  // EUR cash balance
+  eurBalance      Float  @default(2000)
+
+  // Crypto holdings (portfolio value as collateral)
+  cryptoHoldings  String @default("{}") // JSON: { "XRP": { amount, avgCost } }
+  cryptoValue     Float  @default(0)    // Current EUR value of holdings
+
+  // Calculated fields (equity = eurBalance + cryptoValue)
+  equity          Float  @default(2000)
+  marginUsed      Float  @default(0)
+  freeMargin      Float  @default(20000) // equity * 10 (leverage) - marginUsed
+  marginLevel     Float?                 // (equity / marginUsed) * 100
+
+  // Statistics
+  totalRealizedPnl Float @default(0)
+  totalFeesPaid   Float  @default(0)
+
+  updatedAt       DateTime @updatedAt
+}
+
+// AI analysis of trades for backtesting
+model TradeAnalysis {
+  id              String   @id @default(cuid())
+  positionId      String?
+  tradeType       String
+  entryPrice      Float
+  exitPrice       Float?
+  realizedPnl     Float?
+  pnlPercent      Float?
+  outcome         String?  // "win", "loss", "breakeven"
+  entrySnapshot   String   // JSON: full MarketSnapshot
+  aiAnalysis      String?
+  successFactors  String?  // JSON
+  failureFactors  String?  // JSON
+  createdAt       DateTime @default(now())
+  @@index([outcome, createdAt])
+}
+
+// AI market analysis history for Reports tab
+model AIMarketAnalysis {
+  id              String   @id @default(cuid())
+  pair            String   @default("XRPEUR")
+  model           String   // e.g., "gpt-4o"
+  action          String   // LONG, SHORT, WAIT
+  conviction      String?  // high, medium, low
+  confidence      Float?   // 0-100
+  entryLow        Float?
+  entryHigh       Float?
+  stopLoss        Float?
+  targets         String?  // JSON array of {level, price, probability}
+  riskReward      Float?
+  analysis        String   // Full analysis text
+  inputData       String   // Market snapshot JSON
+  tokens          String?  // JSON {input, output, total}
+  priceAtAnalysis Float?
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([action])
+}

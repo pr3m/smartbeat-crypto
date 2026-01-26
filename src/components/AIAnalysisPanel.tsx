@@ -1,0 +1,479 @@
+'use client';
+
+import { useState, useMemo } from 'react';
+import type { AIAnalysisResponse } from '@/lib/ai/types';
+
+interface AIAnalysisPanelProps {
+  analysis: AIAnalysisResponse;
+  onClose: () => void;
+  onCopyInput: () => void;
+  onCopyAnalysis: () => void;
+  /** When true, renders in a more compact style without outer card wrapper */
+  embedded?: boolean;
+}
+
+interface ParsedSection {
+  title: string;
+  content: string;
+  type: 'assessment' | 'recommendation' | 'trade' | 'risk' | 'timeframe' | 'other';
+}
+
+/**
+ * Parse the AI analysis text into structured sections
+ */
+function parseAnalysisSections(text: string): ParsedSection[] {
+  const sections: ParsedSection[] = [];
+
+  // Remove JSON code blocks (```json ... ```) from the text for display
+  let textWithoutJson = text.replace(/```json[\s\S]*?```/g, '').trim();
+
+  // Remove trailing raw JSON object only if it's clearly at the end and starts on its own line
+  // Be careful not to remove too much - only match if it looks like a standalone JSON object
+  const trailingJsonMatch = textWithoutJson.match(/\n\s*(\{[^{}]*"action"\s*:\s*"[^"]+?"[^{}]*(\{[^{}]*\}[^{}]*)*\})\s*$/);
+  if (trailingJsonMatch) {
+    textWithoutJson = textWithoutJson.slice(0, trailingJsonMatch.index).trim();
+  }
+
+  // If still empty after removing JSON, keep original (minus code blocks only)
+  if (!textWithoutJson) {
+    textWithoutJson = text.replace(/```json[\s\S]*?```/g, '').trim();
+  }
+
+  // Try multiple parsing strategies
+
+  // Strategy 1: Look for numbered sections like "1)" or "1."
+  const numberedPattern = /(?:^|\n)\s*(\d+)\s*[\.\)]\s*\*?\*?([^\n\*]+)\*?\*?\s*\n/g;
+  let matches = [...textWithoutJson.matchAll(numberedPattern)];
+
+  // Strategy 2: Look for markdown headers ## or ###
+  if (matches.length === 0) {
+    const headerPattern = /(?:^|\n)\s*(#{1,3})\s*([^\n]+)\n/g;
+    matches = [...textWithoutJson.matchAll(headerPattern)];
+  }
+
+  // Strategy 3: Look for bold headers like **Header**
+  if (matches.length === 0) {
+    const boldPattern = /(?:^|\n)\s*\*\*([^\*\n]+)\*\*\s*:?\s*\n/g;
+    matches = [...textWithoutJson.matchAll(boldPattern)];
+  }
+
+  if (matches.length > 0) {
+    // Extract sections based on found headers
+    for (let i = 0; i < matches.length; i++) {
+      const match = matches[i];
+      const headerEnd = match.index! + match[0].length;
+      const nextStart = i < matches.length - 1 ? matches[i + 1].index! : textWithoutJson.length;
+
+      const title = match[2]?.trim() || match[1]?.trim() || 'Section';
+      const content = textWithoutJson.slice(headerEnd, nextStart).trim();
+
+      if (content) {
+        // Determine section type from title
+        const titleLower = title.toLowerCase();
+        let type: ParsedSection['type'] = 'other';
+
+        if (titleLower.includes('assessment') || titleLower.includes('overview') || titleLower.includes('market')) {
+          type = 'assessment';
+        } else if (titleLower.includes('recommendation') || titleLower.includes('signal') || titleLower.includes('action')) {
+          type = 'recommendation';
+        } else if (titleLower.includes('trade') || titleLower.includes('plan') || titleLower.includes('setup') || titleLower.includes('entry')) {
+          type = 'trade';
+        } else if (titleLower.includes('risk') || titleLower.includes('invalid') || titleLower.includes('warning')) {
+          type = 'risk';
+        } else if (titleLower.includes('time') || titleLower.includes('horizon') || titleLower.includes('holding')) {
+          type = 'timeframe';
+        }
+
+        sections.push({ title, content, type });
+      }
+    }
+  }
+
+  // If still no sections found, treat whole text as one section
+  if (sections.length === 0 && textWithoutJson.trim()) {
+    sections.push({
+      title: 'Analysis',
+      content: textWithoutJson,
+      type: 'other',
+    });
+  }
+
+  return sections;
+}
+
+/**
+ * Format content with better styling - returns JSX
+ */
+function FormattedContent({ content }: { content: string }) {
+  // Process the content into formatted HTML
+  const processedHtml = content
+    // Bold text
+    .replace(/\*\*(.+?)\*\*/g, '<strong class="text-primary font-semibold">$1</strong>')
+    // Inline code
+    .replace(/`([^`]+)`/g, '<code class="bg-tertiary px-1.5 py-0.5 rounded text-xs font-mono text-purple-300">$1</code>')
+    // Price patterns
+    .replace(/€(\d+\.\d{3,})/g, '<span class="font-mono text-blue-400 font-medium">€$1</span>')
+    .replace(/(\d+\.\d{4,})(?!\d)/g, '<span class="font-mono text-blue-400">$1</span>')
+    // Percentages
+    .replace(/(\d+(?:\.\d+)?%)/g, '<span class="font-mono text-yellow-400">$1</span>')
+    // R:R patterns
+    .replace(/R:R\s*[~≈]?\s*(\d+(?:\.\d+)?)/gi, '<span class="font-mono text-green-400 font-medium">R:R $1</span>')
+    // Convert bullet points
+    .replace(/^[•\-\*·]\s*/gm, '• ')
+    // Line breaks
+    .replace(/\n/g, '<br/>');
+
+  return (
+    <div
+      className="text-sm text-secondary leading-relaxed"
+      dangerouslySetInnerHTML={{ __html: processedHtml }}
+    />
+  );
+}
+
+/**
+ * Get section icon and color
+ */
+function getSectionStyle(type: ParsedSection['type']) {
+  switch (type) {
+    case 'assessment':
+      return { icon: '📊', borderColor: 'border-blue-500/30', bgColor: 'bg-blue-500/5', headerBg: 'bg-blue-500/10' };
+    case 'recommendation':
+      return { icon: '🎯', borderColor: 'border-purple-500/30', bgColor: 'bg-purple-500/5', headerBg: 'bg-purple-500/10' };
+    case 'trade':
+      return { icon: '📈', borderColor: 'border-green-500/30', bgColor: 'bg-green-500/5', headerBg: 'bg-green-500/10' };
+    case 'risk':
+      return { icon: '⚠️', borderColor: 'border-red-500/30', bgColor: 'bg-red-500/5', headerBg: 'bg-red-500/10' };
+    case 'timeframe':
+      return { icon: '⏱️', borderColor: 'border-yellow-500/30', bgColor: 'bg-yellow-500/5', headerBg: 'bg-yellow-500/10' };
+    default:
+      return { icon: '📝', borderColor: 'border-gray-500/30', bgColor: 'bg-gray-500/5', headerBg: 'bg-gray-500/10' };
+  }
+}
+
+export function AIAnalysisPanel({ analysis, onClose, onCopyInput, onCopyAnalysis, embedded = false }: AIAnalysisPanelProps) {
+  const [showDebug, setShowDebug] = useState(false);
+
+  // Safely get analysis text - handle non-string responses from GPT-5.2
+  const analysisText = (() => {
+    const raw = analysis?.analysis;
+    if (!raw) return '';
+    if (typeof raw === 'string') return raw;
+    if (Array.isArray(raw)) {
+      // GPT-5 content blocks format
+      return raw.map((block: unknown) => {
+        if (typeof block === 'string') return block;
+        if (block && typeof block === 'object' && 'text' in block) return (block as { text: string }).text;
+        return '';
+      }).join('');
+    }
+    // Object or other - stringify it
+    return JSON.stringify(raw, null, 2);
+  })();
+
+  // Parse sections from analysis text
+  const sections = useMemo(() => parseAnalysisSections(analysisText), [analysisText]);
+
+  // Extract trade data
+  const tradeData = analysis?.tradeData;
+
+  // Check if we have any content to show
+  const hasContent = sections.length > 0 || tradeData;
+
+  return (
+    <div className={embedded ? '' : 'card border border-purple-500/30 bg-gradient-to-br from-purple-900/20 to-blue-900/20 overflow-hidden'}>
+      {/* Header - hide in embedded mode */}
+      {!embedded && (
+        <div className="px-4 py-3 border-b border-purple-500/20 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
+            <h3 className="text-sm font-semibold text-purple-400">AI Trade Analysis</h3>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-tertiary hover:text-secondary transition-colors p-1 hover:bg-tertiary rounded"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {/* Meta info bar */}
+      <div className="px-4 py-2 bg-primary/30 flex items-center justify-between flex-wrap gap-2 text-xs border-b border-purple-500/10">
+        <div className="flex items-center gap-3 text-tertiary">
+          <span className="px-2 py-0.5 bg-purple-500/20 rounded text-purple-400 font-medium">{analysis.model}</span>
+          <span>{new Date(analysis.timestamp).toLocaleTimeString()}</span>
+          <span className="flex items-center gap-1">
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+            </svg>
+            {(analysis.tokens?.total ?? 0).toLocaleString()} tokens
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={onCopyInput}
+            className="p-1.5 rounded hover:bg-purple-500/20 text-tertiary hover:text-purple-400 transition-colors"
+            title="Copy input data"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+            </svg>
+          </button>
+          <button
+            onClick={onCopyAnalysis}
+            className="p-1.5 rounded hover:bg-purple-500/20 text-tertiary hover:text-purple-400 transition-colors"
+            title="Copy analysis"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* Trade Signal Summary (from tradeData if available) */}
+      {tradeData && tradeData.action && (
+        <div className="px-4 py-3 border-b border-purple-500/20">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {/* Signal */}
+            <div className={`p-3 rounded-lg text-center ${
+              tradeData.action === 'LONG' ? 'bg-green-500/10 border border-green-500/30' :
+              tradeData.action === 'SHORT' ? 'bg-red-500/10 border border-red-500/30' :
+              'bg-yellow-500/10 border border-yellow-500/30'
+            }`}>
+              <div className="text-[10px] text-tertiary uppercase tracking-wider mb-0.5">Signal</div>
+              <div className={`text-xl font-bold ${
+                tradeData.action === 'LONG' ? 'text-green-500' :
+                tradeData.action === 'SHORT' ? 'text-red-500' :
+                'text-yellow-500'
+              }`}>{tradeData.action}</div>
+              {tradeData.conviction && (
+                <div className="text-[10px] text-secondary capitalize">{tradeData.conviction} conviction</div>
+              )}
+            </div>
+
+            {/* Confidence */}
+            {tradeData.confidence != null && (
+              <div className="p-3 rounded-lg bg-purple-500/10 border border-purple-500/20 text-center">
+                <div className="text-[10px] text-tertiary uppercase tracking-wider mb-0.5">Confidence</div>
+                <div className="text-xl font-bold text-purple-400">{tradeData.confidence}%</div>
+                <div className="w-full h-1 bg-primary rounded-full mt-1">
+                  <div
+                    className="h-full bg-purple-500 rounded-full transition-all"
+                    style={{ width: `${tradeData.confidence}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Entry Zone */}
+            {tradeData.entry && tradeData.entry.low != null && tradeData.entry.high != null && (
+              <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-center">
+                <div className="text-[10px] text-tertiary uppercase tracking-wider mb-0.5">Entry Zone</div>
+                <div className="text-sm font-mono text-blue-400">
+                  €{tradeData.entry.low.toFixed(4)}
+                </div>
+                <div className="text-sm font-mono text-blue-400">
+                  €{tradeData.entry.high.toFixed(4)}
+                </div>
+              </div>
+            )}
+
+            {/* Stop Loss */}
+            {tradeData.stopLoss != null && (
+              <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-center">
+                <div className="text-[10px] text-tertiary uppercase tracking-wider mb-0.5">Stop Loss</div>
+                <div className="text-lg font-mono font-bold text-red-400">
+                  €{tradeData.stopLoss.toFixed(4)}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Targets Row */}
+          {tradeData.targets && tradeData.targets.length > 0 && (
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              {tradeData.targets
+                .filter((target: { price?: number | string | null }) => target?.price != null)
+                .slice(0, 3)
+                .map((target: { level?: number; price?: number | string | null; probability?: number | null }, i: number) => {
+                  const price = typeof target.price === 'string' ? parseFloat(target.price) : Number(target.price);
+                  const prob = target.probability != null ? Number(target.probability) : null;
+                  if (isNaN(price)) return null;
+                  return (
+                    <div key={i} className="p-2 rounded bg-green-500/10 border border-green-500/20 text-center">
+                      <div className="text-[10px] text-tertiary">TP{target.level || i + 1}</div>
+                      <div className="text-sm font-mono text-green-400">€{price.toFixed(4)}</div>
+                      {prob != null && !isNaN(prob) && (
+                        <div className="text-[10px] text-green-400/70">{(prob * 100).toFixed(0)}%</div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+
+          {/* Key Levels */}
+          {tradeData.keyLevels && (
+            <div className="mt-3 flex gap-4 text-xs">
+              {tradeData.keyLevels.support && tradeData.keyLevels.support.filter((p: unknown) => p != null).length > 0 && (
+                <div className="flex-1">
+                  <span className="text-tertiary">Support: </span>
+                  <span className="text-green-400 font-mono">
+                    {tradeData.keyLevels.support
+                      .filter((p: unknown) => p != null)
+                      .slice(0, 3)
+                      .map((p: unknown) => {
+                        // Handle object format {price: number} or direct number/string
+                        let num: number;
+                        if (typeof p === 'object' && p !== null && 'price' in p) {
+                          num = Number((p as { price: unknown }).price);
+                        } else if (typeof p === 'string') {
+                          num = parseFloat(p);
+                        } else {
+                          num = Number(p);
+                        }
+                        return isNaN(num) ? JSON.stringify(p) : `€${num.toFixed(4)}`;
+                      })
+                      .join(', ')}
+                  </span>
+                </div>
+              )}
+              {tradeData.keyLevels.resistance && tradeData.keyLevels.resistance.filter((p: unknown) => p != null).length > 0 && (
+                <div className="flex-1">
+                  <span className="text-tertiary">Resistance: </span>
+                  <span className="text-red-400 font-mono">
+                    {tradeData.keyLevels.resistance
+                      .filter((p: unknown) => p != null)
+                      .slice(0, 3)
+                      .map((p: unknown) => {
+                        // Handle object format {price: number} or direct number/string
+                        let num: number;
+                        if (typeof p === 'object' && p !== null && 'price' in p) {
+                          num = Number((p as { price: unknown }).price);
+                        } else if (typeof p === 'string') {
+                          num = parseFloat(p);
+                        } else {
+                          num = Number(p);
+                        }
+                        return isNaN(num) ? JSON.stringify(p) : `€${num.toFixed(4)}`;
+                      })
+                      .join(', ')}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Analysis Sections */}
+      <div className="p-4 space-y-3 max-h-[60vh] overflow-y-auto">
+        {sections.length > 0 ? (
+          // Render parsed sections
+          sections.map((section, i) => {
+            const style = getSectionStyle(section.type);
+            return (
+              <div
+                key={i}
+                className={`rounded-lg border ${style.borderColor} ${style.bgColor} overflow-hidden`}
+              >
+                <div className={`px-3 py-2 ${style.headerBg} border-b border-primary/20 flex items-center gap-2`}>
+                  <span>{style.icon}</span>
+                  <span className="text-sm font-semibold text-primary">{section.title}</span>
+                </div>
+                <div className="px-3 py-3">
+                  <FormattedContent content={section.content} />
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          // Fallback: show raw analysis content
+          (() => {
+            // Try to get content, being careful not to strip too much
+            let content = analysisText
+              .replace(/```json[\s\S]*?```/g, '') // Remove code blocks
+              .replace(/^\s*\{[\s\S]*\}\s*$/, '') // Remove if entire response is just JSON
+              .trim();
+
+            // If we stripped everything but have tradeData, show a generated summary
+            if (!content && tradeData?.action) {
+              content = `**Recommendation: ${tradeData.action}**\n\n`;
+              content += `Conviction: ${tradeData.conviction || 'medium'}\n`;
+              if (tradeData.confidence) content += `Confidence: ${tradeData.confidence}%\n`;
+              if (tradeData.entry) content += `\nEntry zone: €${tradeData.entry.low?.toFixed(4)} - €${tradeData.entry.high?.toFixed(4)}`;
+              if (tradeData.stopLoss) content += `\nStop loss: €${tradeData.stopLoss.toFixed(4)}`;
+              if (tradeData.targets?.length) {
+                content += '\n\nTargets:\n';
+                tradeData.targets.forEach((t: { level?: number; price?: number | null; probability?: number | null }, i: number) => {
+                  if (t.price) content += `• TP${t.level || i + 1}: €${Number(t.price).toFixed(4)}\n`;
+                });
+              }
+              content += '\n\n*See structured data above for full details. Expand Debug section to see raw AI response.*';
+            }
+
+            // Last resort: show the raw analysis (including JSON if that's all there is)
+            if (!content) {
+              content = analysisText || 'No analysis content available.';
+            }
+
+            return (
+              <div className="rounded-lg border border-gray-500/30 bg-gray-500/5 overflow-hidden">
+                <div className="px-3 py-2 bg-gray-500/10 border-b border-primary/20 flex items-center gap-2">
+                  <span>📝</span>
+                  <span className="text-sm font-semibold text-primary">Analysis</span>
+                </div>
+                <div className="px-3 py-3">
+                  <FormattedContent content={content} />
+                </div>
+              </div>
+            );
+          })()
+        )}
+      </div>
+
+      {/* Debug Section */}
+      <div className="border-t border-purple-500/20">
+        <button
+          onClick={() => setShowDebug(!showDebug)}
+          className="w-full px-4 py-2 text-xs text-tertiary hover:text-purple-400 transition-colors flex items-center justify-center gap-1 hover:bg-primary/20"
+        >
+          <span>{showDebug ? '▼' : '▶'}</span>
+          <span>Debug: Raw Data</span>
+        </button>
+        {showDebug && (
+          <div className="px-4 pb-4 space-y-3">
+            <div>
+              <div className="text-xs text-tertiary mb-1">Raw Analysis (length: {analysisText.length}):</div>
+              <div className="bg-primary rounded-lg p-3 overflow-auto max-h-40">
+                <pre className="text-xs font-mono text-tertiary whitespace-pre-wrap">
+                  {analysisText || '(empty)'}
+                </pre>
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-tertiary mb-1">Input Data:</div>
+              <div className="bg-primary rounded-lg p-3 overflow-auto max-h-40">
+                <pre className="text-xs font-mono text-tertiary whitespace-pre-wrap">
+                  {analysis?.inputData || '(empty)'}
+                </pre>
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-tertiary mb-1">Parsed Trade Data:</div>
+              <div className="bg-primary rounded-lg p-3 overflow-auto max-h-40">
+                <pre className="text-xs font-mono text-tertiary whitespace-pre-wrap">
+                  {tradeData ? JSON.stringify(tradeData, null, 2) : '(null)'}
+                </pre>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
