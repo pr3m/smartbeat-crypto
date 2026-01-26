@@ -3,14 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p ${PORT:-4000}",
+    "dev": "cross-env PORT=4000 next dev",
     "build": "next build",
-    "start": "next start -p ${PORT:-4000}",
+    "start": "cross-env PORT=4000 next start",
     "lint": "next lint",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
-    "db:migrate": "prisma migrate dev"
+    "db:migrate": "prisma migrate dev",
+    "db:seed": "tsx prisma/seed.ts"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
@@ -40,6 +44,7 @@
     "@types/node": "^22.10.5",
     "@types/react": "^19.0.3",
     "@types/react-dom": "^19.0.2",
+    "cross-env": "^7.0.3",
     "eslint": "^9.17.0",
     "eslint-config-next": "15.1.4",
     "postcss": "^8.4.49",
