@@ -6,6 +6,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { createDbErrorResponse } from '@/lib/db-error';
 
 export async function GET(request: NextRequest) {
   try {
@@ -59,9 +60,9 @@ export async function GET(request: NextRequest) {
       offset,
     });
   } catch (error) {
-    console.error('Error fetching AI reports:', error);
+    console.error('[AI Reports API] Error fetching AI reports:', error);
     return NextResponse.json(
-      { success: false, error: 'Failed to fetch reports' },
+      createDbErrorResponse(error, 'Fetching AI reports'),
       { status: 500 }
     );
   }
@@ -85,9 +86,9 @@ export async function DELETE(request: NextRequest) {
 
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Error deleting AI report:', error);
+    console.error('[AI Reports API] Error deleting AI report:', error);
     return NextResponse.json(
-      { success: false, error: 'Failed to delete report' },
+      createDbErrorResponse(error, 'Deleting AI report'),
       { status: 500 }
     );
   }

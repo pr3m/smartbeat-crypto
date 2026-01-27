@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useToast } from '@/components/Toast';
 import { AIAnalysisPanel } from '@/components/AIAnalysisPanel';
+import { InlineChat } from '@/components/chat';
 import type { AIAnalysisResponse, AITradeData } from '@/lib/ai/types';
 
 interface AIReport {
@@ -130,6 +131,42 @@ export function ReportsTab({ onReportsCountChange }: ReportsTabProps) {
 
   const totalPages = Math.ceil(total / LIMIT);
   const currentPage = Math.floor(offset / LIMIT) + 1;
+
+  // Build context message for inline chat based on a report
+  const buildReportContext = (report: AIReport): string => {
+    let context = `AI Analysis Report Context:
+- Pair: ${report.pair}
+- Action: ${report.action}
+- Model: ${report.model}
+- Analyzed at: ${new Date(report.createdAt).toLocaleString()}
+- Price at Analysis: €${report.priceAtAnalysis?.toFixed(4) || 'N/A'}`;
+
+    if (report.conviction) {
+      context += `\n- Conviction: ${report.conviction}`;
+    }
+    if (report.confidence !== null) {
+      context += `\n- Confidence: ${report.confidence}%`;
+    }
+    if (report.entryLow && report.entryHigh) {
+      context += `\n- Entry Zone: €${report.entryLow.toFixed(4)} - €${report.entryHigh.toFixed(4)}`;
+    }
+    if (report.stopLoss) {
+      context += `\n- Stop Loss: €${report.stopLoss.toFixed(4)}`;
+    }
+    if (report.targets && report.targets.length > 0) {
+      const targetsStr = report.targets
+        .map((t, i) => `T${i + 1}: €${(t.price || t.level)?.toFixed(4)}`)
+        .join(', ');
+      context += `\n- Targets: ${targetsStr}`;
+    }
+    if (report.riskReward) {
+      context += `\n- Risk/Reward: ${report.riskReward.toFixed(2)}`;
+    }
+
+    context += `\n\nAnalysis Summary:\n${report.analysis}`;
+
+    return context;
+  };
 
   // Convert report to AIAnalysisResponse format for the panel
   const reportToAnalysisResponse = (report: AIReport): AIAnalysisResponse => {
@@ -313,6 +350,16 @@ export function ReportsTab({ onReportsCountChange }: ReportsTabProps) {
                       }}
                       embedded
                     />
+                    {/* Inline Chat for Follow-up Questions */}
+                    <div className="px-4 pb-4">
+                      <InlineChat
+                        contextMessage={buildReportContext(report)}
+                        context="trading"
+                        title="Ask About This Analysis"
+                        placeholder="Ask a follow-up question about this report..."
+                        maxHeight="200px"
+                      />
+                    </div>
                   </div>
                 )}
               </div>

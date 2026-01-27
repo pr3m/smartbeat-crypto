@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { createDbErrorResponse } from '@/lib/db-error';
 
 const DEFAULT_BALANCE = {
   eurBalance: 2000,
@@ -65,9 +66,8 @@ export async function GET() {
     });
   } catch (error) {
     console.error('[Balance API] Error fetching simulated balance:', error);
-    console.error('[Balance API] Error stack:', error instanceof Error ? error.stack : 'No stack');
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to fetch balance' },
+      createDbErrorResponse(error, 'Fetching simulated balance'),
       { status: 500 }
     );
   }
@@ -178,9 +178,9 @@ export async function POST(request: Request) {
       balance,
     });
   } catch (error) {
-    console.error('Error updating simulated balance:', error);
+    console.error('[Balance API] Error updating simulated balance:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to update balance' },
+      createDbErrorResponse(error, 'Updating simulated balance'),
       { status: 500 }
     );
   }

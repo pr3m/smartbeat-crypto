@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useToast } from './Toast';
+import { InlineChat } from './chat';
 import type { PositionEvaluation, PositionHealthMetrics, MarketSnapshot } from '@/lib/ai/types';
 
 interface PositionAnalysisModalProps {
@@ -79,6 +80,53 @@ export function PositionAnalysisModal({
       setLoading(false);
     }
   };
+
+  // Build context message for inline chat
+  const chatContextMessage = useMemo(() => {
+    let context = `Current Position Analysis Context:
+- Pair: ${positionData.pair}
+- Side: ${positionData.side.toUpperCase()}
+- Leverage: ${positionData.leverage}x
+- Entry Price: €${positionData.entryPrice.toFixed(4)}
+- Current Price: €${positionData.currentPrice.toFixed(4)}
+- Liquidation Price: ${positionData.liquidationPrice <= 0 ? 'Very Safe (no liquidation)' : `€${positionData.liquidationPrice.toFixed(4)}`}
+- Volume: ${positionData.volume.toFixed(4)}
+- Unrealized P&L: €${positionData.unrealizedPnl.toFixed(2)} (${positionData.pnlPercent >= 0 ? '+' : ''}${positionData.pnlPercent.toFixed(2)}%)
+- Margin Used: €${positionData.marginUsed.toFixed(2)}
+- Hours Open: ${positionData.hoursOpen.toFixed(1)}
+
+Health Metrics:
+- Risk Level: ${health.riskLevel}
+- Liquidation Distance: ${health.liquidationDistance.toFixed(2)}% (${health.liquidationStatus})
+- Margin Level: ${health.marginLevel.toFixed(2)}% (${health.marginStatus})
+- Time Status: ${health.timeStatus || 'normal'}
+- Risk Factors: ${health.riskFactors.length > 0 ? health.riskFactors.join(', ') : 'None'}`;
+
+    if (evaluation) {
+      context += `
+
+AI Evaluation Result:
+- Recommendation: ${evaluation.recommendation}
+- Conviction: ${evaluation.conviction}
+- Confidence: ${evaluation.confidence}%
+- Market Alignment: ${evaluation.marketAlignment}
+- Risk Level: ${evaluation.riskAssessment.level}
+- Risk Factors: ${evaluation.riskAssessment.factors.join(', ') || 'None'}
+- Rationale: ${evaluation.rationale}`;
+
+      if (evaluation.suggestedStopLoss) {
+        context += `\n- Suggested Stop Loss: €${evaluation.suggestedStopLoss.toFixed(4)}`;
+      }
+      if (evaluation.suggestedTakeProfit) {
+        context += `\n- Suggested Take Profit: €${evaluation.suggestedTakeProfit.toFixed(4)}`;
+      }
+      if (evaluation.actionItems.length > 0) {
+        context += `\n- Action Items: ${evaluation.actionItems.join('; ')}`;
+      }
+    }
+
+    return context;
+  }, [positionData, health, evaluation]);
 
   if (!isOpen) return null;
 
@@ -289,7 +337,27 @@ export function PositionAnalysisModal({
               >
                 Run Analysis Again
               </button>
+
+              {/* Inline Chat for Follow-up Questions */}
+              <InlineChat
+                contextMessage={chatContextMessage}
+                context="trading"
+                title="Ask Follow-up Questions"
+                placeholder="Ask about this position..."
+                maxHeight="200px"
+              />
             </div>
+          )}
+
+          {/* Show inline chat even without evaluation for general position questions */}
+          {!evaluation && !loading && (
+            <InlineChat
+              contextMessage={chatContextMessage}
+              context="trading"
+              title="Ask About This Position"
+              placeholder="Ask a question about this position..."
+              maxHeight="200px"
+            />
           )}
         </div>
       </div>

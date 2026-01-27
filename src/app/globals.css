@@ -335,6 +335,24 @@ body {
   }
 }
 
+@keyframes slide-in-left {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes slide-out-left {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+
 @keyframes slide-in-up {
   from {
     transform: translateY(100%);
@@ -379,6 +397,14 @@ body {
   animation: slide-out-right 0.3s ease-in;
 }
 
+.animate-slide-in-left {
+  animation: slide-in-left 0.3s ease-out;
+}
+
+.animate-slide-out-left {
+  animation: slide-out-left 0.3s ease-in;
+}
+
 .animate-slide-in-up {
   animation: slide-in-up 0.3s ease-out;
 }
@@ -404,13 +430,13 @@ body {
 
 /* Floating action button */
 .fab {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), 0 0 20px rgba(59, 130, 246, 0.3);
-  transition: all 0.2s ease;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .fab:hover {
   transform: scale(1.05);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5), 0 0 30px rgba(59, 130, 246, 0.4);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
 }
 
 /* Range slider styling */
@@ -464,4 +490,177 @@ input[type="range"].slider-thumb::-moz-range-thumb {
 
 .animate-pulse-slow {
   animation: pulse-slow 3s ease-in-out infinite;
+}
+
+/* Chat Markdown Styles */
+.chat-markdown {
+  line-height: 1.6;
+}
+
+.chat-markdown .md-p {
+  margin: 0;
+}
+
+.chat-markdown .md-p + .md-p {
+  margin-top: 0.75rem;
+}
+
+.chat-markdown strong {
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.chat-markdown em {
+  font-style: italic;
+}
+
+.chat-markdown del {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.chat-markdown .md-h2 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin: 1rem 0 0.5rem;
+  color: var(--foreground);
+}
+
+.chat-markdown .md-h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0.875rem 0 0.375rem;
+  color: var(--foreground);
+}
+
+.chat-markdown .md-h4 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin: 0.75rem 0 0.25rem;
+  color: var(--foreground);
+}
+
+.chat-markdown .inline-code {
+  background-color: var(--background-tertiary);
+  padding: 0.125rem 0.375rem;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.85em;
+}
+
+.chat-markdown .code-block {
+  background-color: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin: 0.5rem 0;
+  overflow-x: auto;
+}
+
+.chat-markdown .code-block code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.chat-markdown .md-ul,
+.chat-markdown .md-ol {
+  margin: 0.5rem 0;
+  padding-left: 1.5rem;
+}
+
+.chat-markdown .md-ul {
+  list-style-type: disc;
+}
+
+.chat-markdown .md-ol {
+  list-style-type: decimal;
+}
+
+.chat-markdown .md-li,
+.chat-markdown .md-oli {
+  margin: 0.25rem 0;
+  padding-left: 0.25rem;
+}
+
+.chat-markdown .md-link {
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.chat-markdown .md-link:hover {
+  opacity: 0.8;
+}
+
+.chat-markdown .md-quote {
+  border-left: 3px solid var(--border);
+  padding-left: 0.75rem;
+  margin: 0.5rem 0;
+  color: var(--foreground-secondary);
+  font-style: italic;
+}
+
+.chat-markdown .md-hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1rem 0;
+}
+
+/* Compact inline chat markdown styles */
+.chat-markdown-inline {
+  line-height: 1.4;
+}
+
+.chat-markdown-inline .md-p {
+  margin: 0;
+}
+
+.chat-markdown-inline .md-p + .md-p {
+  margin-top: 0.5rem;
+}
+
+.chat-markdown-inline .md-h2,
+.chat-markdown-inline .md-h3,
+.chat-markdown-inline .md-h4 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin: 0.5rem 0 0.25rem;
+  color: var(--foreground);
+}
+
+.chat-markdown-inline .md-ul,
+.chat-markdown-inline .md-ol {
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
+}
+
+.chat-markdown-inline .md-li,
+.chat-markdown-inline .md-oli {
+  margin: 0.125rem 0;
+  padding-left: 0.125rem;
+}
+
+.chat-markdown-inline .code-block {
+  padding: 0.5rem 0.75rem;
+  margin: 0.25rem 0;
+}
+
+.chat-markdown-inline .code-block code {
+  font-size: 0.75rem;
+}
+
+.chat-markdown-inline .inline-code {
+  font-size: 0.8em;
+  padding: 0.1rem 0.25rem;
+}
+
+.chat-markdown-inline .md-quote {
+  margin: 0.25rem 0;
+  padding-left: 0.5rem;
+}
+
+/* Price colors in chat */
+.chat-markdown strong:has(+ strong) {
+  margin-right: 0;
 }

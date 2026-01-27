@@ -10,8 +10,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { analyzeMarket, isOpenAIConfigured, type MarketSnapshot } from '@/lib/ai';
 import { prisma } from '@/lib/db';
+import { trackAIUsage } from '@/lib/ai/usage-tracker';
 
 export async function POST(request: NextRequest) {
+  const startTime = Date.now();
+
   try {
     if (!isOpenAIConfigured()) {
       return NextResponse.json(
@@ -39,6 +42,20 @@ export async function POST(request: NextRequest) {
     }
 
     const result = await analyzeMarket(marketData);
+
+    // Track AI usage
+    const durationMs = Date.now() - startTime;
+    const tokens = result.tokens || { input: 0, output: 0 };
+    await trackAIUsage({
+      feature: 'market_analysis',
+      model: result.model,
+      inputTokens: tokens.input || 0,
+      outputTokens: tokens.output || 0,
+      success: true,
+      durationMs,
+      endpoint: '/api/ai/analyze',
+      userContext: 'trading',
+    });
 
     // Debug: log what we're returning
     console.log('AI analyze route result:', {
@@ -85,6 +102,21 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error('AI analysis error:', error);
+
+    // Track failed request
+    const durationMs = Date.now() - startTime;
+    await trackAIUsage({
+      feature: 'market_analysis',
+      model: process.env.OPENAI_MODEL || 'gpt-4o',
+      inputTokens: 0,
+      outputTokens: 0,
+      success: false,
+      errorMessage: error instanceof Error ? error.message : 'Unknown error',
+      durationMs,
+      endpoint: '/api/ai/analyze',
+      userContext: 'trading',
+    });
+
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : 'Failed to analyze market data',

@@ -8,6 +8,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { evaluatePosition, type PositionData } from '@/lib/ai';
 import type { PositionHealthMetrics, MarketSnapshot } from '@/lib/ai/types';
+import { trackAIUsage } from '@/lib/ai/usage-tracker';
 
 interface RequestBody {
   positionId: string;
@@ -17,9 +18,11 @@ interface RequestBody {
 }
 
 export async function POST(request: NextRequest) {
+  const startTime = Date.now();
+  const model = process.env.OPENAI_MODEL || 'gpt-4o';
+
   try {
     const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL || 'gpt-4.1';
 
     if (!apiKey || apiKey === 'your_openai_api_key_here') {
       return NextResponse.json(
@@ -77,9 +80,38 @@ export async function POST(request: NextRequest) {
       { apiKey, model }
     );
 
+    // Track AI usage
+    const durationMs = Date.now() - startTime;
+    const tokens = result.tokens || { input: 0, output: 0 };
+    await trackAIUsage({
+      feature: 'position_evaluation',
+      model,
+      inputTokens: tokens.input || 0,
+      outputTokens: tokens.output || 0,
+      success: true,
+      durationMs,
+      endpoint: '/api/ai/position',
+      userContext: 'trading',
+    });
+
     return NextResponse.json(result);
   } catch (error) {
     console.error('Position AI evaluation error:', error);
+
+    // Track failed request
+    const durationMs = Date.now() - startTime;
+    await trackAIUsage({
+      feature: 'position_evaluation',
+      model,
+      inputTokens: 0,
+      outputTokens: 0,
+      success: false,
+      errorMessage: error instanceof Error ? error.message : 'Unknown error',
+      durationMs,
+      endpoint: '/api/ai/position',
+      userContext: 'trading',
+    });
+
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : 'Failed to evaluate position',

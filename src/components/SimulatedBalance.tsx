@@ -12,7 +12,7 @@ interface SimulatedBalanceProps {
 export function SimulatedBalance({ onBalanceChange }: SimulatedBalanceProps) {
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const { addToast } = useToast();
-  const { simulatedBalance: balance, simulatedBalanceLoading: isLoading, refreshSimulatedBalance } = useTradingData();
+  const { simulatedBalance: balance, simulatedBalanceLoading: isLoading, simulatedBalanceError: error, refreshSimulatedBalance } = useTradingData();
 
   const handleReset = async () => {
     try {
@@ -41,6 +41,26 @@ export function SimulatedBalance({ onBalanceChange }: SimulatedBalanceProps) {
       });
     }
   };
+
+  if (error) {
+    return (
+      <div className="p-4">
+        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-red-400">⚠️</span>
+            <span className="text-sm font-semibold text-red-400">Database Error</span>
+          </div>
+          <p className="text-xs text-secondary">{error}</p>
+          <button
+            onClick={() => refreshSimulatedBalance(true)}
+            className="mt-3 text-xs px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (isLoading || !balance) {
     return (

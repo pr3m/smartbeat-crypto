@@ -109,9 +109,11 @@ interface TradingDataContextValue {
   refreshOpenPositions: (force?: boolean) => void;
   simulatedBalance: SimulatedBalanceData | null;
   simulatedBalanceLoading: boolean;
+  simulatedBalanceError: string | null;
   refreshSimulatedBalance: (force?: boolean) => void;
   simulatedPositions: SimulatedPosition[];
   simulatedPositionsLoading: boolean;
+  simulatedPositionsError: string | null;
   refreshSimulatedPositions: (force?: boolean) => void;
   hasOpenSimulatedPosition: boolean;
   openOrders: OpenOrder[];
@@ -161,9 +163,11 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
 
   const [simulatedBalance, setSimulatedBalance] = useState<SimulatedBalanceData | null>(null);
   const [simulatedBalanceLoading, setSimulatedBalanceLoading] = useState(false);
+  const [simulatedBalanceError, setSimulatedBalanceError] = useState<string | null>(null);
 
   const [simulatedPositions, setSimulatedPositions] = useState<SimulatedPosition[]>([]);
   const [simulatedPositionsLoading, setSimulatedPositionsLoading] = useState(false);
+  const [simulatedPositionsError, setSimulatedPositionsError] = useState<string | null>(null);
 
   const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
   const [openOrdersLoading, setOpenOrdersLoading] = useState(true); // Start as true to prevent flash
@@ -331,12 +335,20 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     lastSimBalanceFetchRef.current = now;
     setSimulatedBalanceLoading(true);
     setTradeBalanceLoading(true);
+    setSimulatedBalanceError(null);
     setTradeBalanceError(null);
 
     try {
       const res = await fetch('/api/simulated/balance');
-      if (!res.ok) throw new Error('Failed to fetch balance');
       const data = await res.json();
+
+      if (!res.ok || data.success === false) {
+        const errorMsg = data.error || 'Failed to fetch balance';
+        setSimulatedBalanceError(errorMsg);
+        setTradeBalanceError(errorMsg);
+        return;
+      }
+
       setSimulatedBalance(data);
       setTradeBalance({
         eb: data.eurBalance.toString(),
@@ -349,8 +361,11 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
         mf: data.freeMargin.toString(),
         ml: data.marginLevel?.toString(),
       });
+      setSimulatedBalanceError(null);
     } catch (err) {
-      setTradeBalanceError(err instanceof Error ? err.message : 'Unknown error');
+      const errorMsg = err instanceof Error ? err.message : 'Failed to connect to server';
+      setSimulatedBalanceError(errorMsg);
+      setTradeBalanceError(errorMsg);
     } finally {
       setSimulatedBalanceLoading(false);
       setTradeBalanceLoading(false);
@@ -511,14 +526,24 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
 
     lastSimPositionsFetchRef.current = now;
     setSimulatedPositionsLoading(true);
+    setSimulatedPositionsError(null);
 
     try {
       const currentPrice = priceRef.current || 0;
       const res = await fetch(`/api/simulated/positions?open=true&currentPrice=${currentPrice}`);
-      if (!res.ok) throw new Error('Failed to fetch positions');
       const data = await res.json();
+
+      if (!res.ok || data.success === false) {
+        const errorMsg = data.error || 'Failed to fetch positions';
+        setSimulatedPositionsError(errorMsg);
+        return;
+      }
+
       setSimulatedPositions(data.positions || []);
+      setSimulatedPositionsError(null);
     } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to connect to server';
+      setSimulatedPositionsError(errorMsg);
       console.error('Error fetching simulated positions:', err);
     } finally {
       setSimulatedPositionsLoading(false);
@@ -766,9 +791,11 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     refreshOpenPositions,
     simulatedBalance,
     simulatedBalanceLoading,
+    simulatedBalanceError,
     refreshSimulatedBalance,
     simulatedPositions,
     simulatedPositionsLoading,
+    simulatedPositionsError,
     refreshSimulatedPositions,
     hasOpenSimulatedPosition,
     openOrders,
@@ -803,9 +830,11 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     refreshOpenPositions,
     simulatedBalance,
     simulatedBalanceLoading,
+    simulatedBalanceError,
     refreshSimulatedBalance,
     simulatedPositions,
     simulatedPositionsLoading,
+    simulatedPositionsError,
     refreshSimulatedPositions,
     hasOpenSimulatedPosition,
     openOrders,

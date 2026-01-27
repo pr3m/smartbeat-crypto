@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { createDbErrorResponse } from '@/lib/db-error';
 import { calculateSimulatedFees, calculateMarginRequired } from '@/lib/trading/simulated-pnl';
 
 /**
@@ -62,9 +63,9 @@ export async function DELETE(request: Request) {
       message: 'Order cancelled',
     });
   } catch (error) {
-    console.error('Error cancelling simulated order:', error);
+    console.error('[Orders API] Error cancelling simulated order:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to cancel order' },
+      createDbErrorResponse(error, 'Cancelling simulated order'),
       { status: 500 }
     );
   }
@@ -97,9 +98,9 @@ export async function GET(request: Request) {
 
     return NextResponse.json({ orders });
   } catch (error) {
-    console.error('Error fetching simulated orders:', error);
+    console.error('[Orders API] Error fetching simulated orders:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to fetch orders' },
+      createDbErrorResponse(error, 'Fetching simulated orders'),
       { status: 500 }
     );
   }
@@ -204,9 +205,9 @@ export async function POST(request: Request) {
       message: `Limit ${type} order placed at €${price.toFixed(4)}`,
     });
   } catch (error) {
-    console.error('Error creating simulated order:', error);
+    console.error('[Orders API] Error creating simulated order:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to create order' },
+      createDbErrorResponse(error, 'Creating simulated order'),
       { status: 500 }
     );
   }

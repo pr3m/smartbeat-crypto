@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { createDbErrorResponse } from '@/lib/db-error';
 import { calculateSimulatedPnL, calculateSimulatedFees, calculateRealizedPnL } from '@/lib/trading/simulated-pnl';
 
 /**
@@ -65,9 +66,9 @@ export async function GET(request: Request) {
 
     return NextResponse.json({ positions: positionsWithPnl });
   } catch (error) {
-    console.error('Error fetching simulated positions:', error);
+    console.error('[Positions API] Error fetching simulated positions:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to fetch positions' },
+      createDbErrorResponse(error, 'Fetching simulated positions'),
       { status: 500 }
     );
   }
@@ -216,9 +217,9 @@ export async function POST(request: Request) {
       message: `Position ${isFullClose ? 'closed' : 'partially closed'} at €${closePrice.toFixed(4)}. P&L: ${realizedPnl >= 0 ? '+' : ''}€${realizedPnl.toFixed(2)}`,
     });
   } catch (error) {
-    console.error('Error closing simulated position:', error);
+    console.error('[Positions API] Error closing simulated position:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to close position' },
+      createDbErrorResponse(error, 'Closing simulated position'),
       { status: 500 }
     );
   }

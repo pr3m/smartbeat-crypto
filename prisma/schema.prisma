@@ -352,3 +352,115 @@ model AIMarketAnalysis {
   @@index([createdAt])
   @@index([action])
 }
+
+// ============================================
+// AI Chat Assistant Models
+// ============================================
+
+// Chat conversations
+model ChatConversation {
+  id           String        @id @default(cuid())
+  title        String?       // Auto-generated from first message
+  context      String        @default("general") // trading, tax, transactions
+  messageCount Int           @default(0)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  messages     ChatMessage[]
+
+  @@index([createdAt])
+  @@index([context])
+}
+
+model ChatMessage {
+  id             String           @id @default(cuid())
+  conversationId String
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String           // user, assistant, system, tool
+  content        String
+  toolCalls      String?          // JSON array of tool calls
+  toolCallId     String?          // ID if this is a tool result
+  name           String?          // Tool name if role="tool"
+  inputTokens    Int?
+  outputTokens   Int?
+  createdAt      DateTime         @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// Trade monitoring agents
+model TradeAgent {
+  id             String     @id @default(cuid())
+  positionId     String     @unique
+  positionType   String     // simulated, kraken
+  pair           String
+  side           String     // long, short
+  entryPrice     Float
+  status         String     @default("active") // active, paused, completed
+
+  // Monitoring thresholds
+  priceAlertPct  Float      @default(2.0)  // Alert on 2% move
+  checkCooldown  Int        @default(300)  // 5 min between checks
+
+  // State
+  lastPrice      Float?
+  lastCheckAt    DateTime?
+  lastAlertAt    DateTime?
+  lastAnalysis   String?
+
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  logs           AgentLog[]
+
+  @@index([status])
+  @@index([positionId])
+}
+
+model AgentLog {
+  id        String     @id @default(cuid())
+  agentId   String
+  agent     TradeAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  type      String     // check, alert, analysis
+  content   String
+  priceAt   Float?
+  metadata  String?    // JSON
+  createdAt DateTime   @default(now())
+
+  @@index([agentId, createdAt])
+}
+
+// ============================================
+// AI Usage Tracking
+// ============================================
+
+model AIUsage {
+  id            String   @id @default(cuid())
+
+  // Request identification
+  feature       String   // chat, market_analysis, position_evaluation, trade_review
+  model         String   // gpt-4o, gpt-4o-mini, etc.
+
+  // Token usage
+  inputTokens   Int
+  outputTokens  Int
+  totalTokens   Int
+
+  // Cost estimation (in USD, based on model pricing)
+  estimatedCost Float?
+
+  // Request metadata
+  conversationId String?  // Link to chat conversation if applicable
+  success       Boolean  @default(true)
+  errorMessage  String?
+  durationMs    Int?     // Request duration in milliseconds
+
+  // Context
+  endpoint      String?  // API endpoint that made the request
+  userContext   String?  // trading, tax, transactions, general
+
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([feature])
+  @@index([model])
+  @@index([feature, model, createdAt])
+}
