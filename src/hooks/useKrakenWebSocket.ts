@@ -211,8 +211,9 @@ export function useKrakenWebSocket(
         }
       };
 
-      ws.onerror = (error) => {
-        console.error('Kraken WebSocket error:', error);
+      ws.onerror = () => {
+        // WebSocket errors are expected during initial connection or reconnection
+        // The onclose handler will trigger reconnection logic
         setStatus((prev) => ({ ...prev, error: 'WebSocket error' }));
       };
 
@@ -235,7 +236,7 @@ export function useKrakenWebSocket(
         }
       };
     } catch (err) {
-      console.error('Error creating WebSocket:', err);
+      console.warn('WebSocket connection failed, will retry:', err);
       setStatus({ connected: false, error: 'Failed to connect', reconnecting: false });
     }
   }, []); // No dependencies - uses refs

@@ -197,6 +197,7 @@ model Settings {
   costBasisMethod String            @default("FIFO") // FIFO or WEIGHTED_AVERAGE
   taxRate         Float             @default(0.24)
   country         String            @default("EE")   // Estonia
+  accountType     String            @default("individual") // "individual" or "business"
 
   // Trading settings
   defaultPair     String            @default("XRPEUR")
@@ -209,6 +210,15 @@ model Settings {
   lastSyncAt      DateTime?
   autoSyncEnabled Boolean           @default(true)
   syncIntervalMin Int               @default(60)     // minutes
+
+  // Enhanced sync tracking (for global/incremental sync)
+  lastTradeTimestamp    DateTime?   // Newest synced trade timestamp
+  lastLedgerTimestamp   DateTime?   // Newest synced ledger timestamp
+  syncInProgress        Boolean     @default(false)
+  currentSyncId         String?     // Active SyncLog reference
+
+  // Auto-sync config
+  autoSyncOnStartup     Boolean     @default(true)
 
   updatedAt       DateTime          @updatedAt
 }
@@ -228,6 +238,14 @@ model SyncLog {
   completedAt     DateTime?
 
   error           String?
+
+  // Enhanced sync tracking (for global/incremental sync)
+  syncMode        String            @default("manual")  // "full", "incremental", "manual"
+  progress        String?           // JSON: {phase, current, total, message}
+  tradesProcessed Int               @default(0)
+  ledgersProcessed Int              @default(0)
+  fromTimestamp   DateTime?
+  toTimestamp     DateTime?
 
   @@index([syncType, startedAt])
 }

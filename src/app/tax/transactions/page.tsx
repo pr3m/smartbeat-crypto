@@ -328,10 +328,19 @@ export default function TransactionsPage() {
 
   const getCategoryBadge = (category: string) => {
     switch (category) {
-      case 'TAXABLE_INCOME': return 'badge-bearish';
-      case 'NON_TAXABLE': return 'badge-neutral';
-      case 'COST_BASIS_ADJUSTMENT': return 'badge-bullish';
-      default: return 'badge-neutral';
+      case 'TAXABLE_INCOME': return 'bg-red/10 text-red';
+      case 'NON_TAXABLE': return 'bg-tertiary text-tertiary';
+      case 'COST_BASIS_ADJUSTMENT': return 'bg-tertiary text-secondary';
+      default: return 'bg-tertiary text-tertiary';
+    }
+  };
+
+  const getCategoryLabel = (category: string) => {
+    switch (category) {
+      case 'TAXABLE_INCOME': return 'Taxable';
+      case 'NON_TAXABLE': return 'Non-taxable';
+      case 'COST_BASIS_ADJUSTMENT': return 'Cost basis';
+      default: return category;
     }
   };
 
@@ -639,23 +648,6 @@ export default function TransactionsPage() {
               <div className="text-2xl font-bold text-success">{ledgerIncomeSummary.count}</div>
               <div className="text-xs text-tertiary flex items-center justify-center">
                 Income Entries <span className="ml-1 text-blue-500 text-xs">ⓘ</span>
-              </div>
-            </div>
-          </Tooltip>
-          <Tooltip content={
-            <div>
-              <strong className="text-yellow-400">Income Total (in crypto units)</strong>
-              <p className="mt-1">Total amount of crypto received as income.</p>
-              <p className="mt-2 text-gray-400">This is the raw crypto amount, not EUR value.</p>
-              <p className="mt-2 text-yellow-400">For tax purposes, convert to EUR at time of receipt.</p>
-            </div>
-          } position="bottom">
-            <div className="card p-4 text-center cursor-help hover:border-yellow-500 transition-colors">
-              <div className="text-2xl font-bold text-warning">
-                {ledgerIncomeSummary.totalAmount.toFixed(4)}
-              </div>
-              <div className="text-xs text-tertiary flex items-center justify-center">
-                Income Total <span className="ml-1 text-blue-500 text-xs">ⓘ</span>
               </div>
             </div>
           </Tooltip>
@@ -1129,7 +1121,7 @@ export default function TransactionsPage() {
                           </td>
                           <td className="px-4 py-3">
                             <span className={`text-xs px-2 py-1 rounded ${getCategoryBadge(tx.category)}`}>
-                              {tx.category.replace(/_/g, ' ')}
+                              {getCategoryLabel(tx.category)}
                             </span>
                           </td>
                         </tr>
@@ -1207,7 +1199,7 @@ export default function TransactionsPage() {
                                   <div className="text-xs text-tertiary uppercase mb-1">Tax Category</div>
                                   <div>
                                     <span className={`text-xs px-2 py-1 rounded ${getCategoryBadge(tx.category)}`}>
-                                      {tx.category.replace(/_/g, ' ')}
+                                      {getCategoryLabel(tx.category)}
                                     </span>
                                   </div>
                                 </div>

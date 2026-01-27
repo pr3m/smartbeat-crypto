@@ -5,7 +5,7 @@
 
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { AIUsageTab } from './AIUsageTab';
 import { GeneralSettingsTab } from './GeneralSettingsTab';
 
@@ -92,10 +92,148 @@ function TradingSettingsTab() {
 }
 
 function TaxSettingsTab() {
+  const [accountType, setAccountType] = useState<'individual' | 'business'>('individual');
+  const [loading, setLoading] = useState(true);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+
+  // Load current settings on mount
+  useEffect(() => {
+    fetch('/api/settings')
+      .then(res => res.json())
+      .then(data => {
+        setAccountType(data.accountType || 'individual');
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const handleAccountTypeChange = async (newType: 'individual' | 'business') => {
+    setAccountType(newType);
+    setSaveStatus('saving');
+
+    try {
+      await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountType: newType }),
+      });
+      setSaveStatus('saved');
+      // Reset status after 2 seconds
+      setTimeout(() => setSaveStatus('idle'), 2000);
+    } catch {
+      setSaveStatus('idle');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="card p-6">
+        <div className="animate-pulse space-y-4">
+          <div className="h-6 bg-tertiary rounded w-1/3"></div>
+          <div className="h-10 bg-tertiary rounded"></div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="card p-6">
-      <h2 className="text-lg font-semibold mb-4">Tax Settings</h2>
-      <p className="text-secondary">Tax configuration options coming soon.</p>
+    <div className="space-y-6">
+      <div className="card p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">Account Type</h2>
+          {saveStatus === 'saving' && (
+            <span className="text-xs text-secondary">Saving...</span>
+          )}
+          {saveStatus === 'saved' && (
+            <span className="text-xs text-success">Saved</span>
+          )}
+        </div>
+        <p className="text-secondary mb-4">
+          This affects how your crypto taxes are calculated. Estonian tax rules differ significantly between individual and business accounts.
+        </p>
+
+        <div className="space-y-3">
+          <label
+            className={`flex items-start gap-4 p-4 rounded-lg border cursor-pointer transition-colors ${
+              accountType === 'individual'
+                ? 'border-info bg-info/10'
+                : 'border-primary hover:border-secondary'
+            }`}
+          >
+            <input
+              type="radio"
+              name="accountType"
+              value="individual"
+              checked={accountType === 'individual'}
+              onChange={() => handleAccountTypeChange('individual')}
+              className="mt-1"
+            />
+            <div>
+              <div className="font-medium">Individual (Natural Person)</div>
+              <div className="text-sm text-secondary mt-1">
+                Personal trading account. Tax rate: 22% (2025) / 24% (2026+) on all gains.
+                Losses are NOT deductible. Report on Table 8.3.
+              </div>
+            </div>
+          </label>
+
+          <label
+            className={`flex items-start gap-4 p-4 rounded-lg border cursor-pointer transition-colors ${
+              accountType === 'business'
+                ? 'border-info bg-info/10'
+                : 'border-primary hover:border-secondary'
+            }`}
+          >
+            <input
+              type="radio"
+              name="accountType"
+              value="business"
+              checked={accountType === 'business'}
+              onChange={() => handleAccountTypeChange('business')}
+              className="mt-1"
+            />
+            <div>
+              <div className="font-medium">Business (OÜ / Company)</div>
+              <div className="text-sm text-secondary mt-1">
+                Corporate trading account. <strong className="text-success">0% tax on retained profits</strong>.
+                Tax only when distributing (dividends ~28% effective). Losses CAN offset gains.
+              </div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div className="card p-6">
+        <h2 className="text-lg font-semibold mb-4">Estonian Tax Rules Summary</h2>
+
+        {accountType === 'individual' ? (
+          <div className="space-y-3 text-sm">
+            <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+              <strong className="text-yellow-400">Individual Taxation</strong>
+              <ul className="mt-2 space-y-1 text-secondary">
+                <li>• Crypto gains taxed as regular income (22-24%)</li>
+                <li>• <strong className="text-danger">Losses are NOT deductible</strong></li>
+                <li>• Tax due when you sell/exchange crypto for profit</li>
+                <li>• Report on Table 8.3 (foreign income) since Kraken is US-based</li>
+                <li>• Annual declaration deadline: April 30</li>
+              </ul>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3 text-sm">
+            <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg">
+              <strong className="text-green-400">Business Taxation (OÜ)</strong>
+              <ul className="mt-2 space-y-1 text-secondary">
+                <li>• <strong className="text-success">0% tax on retained/reinvested profits</strong></li>
+                <li>• <strong className="text-success">Losses CAN offset gains</strong></li>
+                <li>• Tax only when distributing (dividends, salaries)</li>
+                <li>• Distribution tax: ~28% effective (22/78 in 2025)</li>
+                <li>• Track P&L for accounting, no annual income tax return needed</li>
+              </ul>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

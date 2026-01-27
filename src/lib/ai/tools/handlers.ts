@@ -624,8 +624,8 @@ async function calculateTax(args: Record<string, unknown>): Promise<ToolResult> 
     }
   }
 
-  // Estonian tax rules: 24% on gains, losses NOT deductible
-  const taxRate = yearNum >= 2026 ? 0.24 : 0.22; // Rate increased in 2026
+  // Estonian tax rules: 22% on gains, losses NOT deductible
+  const taxRate = yearNum >= 2025 ? 0.22 : 0.22;
   const totalGains = marginGains + spotGains + stakingRewards + earnRewards + airdrops;
   const taxDue = totalGains * taxRate;
 

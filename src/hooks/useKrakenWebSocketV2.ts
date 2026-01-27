@@ -417,8 +417,9 @@ export function useKrakenWebSocketV2(
         }
       };
 
-      ws.onerror = (error) => {
-        console.error('Kraken WebSocket v2 error:', error);
+      ws.onerror = () => {
+        // WebSocket errors are expected during initial connection or reconnection
+        // The onclose handler will trigger reconnection logic
         setStatus(prev => ({ ...prev, error: 'WebSocket error' }));
       };
 
@@ -444,7 +445,7 @@ export function useKrakenWebSocketV2(
         }
       };
     } catch (err) {
-      console.error('Error creating WebSocket v2:', err);
+      console.warn('WebSocket v2 connection failed, will retry:', err);
       setStatus({ connected: false, error: 'Failed to connect', reconnecting: false });
     }
   }, [enabled, pair, processBookSnapshot, processBookUpdate, scheduleUpdate, processTrade]);

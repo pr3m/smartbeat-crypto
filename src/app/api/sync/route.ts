@@ -2,25 +2,74 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { syncYear, isMarginTrade, type TradeInfoWithId } from '@/lib/kraken/sync';
 import { categorizeTransaction, getTaxRate } from '@/lib/tax/estonia-rules';
+import { syncManager } from '@/lib/sync/sync-manager';
+import { cancelSync } from '@/lib/sync/global-sync';
 import type { LedgerEntry, TransactionType } from '@/lib/kraken/types';
 
 interface SyncRequest {
-  year: number;
+  mode?: 'year' | 'full' | 'incremental';  // New modes for global sync
+  year?: number;                            // Required only for mode='year'
   includeSpot?: boolean;
   includeMargin?: boolean;
-  fullResync?: boolean; // If true, delete and reimport all data for the year
+  fullResync?: boolean;                     // If true, delete and reimport all data for the year
+  cancel?: boolean;                         // If true, cancel the current sync
 }
 
 /**
- * POST /api/sync - Sync data from Kraken for a specific year
+ * POST /api/sync - Sync data from Kraken
+ *
+ * Supports three modes:
+ * - year: Sync specific year (legacy, requires year param)
+ * - full: Full historical sync of all data
+ * - incremental: Sync only new data since last sync
  */
 export async function POST(request: NextRequest) {
   let syncLogId: string | null = null;
 
   try {
     const body: SyncRequest = await request.json();
-    const { year, includeSpot = true, includeMargin = true, fullResync = false } = body;
+    const {
+      mode = 'year',
+      year,
+      includeSpot = true,
+      includeMargin = true,
+      fullResync = false,
+      cancel = false,
+    } = body;
 
+    // Handle cancel request
+    if (cancel) {
+      await cancelSync();
+      return NextResponse.json({ success: true, message: 'Sync cancelled' });
+    }
+
+    // Handle global sync modes (full or incremental)
+    if (mode === 'full' || mode === 'incremental') {
+      try {
+        const result = await syncManager.triggerSync(mode);
+        return NextResponse.json({
+          success: result.success,
+          mode: result.mode,
+          summary: {
+            tradesImported: result.tradesImported,
+            tradesSkipped: result.tradesSkipped,
+            ledgersImported: result.ledgersImported,
+            ledgersSkipped: result.ledgersSkipped,
+            totalImported: result.tradesImported + result.ledgersImported,
+            totalSkipped: result.tradesSkipped + result.ledgersSkipped,
+          },
+          duration: result.duration,
+          errors: result.errors.length > 0 ? result.errors : undefined,
+        });
+      } catch (error) {
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : 'Sync failed' },
+          { status: 500 }
+        );
+      }
+    }
+
+    // Legacy year-based sync
     if (!year || year < 2010 || year > new Date().getFullYear() + 1) {
       return NextResponse.json({ error: 'Invalid year' }, { status: 400 });
     }

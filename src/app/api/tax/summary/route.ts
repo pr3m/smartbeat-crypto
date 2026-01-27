@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { getTaxRate } from '@/lib/tax/estonia-rules';
+import { getTaxRate, getEffectiveDistributionRate, type AccountType } from '@/lib/tax/estonia-rules';
 
 /**
  * GET /api/tax/summary - Get tax summary for a year
@@ -10,7 +10,13 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const yearParam = searchParams.get('year');
     const year = yearParam ? parseInt(yearParam) : new Date().getFullYear();
-    const taxRate = getTaxRate(year);
+
+    // Get account type from settings
+    const settings = await prisma.settings.findUnique({ where: { id: 'default' } });
+    const accountType = (settings?.accountType as AccountType) || 'individual';
+
+    const taxRate = getTaxRate(year, accountType);
+    const distributionTaxRate = getEffectiveDistributionRate(year);
 
     const yearStart = new Date(year, 0, 1);
     const yearEnd = new Date(year, 11, 31, 23, 59, 59);
@@ -31,8 +37,6 @@ export async function GET(request: NextRequest) {
     });
 
     // Calculate totals
-    let totalProceeds = 0;
-    let totalCostBasis = 0;
     let totalGains = 0;
     let totalLosses = 0;
     let tradingGains = 0;
@@ -47,10 +51,7 @@ export async function GET(request: NextRequest) {
 
     // Process tax events (for spot trades FIFO calculation)
     for (const event of taxEvents) {
-      totalProceeds += event.disposalProceeds;
-      totalCostBasis += event.acquisitionCost;
-
-      // Only add spot trade gains to totalGains (margin is handled separately)
+      // Only add spot trade gains (margin is handled separately)
       const tx = transactions.find(t => t.id === event.transactionId);
       if (tx && tx.type === 'TRADE') {
         if (event.gain > 0) {
@@ -111,19 +112,41 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // In Estonia, only gains are taxable
-    const taxableAmount = totalGains;
-    const estimatedTax = taxableAmount * taxRate;
+    // Calculate net P&L
+    const netPnL = totalGains - totalLosses;
+
+    // Calculate tax based on account type
+    let taxableAmount: number;
+    let estimatedTax: number;
+    let retainedProfit: number;
+    let potentialDistributionTax: number;
+
+    if (accountType === 'business') {
+      // Business: 0% tax on retained profits, losses offset gains
+      taxableAmount = 0;
+      estimatedTax = 0;
+      retainedProfit = netPnL;
+      potentialDistributionTax = netPnL > 0 ? netPnL * distributionTaxRate : 0;
+    } else {
+      // Individual: Only gains taxable, losses NOT deductible
+      taxableAmount = totalGains;
+      estimatedTax = taxableAmount * taxRate;
+      retainedProfit = 0;
+      potentialDistributionTax = 0;
+    }
 
     const summary = {
       taxYear: year,
       taxRate,
-      totalProceeds,
-      totalCostBasis,
+      accountType,
       totalGains,
       totalLosses,
+      netPnL,
       taxableAmount,
       estimatedTax,
+      retainedProfit,
+      distributionTaxRate,
+      potentialDistributionTax,
       tradingGains,
       tradingLosses,
       marginGains,

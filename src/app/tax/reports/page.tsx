@@ -2,22 +2,26 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import { getTaxRate, formatEuroAmount } from '@/lib/tax/estonia-rules';
+import { getTaxRate, formatEuroAmount, type AccountType } from '@/lib/tax/estonia-rules';
 
 interface TaxSummary {
   taxYear: number;
   taxRate: number;
-  totalProceeds: number;
-  totalCostBasis: number;
+  accountType: AccountType;
   totalGains: number;
   totalLosses: number;
+  netPnL: number;
   taxableAmount: number;
   estimatedTax: number;
+  retainedProfit: number;
+  distributionTaxRate: number;
+  potentialDistributionTax: number;
   tradingGains: number;
   tradingLosses: number;
   marginGains: number;
   marginLosses: number;
   stakingIncome: number;
+  earnIncome: number;
   airdropIncome: number;
   totalTransactions: number;
 }
@@ -125,6 +129,31 @@ export default function ReportsPage() {
     }
 
     setGenerating(false);
+  };
+
+  const handleDownloadBusinessExcel = async () => {
+    setGenerating(true);
+    try {
+      const response = await fetch(`/api/tax/report/business?year=${selectedYear}`);
+      if (!response.ok) {
+        throw new Error('Failed to generate report');
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `crypto-report-${selectedYear}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Download error:', err);
+      alert('Failed to generate report. Please try again.');
+    } finally {
+      setGenerating(false);
+    }
   };
 
   const generateTextReport = () => {
@@ -336,67 +365,145 @@ export default function ReportsPage() {
           {/* Export Options */}
           <div className="card p-6 mb-6">
             <h2 className="text-lg font-semibold mb-4">Export Report</h2>
-            <div className="grid md:grid-cols-3 gap-4">
-              <button
-                className="btn btn-secondary py-4 flex flex-col items-center gap-2"
-                onClick={() => handleGenerateReport('text')}
-                disabled={generating || reportRows.length === 0}
-              >
-                <span className="text-2xl">📄</span>
-                <span className="font-medium">Table 8.3 (Text)</span>
-                <span className="text-xs text-tertiary">For manual entry</span>
-              </button>
-              <button
-                className="btn btn-secondary py-4 flex flex-col items-center gap-2"
-                onClick={() => handleGenerateReport('csv')}
-                disabled={generating || reportRows.length === 0}
-              >
-                <span className="text-2xl">📊</span>
-                <span className="font-medium">Full Report (CSV)</span>
-                <span className="text-xs text-tertiary">For accountant</span>
-              </button>
-              <button
-                className="btn btn-secondary py-4 flex flex-col items-center gap-2 opacity-50"
-                disabled
-              >
-                <span className="text-2xl">📑</span>
-                <span className="font-medium">PDF Report</span>
-                <span className="text-xs text-tertiary">Coming soon</span>
-              </button>
-            </div>
+
+            {summary?.accountType === 'business' ? (
+              <>
+                {/* Business Account Export Options */}
+                <div className="mb-4 p-3 bg-green-500/10 border border-green-500/30 rounded-lg">
+                  <div className="text-sm text-green-400">
+                    <strong>Business Account (OÜ)</strong> - Generate accounting reports for your bookkeeper
+                  </div>
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-4">
+                  <button
+                    className="btn btn-primary py-4 flex flex-col items-center gap-2"
+                    onClick={() => handleDownloadBusinessExcel()}
+                    disabled={generating}
+                  >
+                    <span className="text-2xl">📊</span>
+                    <span className="font-medium">Business Report (Excel)</span>
+                    <span className="text-xs opacity-80">Positions, P&L, Fees, Balance</span>
+                  </button>
+                  <button
+                    className="btn btn-secondary py-4 flex flex-col items-center gap-2"
+                    onClick={() => handleGenerateReport('csv')}
+                    disabled={generating}
+                  >
+                    <span className="text-2xl">📄</span>
+                    <span className="font-medium">Simple CSV</span>
+                    <span className="text-xs text-tertiary">Basic transaction list</span>
+                  </button>
+                </div>
+
+                <div className="mt-4 p-3 bg-tertiary rounded text-sm text-secondary">
+                  <strong>Excel Report includes:</strong>
+                  <ul className="mt-2 space-y-1 ml-4 list-disc">
+                    <li>Summary - P&L overview with Estonian tax notes</li>
+                    <li>Positions - Grouped trading positions (averaged prices, fees, P&L)</li>
+                    <li>Fees - Rollover fees and trading costs breakdown</li>
+                    <li>Balance - Asset holdings at year-end</li>
+                  </ul>
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Individual Account Export Options */}
+                <div className="grid md:grid-cols-3 gap-4">
+                  <button
+                    className="btn btn-secondary py-4 flex flex-col items-center gap-2"
+                    onClick={() => handleGenerateReport('text')}
+                    disabled={generating || reportRows.length === 0}
+                  >
+                    <span className="text-2xl">📄</span>
+                    <span className="font-medium">Table 8.3 (Text)</span>
+                    <span className="text-xs text-tertiary">For manual entry</span>
+                  </button>
+                  <button
+                    className="btn btn-secondary py-4 flex flex-col items-center gap-2"
+                    onClick={() => handleGenerateReport('csv')}
+                    disabled={generating || reportRows.length === 0}
+                  >
+                    <span className="text-2xl">📊</span>
+                    <span className="font-medium">Full Report (CSV)</span>
+                    <span className="text-xs text-tertiary">For accountant</span>
+                  </button>
+                  <button
+                    className="btn btn-secondary py-4 flex flex-col items-center gap-2 opacity-50"
+                    disabled
+                  >
+                    <span className="text-2xl">📑</span>
+                    <span className="font-medium">PDF Report</span>
+                    <span className="text-xs text-tertiary">Coming soon</span>
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </>
       )}
 
-      {/* Instructions - always visible */}
+      {/* Instructions - context-aware */}
       <div className="card p-6">
-        <h2 className="text-lg font-semibold mb-4">How to File</h2>
-        <ol className="space-y-3 text-sm text-secondary">
-          <li className="flex gap-2">
-            <span className="text-info font-bold">1.</span>
-            Log in to <a href="https://www.emta.ee/eng" target="_blank" rel="noopener noreferrer" className="text-info hover:underline">e-MTA</a> (Estonian Tax and Customs Board)
-          </li>
-          <li className="flex gap-2">
-            <span className="text-info font-bold">2.</span>
-            Navigate to your annual income tax return (form A)
-          </li>
-          <li className="flex gap-2">
-            <span className="text-info font-bold">3.</span>
-            Find Table 8.3 &quot;Income from foreign sources&quot;
-          </li>
-          <li className="flex gap-2">
-            <span className="text-info font-bold">4.</span>
-            Add each row from the report above (country: USA, income source: as shown)
-          </li>
-          <li className="flex gap-2">
-            <span className="text-info font-bold">5.</span>
-            The tax will be calculated automatically at the current rate
-          </li>
-        </ol>
-        <div className="mt-4 p-3 bg-tertiary rounded text-sm">
-          <strong>Tip:</strong> Keep the CSV export and your Kraken statements for at least 7 years
-          in case of audit.
-        </div>
+        {summary?.accountType === 'business' ? (
+          <>
+            <h2 className="text-lg font-semibold mb-4">Business Accounting Notes</h2>
+            <div className="space-y-4 text-sm text-secondary">
+              <div>
+                <strong className="text-primary">Estonian Corporate Tax System:</strong>
+                <ul className="mt-2 ml-4 space-y-1 list-disc">
+                  <li><span className="text-success">0% tax</span> on retained/reinvested profits</li>
+                  <li>Tax only triggered when distributing profits (dividends, etc.)</li>
+                  <li>Distribution tax: ~28% effective rate (22/78 in 2025)</li>
+                </ul>
+              </div>
+
+              <div>
+                <strong className="text-primary">For Your Accountant:</strong>
+                <ul className="mt-2 ml-4 space-y-1 list-disc">
+                  <li>Download the Excel report for bookkeeping entries</li>
+                  <li>Positions sheet shows grouped trades with averaged prices</li>
+                  <li>All fees (rollovers, trading) are itemized separately</li>
+                  <li>Balance sheet shows crypto holdings at year-end</li>
+                </ul>
+              </div>
+
+              <div className="p-3 bg-tertiary rounded">
+                <strong>Record Retention:</strong> Keep all reports and Kraken statements for at least 7 years
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <h2 className="text-lg font-semibold mb-4">How to File (Individual)</h2>
+            <ol className="space-y-3 text-sm text-secondary">
+              <li className="flex gap-2">
+                <span className="text-info font-bold">1.</span>
+                Log in to <a href="https://www.emta.ee/eng" target="_blank" rel="noopener noreferrer" className="text-info hover:underline">e-MTA</a> (Estonian Tax and Customs Board)
+              </li>
+              <li className="flex gap-2">
+                <span className="text-info font-bold">2.</span>
+                Navigate to your annual income tax return (form A)
+              </li>
+              <li className="flex gap-2">
+                <span className="text-info font-bold">3.</span>
+                Find Table 8.3 &quot;Income from foreign sources&quot;
+              </li>
+              <li className="flex gap-2">
+                <span className="text-info font-bold">4.</span>
+                Add each row from the report above (country: USA, income source: as shown)
+              </li>
+              <li className="flex gap-2">
+                <span className="text-info font-bold">5.</span>
+                The tax will be calculated automatically at the current rate
+              </li>
+            </ol>
+            <div className="mt-4 p-3 bg-tertiary rounded text-sm">
+              <strong>Tip:</strong> Keep the CSV export and your Kraken statements for at least 7 years
+              in case of audit.
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

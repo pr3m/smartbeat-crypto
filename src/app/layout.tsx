@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { ConnectionStatus } from '@/components/ConnectionStatus';
+import { SyncStatusIndicator } from '@/components/SyncStatusIndicator';
 import { Providers } from '@/components/Providers';
 import { ChatFAB, ChatPanel } from '@/components/chat';
 import './globals.css';
@@ -12,7 +13,7 @@ export const metadata: Metadata = {
 
 function Navigation() {
   return (
-    <header className="bg-secondary border-b border-primary">
+    <header className="bg-secondary border-b border-primary sticky top-0 z-30">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center h-16">
           <div className="flex items-center gap-8">
@@ -47,6 +48,7 @@ function Navigation() {
             </nav>
           </div>
           <div className="flex items-center gap-4">
+            <SyncStatusIndicator />
             <ConnectionStatus />
             <Link
               href="/settings"

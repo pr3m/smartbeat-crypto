@@ -8,6 +8,7 @@ import {
   createAuthHeaders,
   formatPostData,
 } from './auth';
+import { krakenRateLimiter } from './rate-limiter';
 import type {
   KrakenResponse,
   TickerInfo,
@@ -206,29 +207,36 @@ export class KrakenClient {
 
   /**
    * Get all trades with pagination
+   * Uses rate limiter with exponential backoff for reliable fetching
    */
   async getAllTradesHistory(
     start?: number,
     end?: number,
-    onProgress?: (count: number, total: number) => void
+    onProgress?: (count: number, total: number) => void,
+    signal?: AbortSignal
   ): Promise<TradesHistory['trades']> {
     let allTrades: TradesHistory['trades'] = {};
     let offset = 0;
     let totalCount = 0;
 
     do {
-      const result = await this.getTradesHistory('all', true, start, end, offset);
+      // Check for abort
+      if (signal?.aborted) {
+        throw new Error('Operation aborted');
+      }
+
+      // Use rate limiter with automatic retry on rate limit errors
+      const result = await krakenRateLimiter.executeWithRetry(
+        () => this.getTradesHistory('all', true, start, end, offset),
+        signal
+      );
+
       allTrades = { ...allTrades, ...result.trades };
       totalCount = result.count;
       offset = Object.keys(allTrades).length;
 
       if (onProgress) {
         onProgress(offset, totalCount);
-      }
-
-      // Small delay to avoid rate limiting
-      if (offset < totalCount) {
-        await new Promise(resolve => setTimeout(resolve, 200));
       }
     } while (offset < totalCount);
 
@@ -270,29 +278,36 @@ export class KrakenClient {
 
   /**
    * Get all ledgers with pagination
+   * Uses rate limiter with exponential backoff for reliable fetching
    */
   async getAllLedgers(
     start?: number,
     end?: number,
-    onProgress?: (count: number, total: number) => void
+    onProgress?: (count: number, total: number) => void,
+    signal?: AbortSignal
   ): Promise<Ledgers['ledger']> {
     let allLedgers: Ledgers['ledger'] = {};
     let offset = 0;
     let totalCount = 0;
 
     do {
-      const result = await this.getLedgers(undefined, 'currency', undefined, start, end, offset);
+      // Check for abort
+      if (signal?.aborted) {
+        throw new Error('Operation aborted');
+      }
+
+      // Use rate limiter with automatic retry on rate limit errors
+      const result = await krakenRateLimiter.executeWithRetry(
+        () => this.getLedgers(undefined, 'currency', undefined, start, end, offset),
+        signal
+      );
+
       allLedgers = { ...allLedgers, ...result.ledger };
       totalCount = result.count;
       offset = Object.keys(allLedgers).length;
 
       if (onProgress) {
         onProgress(offset, totalCount);
-      }
-
-      // Small delay to avoid rate limiting
-      if (offset < totalCount) {
-        await new Promise(resolve => setTimeout(resolve, 200));
       }
     } while (offset < totalCount);
 

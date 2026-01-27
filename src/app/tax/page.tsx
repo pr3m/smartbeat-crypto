@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import { getTaxRate, formatEuroAmount } from '@/lib/tax/estonia-rules';
+import { getTaxRate, formatEuroAmount, type AccountType } from '@/lib/tax/estonia-rules';
 import { Tooltip, HelpIcon, InfoBadge } from '@/components/Tooltip';
 
 type CostBasisMethod = 'FIFO' | 'WEIGHTED_AVERAGE';
@@ -10,12 +10,15 @@ type CostBasisMethod = 'FIFO' | 'WEIGHTED_AVERAGE';
 interface TaxSummary {
   taxYear: number;
   taxRate: number;
-  totalProceeds: number;
-  totalCostBasis: number;
+  accountType: AccountType;
   totalGains: number;
   totalLosses: number;
+  netPnL: number;
   taxableAmount: number;
   estimatedTax: number;
+  retainedProfit: number;
+  distributionTaxRate: number;
+  potentialDistributionTax: number;
   tradingGains: number;
   tradingLosses: number;
   marginGains: number;
@@ -55,12 +58,15 @@ export default function TaxOverviewPage() {
       setSummary({
         taxYear: selectedYear,
         taxRate,
-        totalProceeds: 0,
-        totalCostBasis: 0,
+        accountType: 'individual',
         totalGains: 0,
         totalLosses: 0,
+        netPnL: 0,
         taxableAmount: 0,
         estimatedTax: 0,
+        retainedProfit: 0,
+        distributionTaxRate: 0,
+        potentialDistributionTax: 0,
         tradingGains: 0,
         tradingLosses: 0,
         marginGains: 0,
@@ -84,12 +90,15 @@ export default function TaxOverviewPage() {
   const displaySummary = summary || {
     taxYear: selectedYear,
     taxRate,
-    totalProceeds: 0,
-    totalCostBasis: 0,
+    accountType: 'individual' as AccountType,
     totalGains: 0,
     totalLosses: 0,
+    netPnL: 0,
     taxableAmount: 0,
     estimatedTax: 0,
+    retainedProfit: 0,
+    distributionTaxRate: 0,
+    potentialDistributionTax: 0,
     tradingGains: 0,
     tradingLosses: 0,
     marginGains: 0,
@@ -102,23 +111,46 @@ export default function TaxOverviewPage() {
     taxableTransactions: 0,
   };
 
+  const isBusiness = displaySummary.accountType === 'business';
+
   const tooltips = {
     totalGains: (
       <div>
         <strong className="text-green-400">Total Gains</strong>
         <p className="mt-1">The sum of all profitable trades and crypto income during this tax year.</p>
-        <p className="mt-2 text-yellow-400">In Estonia, this is your taxable amount - you pay tax on ALL gains.</p>
+        {isBusiness ? (
+          <p className="mt-2 text-green-400">As a business, gains stay in the company tax-free until distributed.</p>
+        ) : (
+          <p className="mt-2 text-yellow-400">In Estonia, this is your taxable amount - you pay tax on ALL gains.</p>
+        )}
       </div>
     ),
     totalLosses: (
       <div>
         <strong className="text-red-400">Total Losses</strong>
         <p className="mt-1">The sum of all losing trades during this tax year.</p>
-        <p className="mt-2 text-yellow-400">⚠️ Important: In Estonia, losses CANNOT be deducted from gains. You still pay tax on your full gains amount.</p>
-        <p className="mt-2 text-gray-400">This differs from many other countries where you can offset gains with losses.</p>
+        {isBusiness ? (
+          <p className="mt-2 text-green-400">As a business, losses reduce your net profit (unlike individuals).</p>
+        ) : (
+          <>
+            <p className="mt-2 text-yellow-400">⚠️ Important: In Estonia, losses CANNOT be deducted from gains. You still pay tax on your full gains amount.</p>
+            <p className="mt-2 text-gray-400">This differs from many other countries where you can offset gains with losses.</p>
+          </>
+        )}
       </div>
     ),
-    taxRate: (
+    taxRate: isBusiness ? (
+      <div>
+        <strong className="text-blue-400">Estonian Business Taxation</strong>
+        <p className="mt-1">Estonia has a unique corporate tax system:</p>
+        <ul className="mt-2 space-y-1 text-gray-300">
+          <li>• <strong className="text-green-400">0% tax</strong> on retained/reinvested profits</li>
+          <li>• Tax only when distributing (dividends, etc.)</li>
+          <li>• Distribution tax: ~28% effective (22/78) in 2025</li>
+        </ul>
+        <p className="mt-2 text-gray-400">Your trading P&L stays in the company tax-free until you take it out.</p>
+      </div>
+    ) : (
       <div>
         <strong className="text-blue-400">Estonian Tax Rate</strong>
         <p className="mt-1">Cryptocurrency is taxed as regular income in Estonia.</p>
@@ -129,7 +161,14 @@ export default function TaxOverviewPage() {
         <p className="mt-2 text-gray-400">There is no separate capital gains tax - all crypto income is income tax.</p>
       </div>
     ),
-    estimatedTax: (
+    estimatedTax: isBusiness ? (
+      <div>
+        <strong className="text-green-400">No Immediate Tax Due</strong>
+        <p className="mt-1">As a business, you pay 0% tax on retained profits.</p>
+        <p className="mt-2 text-gray-400">Tax is only due when you distribute profits (dividends, salary, etc.).</p>
+        <p className="mt-2 text-yellow-400">Distribution tax: ~{((displaySummary.distributionTaxRate || 0) * 100).toFixed(1)}% effective rate</p>
+      </div>
+    ) : (
       <div>
         <strong className="text-blue-400">Estimated Tax Due</strong>
         <p className="mt-1">This is calculated as:</p>
@@ -138,19 +177,15 @@ export default function TaxOverviewPage() {
         <p className="mt-2 text-yellow-400">This is an estimate. Your actual tax may vary based on other income.</p>
       </div>
     ),
-    totalProceeds: (
+    netPnL: (
       <div>
-        <strong>Total Proceeds</strong>
-        <p className="mt-1">The total amount you received from selling cryptocurrency.</p>
-        <p className="mt-2 text-gray-400">This is the &quot;sale price&quot; side of your trades - what you got back in EUR (or equivalent).</p>
-      </div>
-    ),
-    totalCostBasis: (
-      <div>
-        <strong>Total Cost Basis</strong>
-        <p className="mt-1">What you originally paid for the crypto you sold, calculated using {costBasisMethod === 'FIFO' ? 'FIFO' : 'Weighted Average'} method.</p>
-        <p className="mt-2 text-gray-400">Cost basis includes the purchase price plus any fees paid when buying.</p>
-        <p className="mt-2">Your gain/loss = Proceeds - Cost Basis</p>
+        <strong>Net Profit/Loss</strong>
+        <p className="mt-1">Your total gains minus total losses.</p>
+        {isBusiness ? (
+          <p className="mt-2 text-green-400">This is your company&apos;s trading P&L for accounting purposes.</p>
+        ) : (
+          <p className="mt-2 text-yellow-400">Note: In Estonia, losses don&apos;t reduce your tax - only gains are taxed.</p>
+        )}
       </div>
     ),
     costBasisMethod: (
@@ -597,67 +632,108 @@ export default function TaxOverviewPage() {
             {/* Tax Calculation */}
             <div className="card p-6">
               <h2 className="text-lg font-semibold mb-4 flex items-center">
-                Tax Calculation
+                {isBusiness ? 'P&L Summary' : 'Tax Calculation'}
                 <HelpIcon
-                  tooltip={
-                    <div>
-                      <strong>Tax Calculation</strong>
-                      <p className="mt-1">Step-by-step breakdown of how your tax is calculated.</p>
-                      <p className="mt-2 text-yellow-400">Remember: In Estonia, only gains are taxed. Losses are tracked but don&apos;t reduce your tax.</p>
-                    </div>
-                  }
+                  tooltip={tooltips.taxRate}
                 />
               </h2>
+
+              {/* Account type indicator */}
+              <div className={`text-xs px-2 py-1 rounded inline-block mb-4 ${isBusiness ? 'bg-blue-500/20 text-blue-400' : 'bg-tertiary text-secondary'}`}>
+                {isBusiness ? 'Business Account (OÜ)' : 'Individual Account'}
+              </div>
+
               <div className="space-y-3">
-                <Tooltip content={tooltips.totalProceeds} position="left">
+                <Tooltip content={tooltips.totalGains} position="left">
                   <div className="flex justify-between py-2 cursor-help">
                     <span className="text-secondary flex items-center">
-                      Total Proceeds
+                      Total Gains
                       <span className="ml-1 text-blue-500 text-xs">ⓘ</span>
                     </span>
-                    <span className="mono">{formatEuroAmount(displaySummary.totalProceeds)}</span>
+                    <span className="mono text-success">+{formatEuroAmount(displaySummary.totalGains)}</span>
                   </div>
                 </Tooltip>
 
-                <Tooltip content={tooltips.totalCostBasis} position="left">
+                <Tooltip content={tooltips.totalLosses} position="left">
                   <div className="flex justify-between py-2 cursor-help">
                     <span className="text-secondary flex items-center">
-                      Total Cost Basis ({costBasisMethod})
+                      Total Losses
                       <span className="ml-1 text-blue-500 text-xs">ⓘ</span>
                     </span>
-                    <span className="mono">-{formatEuroAmount(displaySummary.totalCostBasis)}</span>
+                    <span className={`mono ${isBusiness ? 'text-danger' : 'text-danger line-through'}`}>
+                      -{formatEuroAmount(displaySummary.totalLosses)}
+                    </span>
                   </div>
                 </Tooltip>
 
-                <div className="flex justify-between py-2 border-t border-primary">
-                  <span className="text-secondary">Net Gain/Loss</span>
-                  <span className="mono">
-                    {displaySummary.totalGains - displaySummary.totalLosses >= 0 ? '+' : ''}
-                    {formatEuroAmount(displaySummary.totalGains - displaySummary.totalLosses)}
-                  </span>
-                </div>
+                <Tooltip content={tooltips.netPnL} position="left">
+                  <div className="flex justify-between py-2 border-t border-primary cursor-help">
+                    <span className="text-secondary flex items-center">
+                      Net P&L
+                      <span className="ml-1 text-blue-500 text-xs">ⓘ</span>
+                    </span>
+                    <span className={`mono ${displaySummary.netPnL >= 0 ? 'text-success' : 'text-danger'}`}>
+                      {displaySummary.netPnL >= 0 ? '+' : ''}{formatEuroAmount(displaySummary.netPnL)}
+                    </span>
+                  </div>
+                </Tooltip>
 
-                <div className="flex justify-between py-2">
-                  <span className="text-secondary">Losses (not deductible)</span>
-                  <span className="mono text-danger line-through">-{formatEuroAmount(displaySummary.totalLosses)}</span>
-                </div>
+                {isBusiness ? (
+                  <>
+                    {/* Business: Show retained profit and distribution tax info */}
+                    <div className="flex justify-between py-2 border-t border-primary font-semibold">
+                      <span>Retained Profit</span>
+                      <span className={`mono ${displaySummary.retainedProfit >= 0 ? 'text-success' : 'text-danger'}`}>
+                        {formatEuroAmount(displaySummary.retainedProfit)}
+                      </span>
+                    </div>
 
-                <div className="flex justify-between py-2 border-t border-primary font-semibold">
-                  <span>Taxable Amount</span>
-                  <span className="mono text-success">{formatEuroAmount(displaySummary.taxableAmount)}</span>
-                </div>
+                    <div className="flex justify-between py-2">
+                      <span className="text-secondary">Tax on Retained Profits</span>
+                      <span className="mono text-success font-semibold">0%</span>
+                    </div>
 
-                <div className="flex justify-between py-2">
-                  <span className="text-secondary">Tax Rate ({selectedYear})</span>
-                  <span className="mono">{(taxRate * 100).toFixed(0)}%</span>
-                </div>
+                    <div className="flex justify-between py-3 border-t border-primary bg-green-500/10 -mx-6 px-6 mt-3 rounded-b-lg">
+                      <span className="font-bold text-lg">Current Tax Due</span>
+                      <span className="font-bold text-lg text-success mono">0,00 €</span>
+                    </div>
 
-                <div className="flex justify-between py-3 border-t border-primary bg-tertiary -mx-6 px-6 mt-3 rounded-b-lg">
-                  <span className="font-bold text-lg">Estimated Tax Due</span>
-                  <span className="font-bold text-lg text-info mono">
-                    {formatEuroAmount(displaySummary.estimatedTax)}
-                  </span>
-                </div>
+                    {displaySummary.retainedProfit > 0 && (
+                      <div className="mt-4 p-3 bg-tertiary rounded-lg text-sm">
+                        <div className="text-secondary mb-2">If distributed as dividends:</div>
+                        <div className="flex justify-between">
+                          <span className="text-secondary">Distribution Tax (~{((displaySummary.distributionTaxRate || 0) * 100).toFixed(1)}%)</span>
+                          <span className="mono text-warning">{formatEuroAmount(displaySummary.potentialDistributionTax)}</span>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {/* Individual: Show taxable amount and tax due */}
+                    <div className="flex justify-between py-2">
+                      <span className="text-secondary">Losses (not deductible)</span>
+                      <span className="mono text-tertiary">n/a</span>
+                    </div>
+
+                    <div className="flex justify-between py-2 border-t border-primary font-semibold">
+                      <span>Taxable Amount</span>
+                      <span className="mono text-success">{formatEuroAmount(displaySummary.taxableAmount)}</span>
+                    </div>
+
+                    <div className="flex justify-between py-2">
+                      <span className="text-secondary">Tax Rate ({selectedYear})</span>
+                      <span className="mono">{(taxRate * 100).toFixed(0)}%</span>
+                    </div>
+
+                    <div className="flex justify-between py-3 border-t border-primary bg-tertiary -mx-6 px-6 mt-3 rounded-b-lg">
+                      <span className="font-bold text-lg">Estimated Tax Due</span>
+                      <span className="font-bold text-lg text-info mono">
+                        {formatEuroAmount(displaySummary.estimatedTax)}
+                      </span>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </div>

@@ -1,29 +1,64 @@
 /**
  * Estonian Tax Rules for Cryptocurrency
  *
- * Key rules:
- * - Tax Rate: 24% income tax on gains (from 2026, was 22% before)
+ * INDIVIDUAL (Natural Person):
+ * - Tax Rate: 22% (2025), 24% (2026+) income tax on gains
  * - Capital Gains: No separate CGT - taxed as regular income
  * - Loss Deduction: NOT allowed in Estonia
  * - Cost Basis: FIFO (primary) or Weighted Average
  * - Reporting: Table 8.3 for foreign exchanges (Kraken = US company)
  * - Taxable Events: Trade profits, margin settlements, staking rewards, airdrops
  * - Non-Taxable: Holding, deposits, withdrawals, internal transfers
- * - DAC8/CARF: From 2026, exchanges report to Estonian Tax Authority
+ *
+ * BUSINESS (OÜ / Company):
+ * - Tax Rate: 0% on retained/reinvested profits (Estonia's unique system)
+ * - Tax only when profits are DISTRIBUTED (dividends, salaries, etc.)
+ * - Distribution tax: 22/78 (~28.2%) in 2025, 24/76 (~31.6%) in 2026
+ * - All trading P&L tracked for accounting, but no immediate tax liability
+ * - Losses CAN offset gains (unlike individual)
+ * - Report in annual accounts, not Table 8.3
+ *
+ * DAC8/CARF: From 2026, exchanges report to Estonian Tax Authority
  */
+
+export type AccountType = 'individual' | 'business';
 
 import type { TransactionType, TransactionCategory } from '@/lib/kraken/types';
 
-// Estonian tax rates by year
+// Estonian individual income tax rates by year
 export const TAX_RATES: Record<number, number> = {
   2023: 0.22,
   2024: 0.22,
   2025: 0.22,
-  2026: 0.24, // New rate from 2026
+  2026: 0.22, // 2026 rate stays at 22%
 };
 
-export function getTaxRate(year: number): number {
-  return TAX_RATES[year] || 0.24; // Default to current rate
+// Estonian corporate distribution tax rates (applied to net dividend)
+// Formula: gross = net / (1 - rate), effective rate on gross = rate / (1 - rate)
+export const DISTRIBUTION_TAX_RATES: Record<number, number> = {
+  2023: 0.20, // 20/80 = 25% effective
+  2024: 0.20, // 20/80 = 25% effective
+  2025: 0.22, // 22/78 = ~28.2% effective
+  2026: 0.22, // 22/78 = ~28.2% effective (24% proposed but may not pass)
+};
+
+export function getTaxRate(year: number, accountType: AccountType = 'individual'): number {
+  if (accountType === 'business') {
+    // Businesses pay 0% on retained profits
+    // Only taxed when distributing - return 0 for trading P&L purposes
+    return 0;
+  }
+  return TAX_RATES[year] || 0.22;
+}
+
+export function getDistributionTaxRate(year: number): number {
+  return DISTRIBUTION_TAX_RATES[year] || 0.22;
+}
+
+// Calculate effective tax rate on gross distribution
+export function getEffectiveDistributionRate(year: number): number {
+  const rate = getDistributionTaxRate(year);
+  return rate / (1 - rate); // e.g., 0.22 / 0.78 = ~28.2%
 }
 
 // Transaction type to category mapping
@@ -146,17 +181,21 @@ export function mapKrakenLedgerType(
 export interface TaxSummary {
   taxYear: number;
   taxRate: number;
+  accountType: AccountType;
 
-  // Gains breakdown
-  totalProceeds: number;
-  totalCostBasis: number;
+  // P&L breakdown (same for both account types)
   totalGains: number;     // Sum of gains only (positive amounts)
-  totalLosses: number;    // Sum of losses (negative amounts, for info only)
-  netGainLoss: number;    // totalGains - totalLosses (for reference)
+  totalLosses: number;    // Sum of losses (negative amounts)
+  netPnL: number;         // totalGains - totalLosses (net profit/loss)
 
-  // Estonian specific
-  taxableAmount: number;  // In Estonia: only gains count, losses NOT deductible
-  estimatedTax: number;   // taxableAmount * taxRate
+  // Individual-specific (losses not deductible)
+  taxableAmount: number;  // Individual: only gains; Business: 0 (no immediate tax)
+  estimatedTax: number;   // Individual: taxableAmount * taxRate; Business: 0
+
+  // Business-specific
+  retainedProfit: number; // Net P&L retained in company (0% tax while retained)
+  distributionTaxRate: number; // Tax rate if profits are distributed
+  potentialDistributionTax: number; // Tax if all profits distributed
 
   // Breakdown by type
   tradingGains: number;
@@ -172,6 +211,11 @@ export interface TaxSummary {
   // Stats
   totalTransactions: number;
   taxableTransactions: number;
+
+  // Deprecated - keeping for backwards compatibility
+  totalProceeds?: number;
+  totalCostBasis?: number;
+  netGainLoss?: number;
 }
 
 export interface TaxEventInput {
@@ -187,12 +231,12 @@ export interface TaxEventInput {
  */
 export function calculateTaxSummary(
   taxYear: number,
-  events: TaxEventInput[]
+  events: TaxEventInput[],
+  accountType: AccountType = 'individual'
 ): TaxSummary {
-  const taxRate = getTaxRate(taxYear);
+  const taxRate = getTaxRate(taxYear, accountType);
+  const distributionTaxRate = getEffectiveDistributionRate(taxYear);
 
-  let totalProceeds = 0;
-  let totalCostBasis = 0;
   let totalGains = 0;
   let totalLosses = 0;
 
@@ -209,9 +253,6 @@ export function calculateTaxSummary(
   let taxableTransactions = 0;
 
   for (const event of events) {
-    totalProceeds += event.proceeds || 0;
-    totalCostBasis += event.costBasis || 0;
-
     if (event.gain > 0) {
       totalGains += event.gain;
     } else {
@@ -262,22 +303,41 @@ export function calculateTaxSummary(
     }
   }
 
-  const netGainLoss = totalGains - totalLosses;
+  const netPnL = totalGains - totalLosses;
 
-  // Estonian specific: ONLY gains are taxable, losses NOT deductible
-  const taxableAmount = totalGains;
-  const estimatedTax = taxableAmount * taxRate;
+  // Calculate tax based on account type
+  let taxableAmount: number;
+  let estimatedTax: number;
+  let retainedProfit: number;
+  let potentialDistributionTax: number;
+
+  if (accountType === 'business') {
+    // Business: 0% tax on retained profits
+    // Losses CAN offset gains for accounting purposes
+    taxableAmount = 0; // No immediate tax liability
+    estimatedTax = 0;
+    retainedProfit = netPnL; // Net P&L (gains minus losses)
+    potentialDistributionTax = netPnL > 0 ? netPnL * distributionTaxRate : 0;
+  } else {
+    // Individual: Only gains taxable, losses NOT deductible
+    taxableAmount = totalGains;
+    estimatedTax = taxableAmount * taxRate;
+    retainedProfit = 0;
+    potentialDistributionTax = 0;
+  }
 
   return {
     taxYear,
     taxRate,
-    totalProceeds,
-    totalCostBasis,
+    accountType,
     totalGains,
     totalLosses,
-    netGainLoss,
+    netPnL,
     taxableAmount,
     estimatedTax,
+    retainedProfit,
+    distributionTaxRate,
+    potentialDistributionTax,
     tradingGains,
     tradingLosses,
     marginGains,
@@ -289,6 +349,8 @@ export function calculateTaxSummary(
     otherIncome,
     totalTransactions: events.length,
     taxableTransactions,
+    // Backwards compatibility
+    netGainLoss: netPnL,
   };
 }
 
