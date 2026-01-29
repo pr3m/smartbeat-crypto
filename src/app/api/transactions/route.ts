@@ -46,16 +46,27 @@ export async function GET(request: NextRequest) {
       prisma.transaction.count({ where }),
     ]);
 
-    // Get summary stats
-    const stats = await prisma.transaction.aggregate({
-      where,
-      _sum: {
-        gain: true,
-        cost: true,
-        fee: true,
-      },
-      _count: true,
-    });
+    // Get summary stats (excluding margin trades from gain - their P&L is meaningless per-fill)
+    // Build spot-only filter: if user filtered to a specific type, use it; otherwise exclude MARGIN_TRADE
+    const spotWhere = type && type !== 'all' && type !== 'MARGIN_TRADE'
+      ? where  // User already filtered to a non-margin type
+      : { ...where, type: { not: 'MARGIN_TRADE' } };
+    const [stats, spotGainStats] = await Promise.all([
+      prisma.transaction.aggregate({
+        where,
+        _sum: {
+          cost: true,
+          fee: true,
+        },
+        _count: true,
+      }),
+      prisma.transaction.aggregate({
+        where: spotWhere,
+        _sum: {
+          gain: true,
+        },
+      }),
+    ]);
 
     // Get counts by type
     const countsByType = await prisma.transaction.groupBy({
@@ -80,7 +91,7 @@ export async function GET(request: NextRequest) {
         hasMore: offset + limit < total,
       },
       stats: {
-        totalGain: stats._sum.gain || 0,
+        totalGain: spotGainStats._sum.gain || 0, // Excludes margin trades (use Positions view for margin P&L)
         totalCost: stats._sum.cost || 0,
         totalFees: stats._sum.fee || 0,
         count: stats._count,

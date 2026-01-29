@@ -136,9 +136,17 @@ export function ChatHistory() {
         ) : (
           <div className="p-2 space-y-1">
             {conversations.map((conv) => (
-              <button
+              <div
                 key={conv.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => handleSelectConversation(conv)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleSelectConversation(conv);
+                  }
+                }}
                 className={`w-full group flex items-start justify-between p-3 rounded-lg text-left transition-colors ${
                   currentConversationId === conv.id
                     ? 'bg-tertiary border border-info/30'
@@ -169,7 +177,7 @@ export function ChatHistory() {
                     />
                   </svg>
                 </button>
-              </button>
+              </div>
             ))}
           </div>
         )}

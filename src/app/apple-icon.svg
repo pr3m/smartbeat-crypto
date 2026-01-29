@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">
+  <defs>
+    <linearGradient id="applePulse" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#34d399"/>
+      <stop offset="50%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#059669"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="90" cy="90" r="85" fill="#0f172a"/>
+
+  <!-- Heartbeat pulse line -->
+  <path
+    d="M25 90 L50 90 L62 55 L90 125 L118 45 L130 90 L155 90"
+    fill="none"
+    stroke="url(#applePulse)"
+    stroke-width="12"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

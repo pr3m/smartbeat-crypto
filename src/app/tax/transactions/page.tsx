@@ -20,6 +20,7 @@ interface Transaction {
   price: number | null;
   cost: number | null;
   fee: number | null;
+  feeAsset: string | null;
   costBasis: number | null;
   proceeds: number | null;
   gain: number | null;
@@ -29,6 +30,17 @@ interface Transaction {
     gain: number;
     taxableAmount: number;
   }>;
+}
+
+// Format fee with correct currency symbol
+function formatFee(fee: number | null, feeAsset: string | null): string {
+  if (fee === null) return '-';
+  const formatted = fee.toLocaleString('et-EE', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+  if (!feeAsset || feeAsset === 'EUR' || feeAsset === 'ZEUR') {
+    return `${formatted} €`;
+  }
+  // For crypto assets, show asset name after the number
+  return `${formatted} ${feeAsset.replace(/^[XZ]/, '')}`; // Remove Kraken's X/Z prefix
 }
 
 interface GroupedPosition {
@@ -1108,12 +1120,15 @@ export default function TransactionsPage() {
                             {tx.cost ? formatEuroAmount(tx.cost) : '-'}
                           </td>
                           <td className="px-4 py-3 text-sm text-right mono text-tertiary">
-                            {tx.fee ? formatEuroAmount(tx.fee) : '-'}
+                            {formatFee(tx.fee, tx.feeAsset)}
                           </td>
                           <td className={`px-4 py-3 text-sm text-right mono font-semibold ${
+                            tx.type === 'MARGIN_TRADE' ? 'text-tertiary' :
                             tx.gain === null ? '' : tx.gain >= 0 ? 'text-success' : 'text-danger'
                           }`}>
-                            {tx.gain !== null ? (
+                            {tx.type === 'MARGIN_TRADE' ? (
+                              <span title="See Positions view for margin P&L">-</span>
+                            ) : tx.gain !== null ? (
                               <>
                                 {tx.gain >= 0 ? '+' : ''}{formatEuroAmount(tx.gain)}
                               </>
@@ -1173,7 +1188,7 @@ export default function TransactionsPage() {
                                 </div>
                                 <div>
                                   <div className="text-xs text-tertiary uppercase mb-1">Fee</div>
-                                  <div className="mono text-tertiary">{tx.fee ? formatEuroAmount(tx.fee) : '-'}</div>
+                                  <div className="mono text-tertiary">{formatFee(tx.fee, tx.feeAsset)}</div>
                                 </div>
 
                                 {/* Row 3: Tax Details */}
@@ -1187,13 +1202,17 @@ export default function TransactionsPage() {
                                 </div>
                                 <div>
                                   <div className="text-xs text-tertiary uppercase mb-1">Gain/Loss</div>
-                                  <div className={`mono font-semibold ${
-                                    tx.gain === null ? '' : tx.gain >= 0 ? 'text-success' : 'text-danger'
-                                  }`}>
-                                    {tx.gain !== null ? (
-                                      <>{tx.gain >= 0 ? '+' : ''}{formatEuroAmount(tx.gain)}</>
-                                    ) : '-'}
-                                  </div>
+                                  {tx.type === 'MARGIN_TRADE' ? (
+                                    <div className="text-tertiary text-sm">See Positions view</div>
+                                  ) : (
+                                    <div className={`mono font-semibold ${
+                                      tx.gain === null ? '' : tx.gain >= 0 ? 'text-success' : 'text-danger'
+                                    }`}>
+                                      {tx.gain !== null ? (
+                                        <>{tx.gain >= 0 ? '+' : ''}{formatEuroAmount(tx.gain)}</>
+                                      ) : '-'}
+                                    </div>
+                                  )}
                                 </div>
                                 <div>
                                   <div className="text-xs text-tertiary uppercase mb-1">Tax Category</div>
@@ -1310,15 +1329,14 @@ export default function TransactionsPage() {
             </Tooltip>
             <Tooltip content={
               <div>
-                <strong>Net Gain/Loss</strong>
-                <p className="mt-1">Sum of gains minus losses for displayed transactions.</p>
-                <p className="mt-2 text-yellow-400">Warning: This raw sum may not match your tax liability!</p>
-                <p className="mt-2 text-gray-400">For margin trades, this sums individual fills which can over-count. Check Tax Overview for accurate numbers.</p>
+                <strong>Spot Trade P&L</strong>
+                <p className="mt-1">Sum of gains minus losses for spot trades only.</p>
+                <p className="mt-2 text-gray-400">Margin trade P&L is excluded - see Positions view for margin P&L.</p>
               </div>
             } position="top">
               <div className="cursor-help">
                 <div className="text-tertiary flex items-center">
-                  Net Gain/Loss <span className="ml-1 text-blue-500 text-xs">ⓘ</span>
+                  Spot P&L <span className="ml-1 text-blue-500 text-xs">ⓘ</span>
                 </div>
                 <div className={`font-semibold mono ${stats.totalGain >= 0 ? 'text-success' : 'text-danger'}`}>
                   {stats.totalGain >= 0 ? '+' : ''}{formatEuroAmount(stats.totalGain)}

@@ -203,7 +203,9 @@ export function PositionsTab({ testMode, currentPrice, onPositionChange }: Posit
     }
   };
 
-  const handleClosePosition = async (positionId: string) => {
+  const [confirmCloseId, setConfirmCloseId] = useState<string | null>(null);
+
+  const handleClosePosition = (positionId: string) => {
     if (!testMode) {
       addToast({
         title: 'Live Trading',
@@ -212,11 +214,16 @@ export function PositionsTab({ testMode, currentPrice, onPositionChange }: Posit
       });
       return;
     }
+    // Show confirmation dialog
+    setConfirmCloseId(positionId);
+  };
 
+  const executeClosePosition = async (positionId: string) => {
+    setConfirmCloseId(null);
     setClosingId(positionId);
     try {
       const res = await fetch('/api/simulated/positions', {
-        method: 'DELETE',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ positionId, closePrice: currentPrice }),
       });
@@ -424,6 +431,70 @@ export function PositionsTab({ testMode, currentPrice, onPositionChange }: Posit
             }}
             marketSnapshot={marketSnapshot}
           />
+        );
+      })()}
+
+      {/* Close Position Confirmation Modal */}
+      {confirmCloseId && (() => {
+        const position = positionCardData.find(p => p.id === confirmCloseId);
+        if (!position) return null;
+        const pnl = calculatePnL(position);
+        const isProfitable = pnl >= 0;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div
+              className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+              onClick={() => setConfirmCloseId(null)}
+            />
+            <div className="relative bg-secondary border border-primary rounded-xl shadow-2xl max-w-md w-full mx-4 overflow-hidden">
+              <div className={`${isProfitable ? 'bg-green-500' : 'bg-red-500'} px-6 py-4`}>
+                <h2 className="text-xl font-bold text-white">Confirm Close Position</h2>
+                <p className="text-white/80 text-sm mt-1">
+                  Close {position.side.toUpperCase()} {position.volume.toFixed(2)} XRP
+                </p>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="bg-tertiary rounded-lg p-4 space-y-3">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-secondary">Entry Price</span>
+                    <span className="mono">€{position.entryPrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-secondary">Close Price</span>
+                    <span className="mono">€{currentPrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm border-t border-primary pt-3">
+                    <span className="text-secondary">Estimated P&L</span>
+                    <span className={`mono font-bold ${isProfitable ? 'text-green-400' : 'text-red-400'}`}>
+                      {isProfitable ? '+' : ''}€{pnl.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-sm text-tertiary text-center">
+                  This will close your position at the current market price.
+                </p>
+              </div>
+              <div className="px-6 py-4 bg-tertiary border-t border-primary flex gap-3">
+                <button
+                  onClick={() => setConfirmCloseId(null)}
+                  className="flex-1 btn btn-secondary py-3 font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => executeClosePosition(confirmCloseId)}
+                  className={`flex-1 py-3 rounded-lg font-semibold transition-colors ${
+                    isProfitable
+                      ? 'bg-green-500 hover:bg-green-400 text-black'
+                      : 'bg-red-500 hover:bg-red-400 text-white'
+                  }`}
+                >
+                  Close Position
+                </button>
+              </div>
+            </div>
+          </div>
         );
       })()}
     </div>

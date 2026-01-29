@@ -4,6 +4,7 @@ import { ConnectionStatus } from '@/components/ConnectionStatus';
 import { SyncStatusIndicator } from '@/components/SyncStatusIndicator';
 import { Providers } from '@/components/Providers';
 import { ChatFAB, ChatPanel } from '@/components/chat';
+import { Logo } from '@/components/Logo';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -17,8 +18,8 @@ function Navigation() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center h-16">
           <div className="flex items-center gap-8">
-            <Link href="/" className="text-lg font-semibold">
-              SmartBeatCrypto
+            <Link href="/" className="hover:opacity-90 transition-opacity">
+              <Logo size={28} />
             </Link>
             <nav className="hidden md:flex items-center gap-6">
               <Link

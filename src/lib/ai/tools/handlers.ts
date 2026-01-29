@@ -65,10 +65,24 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>)
 }
 
 /**
+ * Helper: Fetch with timeout
+ */
+async function fetchWithTimeout(url: string, timeoutMs = 10000): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    return response;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
  * Helper: Fetch OHLC data from internal API
  */
 async function fetchOHLC(pair: string, interval: number): Promise<OHLCData[]> {
-  const res = await fetch(`${BASE_URL}/api/kraken/public/ohlc?pair=${pair}&interval=${interval}`);
+  const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/public/ohlc?pair=${pair}&interval=${interval}`);
   if (!res.ok) throw new Error(`Failed to fetch OHLC for ${pair} ${interval}m`);
   const json = await res.json();
   return json.data || [];
@@ -78,7 +92,7 @@ async function fetchOHLC(pair: string, interval: number): Promise<OHLCData[]> {
  * Helper: Fetch ticker data from internal API
  */
 async function fetchTicker(pair: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${BASE_URL}/api/kraken/public/ticker?pair=${pair}`);
+  const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/public/ticker?pairs=${pair}`);
   if (!res.ok) throw new Error(`Failed to fetch ticker for ${pair}`);
   return res.json();
 }

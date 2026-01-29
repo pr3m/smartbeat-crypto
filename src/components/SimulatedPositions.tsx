@@ -78,7 +78,9 @@ export function SimulatedPositions({ currentPrice, onPositionChange }: Simulated
     return map;
   }, [positions, currentPrice, simulatedBalance?.equity]);
 
-  const closePosition = async (positionId: string) => {
+  const [confirmCloseId, setConfirmCloseId] = useState<string | null>(null);
+
+  const handleCloseClick = (positionId: string) => {
     if (!currentPrice) {
       addToast({
         title: 'Error',
@@ -87,7 +89,12 @@ export function SimulatedPositions({ currentPrice, onPositionChange }: Simulated
       });
       return;
     }
+    // Show confirmation dialog
+    setConfirmCloseId(positionId);
+  };
 
+  const executeClosePosition = async (positionId: string) => {
+    setConfirmCloseId(null);
     setClosingPosition(positionId);
 
     try {
@@ -265,7 +272,7 @@ export function SimulatedPositions({ currentPrice, onPositionChange }: Simulated
                 </Tooltip>
                 <Tooltip content={`Close position at market price (€${currentPrice.toFixed(4)})`} position="left">
                   <button
-                    onClick={() => closePosition(pos.id)}
+                    onClick={() => handleCloseClick(pos.id)}
                     disabled={isClosing}
                     className="px-3 py-1 text-xs bg-tertiary hover:bg-red-500/20 hover:text-red-400 rounded transition-colors disabled:opacity-50"
                   >
@@ -383,6 +390,81 @@ export function SimulatedPositions({ currentPrice, onPositionChange }: Simulated
             }}
             health={positionHealthMap.get(pos.id)!}
           />
+        );
+      })()}
+
+      {/* Close Position Confirmation Modal */}
+      {confirmCloseId && (() => {
+        const pos = positions.find(p => p.id === confirmCloseId);
+        if (!pos) return null;
+
+        // Calculate P&L for display
+        let pnl = pos.unrealizedPnlLevered ?? 0;
+        if (pnl === 0 && currentPrice > 0 && pos.avgEntryPrice > 0) {
+          const priceDiff = pos.side === 'long'
+            ? currentPrice - pos.avgEntryPrice
+            : pos.avgEntryPrice - currentPrice;
+          const rawPnl = priceDiff * pos.volume;
+          pnl = rawPnl - pos.totalFees;
+        }
+        const isProfitable = pnl >= 0;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div
+              className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+              onClick={() => setConfirmCloseId(null)}
+            />
+            <div className="relative bg-secondary border border-primary rounded-xl shadow-2xl max-w-md w-full mx-4 overflow-hidden">
+              <div className={`${isProfitable ? 'bg-green-500' : 'bg-red-500'} px-6 py-4`}>
+                <h2 className="text-xl font-bold text-white">Confirm Close Position</h2>
+                <p className="text-white/80 text-sm mt-1">
+                  Close {pos.side.toUpperCase()} {pos.volume.toFixed(2)} XRP
+                </p>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="bg-tertiary rounded-lg p-4 space-y-3">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-secondary">Entry Price</span>
+                    <span className="mono">€{pos.avgEntryPrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-secondary">Close Price</span>
+                    <span className="mono">€{currentPrice.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm border-t border-primary pt-3">
+                    <span className="text-secondary">Estimated P&L</span>
+                    <span className={`mono font-bold ${isProfitable ? 'text-green-400' : 'text-red-400'}`}>
+                      {isProfitable ? '+' : ''}€{pnl.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+                <div className="p-3 rounded-lg bg-orange-500/20 border border-orange-500/40">
+                  <p className="text-sm text-orange-300 text-center">
+                    Paper Trading - This is a simulated close
+                  </p>
+                </div>
+              </div>
+              <div className="px-6 py-4 bg-tertiary border-t border-primary flex gap-3">
+                <button
+                  onClick={() => setConfirmCloseId(null)}
+                  className="flex-1 btn btn-secondary py-3 font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => executeClosePosition(confirmCloseId)}
+                  className={`flex-1 py-3 rounded-lg font-semibold transition-colors ${
+                    isProfitable
+                      ? 'bg-green-500 hover:bg-green-400 text-black'
+                      : 'bg-red-500 hover:bg-red-400 text-white'
+                  }`}
+                >
+                  Close Position
+                </button>
+              </div>
+            </div>
+          </div>
         );
       })()}
     </div>

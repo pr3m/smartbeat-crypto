@@ -11,28 +11,25 @@ import { trackAIUsage } from '@/lib/ai/usage-tracker';
 
 const SYSTEM_PROMPT = `You are SmartBeat Assistant, an AI helper for the SmartBeatCrypto trading application.
 
-**CRITICAL: Response Format**
-- NEVER output your thinking, reasoning, or decision process
-- NEVER say things like "Let me check...", "I'll use...", "Ok.", "Done.", "Proceed.", etc.
-- Give ONLY the final answer to the user's question
-- Be direct and concise - no filler words or narration
-- Just answer the question with the relevant data
+**CRITICAL: Use Context Data First**
+- The user's message often includes context with current data (positions, prices, P&L, etc.)
+- If the data you need is already in the context, USE IT DIRECTLY - don't call tools
+- Only call tools when you need ADDITIONAL data not in the context
+- Example: If context shows "Current Price: €2.50", use that price for calculations
 
-**Your capabilities:**
-- Trading Analysis: Positions, market conditions, trading recommendations
-- Tax Calculations: Estonian tax (24% on gains, losses NOT deductible)
-- Transaction History: Past trades, deposits, withdrawals
-- Performance Analysis: Win rates, P&L, patterns
+**Tool Usage (only when needed):**
+- Available: get_positions, get_market_data, analyze_position, get_trading_recommendation, calculate_tax, query_transactions
+- NEVER output JSON tool calls as text - use actual function calling
 
-**Data Rules:**
-- Always use tools to fetch real data before answering
-- For tax: always specify year, group margin P&L by order
+**Response Format:**
+- Be direct and concise
 - Format: €1,234.56 for money, +/- for P&L
+- If you can answer from context, do so immediately
 
 **Current Context:**
 {context}
 
-Remember: Output ONLY the final answer. No thinking. No narration. Just results.`;
+Remember: Answer from context when possible. Only call tools for missing data.`;
 
 interface ChatRequest {
   conversationId?: string | null;
@@ -52,6 +49,7 @@ export async function POST(request: NextRequest) {
 
   const openai = new OpenAI({ apiKey });
   const model = process.env.OPENAI_MODEL || 'gpt-4o';
+  console.log('Chat API using model:', model);
 
   let body: ChatRequest;
   try {
@@ -82,6 +80,9 @@ export async function POST(request: NextRequest) {
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let conversationIdForTracking: string | null = null;
+
+    // Send initial event to confirm connection
+    await send({ type: 'status', message: 'Processing...' });
 
     try {
       // Get or create conversation
@@ -202,6 +203,17 @@ export async function POST(request: NextRequest) {
         toolCallsData.push(currentToolCall);
       }
 
+      // Detect if model output JSON tool call as text (bad behavior)
+      if (toolCallsData.length === 0 && fullResponse.trim()) {
+        const jsonMatch = fullResponse.match(/^\s*\{[\s\S]*"toolCall"[\s\S]*\}\s*$/);
+        if (jsonMatch) {
+          console.warn('Model output tool call as text instead of using tools:', fullResponse);
+          // Clear the bad response and ask it to try again properly
+          fullResponse = "I apologize, but I encountered an issue processing your request. Let me try again.";
+          await send({ type: 'text', content: "\n\nPlease rephrase your question and I'll help you." });
+        }
+      }
+
       // If there were tool calls, execute them and continue
       if (toolCallsData.length > 0) {
         // Add assistant message with tool calls
@@ -219,15 +231,23 @@ export async function POST(request: NextRequest) {
         for (const toolCall of toolCallsData) {
           try {
             const args = JSON.parse(toolCall.arguments || '{}');
+            console.log(`Executing tool: ${toolCall.name}`, args);
             const result = await executeTool(toolCall.name as ToolName, args);
+            console.log(`Tool ${toolCall.name} result success:`, (result as { success?: boolean }).success);
 
             await send({ type: 'tool_end', name: toolCall.name });
+
+            // Stringify result, but limit size to avoid context overflow
+            const resultStr = JSON.stringify(result);
+            const truncatedResult = resultStr.length > 50000
+              ? JSON.stringify({ success: true, data: { note: 'Response truncated due to size', preview: resultStr.slice(0, 1000) + '...' } })
+              : resultStr;
 
             // Add tool result to messages
             messages.push({
               role: 'tool',
               tool_call_id: toolCall.id,
-              content: JSON.stringify(result),
+              content: truncatedResult,
             });
           } catch (toolError) {
             console.error(`Tool ${toolCall.name} error:`, toolError);
@@ -247,30 +267,51 @@ export async function POST(request: NextRequest) {
 
         // Get final response with tool results
         fullResponse = '';
-        const finalResponse = await openai.chat.completions.create({
-          model,
-          messages,
-          stream: true,
-          stream_options: { include_usage: true },
-        });
+        let finishReason = '';
 
-        for await (const chunk of finalResponse) {
-          // Track usage from final chunk
-          if (chunk.usage) {
-            totalInputTokens += chunk.usage.prompt_tokens || 0;
-            totalOutputTokens += chunk.usage.completion_tokens || 0;
-          }
+        try {
+          // Add instruction to generate response from tool results
+          messages.push({
+            role: 'user',
+            content: 'Based on the tool results above, provide a helpful response to the user. Be concise and format numbers nicely.',
+          });
 
-          const content = chunk.choices[0]?.delta?.content;
-          if (content) {
-            fullResponse += content;
-            await send({ type: 'text', content });
+          // Generate response from tool results (no tools passed = text only)
+          const finalResponse = await openai.chat.completions.create({
+            model,
+            messages,
+            stream: true,
+            stream_options: { include_usage: true },
+          });
+
+          for await (const chunk of finalResponse) {
+            // Track usage from final chunk
+            if (chunk.usage) {
+              totalInputTokens += chunk.usage.prompt_tokens || 0;
+              totalOutputTokens += chunk.usage.completion_tokens || 0;
+            }
+
+            // Track finish reason
+            if (chunk.choices[0]?.finish_reason) {
+              finishReason = chunk.choices[0].finish_reason;
+            }
+
+            const content = chunk.choices[0]?.delta?.content;
+            if (content) {
+              fullResponse += content;
+              await send({ type: 'text', content });
+            }
           }
+        } catch (finalError) {
+          console.error('Final OpenAI response error:', finalError);
+          fullResponse = `I gathered the data but encountered an error generating a response: ${finalError instanceof Error ? finalError.message : 'Unknown error'}. Please try again.`;
+          await send({ type: 'text', content: fullResponse });
         }
 
-        // If no response was generated after tool calls, send a fallback message
+        // If no response was generated after tool calls, provide more context
         if (!fullResponse.trim()) {
-          fullResponse = 'I processed the data but encountered an issue generating a response. Please try asking again.';
+          console.warn('Empty response after tool calls. Finish reason:', finishReason, 'Tool results count:', toolCallsData.length);
+          fullResponse = 'I processed the data successfully but the AI model returned an empty response. This can happen due to rate limits or content filters. Please try asking your question again.';
           await send({ type: 'text', content: fullResponse });
         }
       }

@@ -100,7 +100,7 @@ Health Metrics:
 - Liquidation Distance: ${health.liquidationDistance.toFixed(2)}% (${health.liquidationStatus})
 - Margin Level: ${health.marginLevel.toFixed(2)}% (${health.marginStatus})
 - Time Status: ${health.timeStatus || 'normal'}
-- Risk Factors: ${health.riskFactors.length > 0 ? health.riskFactors.join(', ') : 'None'}`;
+- Risk Factors: ${health.riskFactors?.length > 0 ? health.riskFactors.join(', ') : 'None'}`;
 
     if (evaluation) {
       context += `
