@@ -101,7 +101,12 @@ export class WeightedAverageCalculator {
     const newTotalAmount = position.totalAmount - amount;
     const newTotalCost = position.totalCost - costBasis;
 
-    if (newTotalAmount <= 0.00000001) {
+    // Use relative tolerance for position closure to handle different asset precisions
+    // e.g., BTC has 8 decimals, ETH tokens often 18 decimals
+    const isPositionClosed = newTotalAmount <= 0 ||
+      (position.totalAmount > 0 && Math.abs(newTotalAmount / position.totalAmount) < 1e-10);
+
+    if (isPositionClosed) {
       // Position fully closed
       this.positions.delete(asset);
     } else {
@@ -173,16 +178,32 @@ export class WeightedAverageCalculator {
   }
 }
 
-// Singleton instance
-let waCalculatorInstance: WeightedAverageCalculator | null = null;
-
-export function getWACalculator(): WeightedAverageCalculator {
-  if (!waCalculatorInstance) {
-    waCalculatorInstance = new WeightedAverageCalculator();
-  }
-  return waCalculatorInstance;
+/**
+ * Factory function to create a new WeightedAverageCalculator instance.
+ *
+ * IMPORTANT: Do NOT use a singleton pattern here!
+ * Each API request should have its own calculator instance to prevent
+ * race conditions where concurrent requests could corrupt each other's
+ * calculations.
+ */
+export function createWACalculator(
+  initialPositions?: AssetPosition[]
+): WeightedAverageCalculator {
+  return new WeightedAverageCalculator(initialPositions);
 }
 
+/**
+ * @deprecated Use createWACalculator() instead.
+ * This function now creates a new instance each time to prevent race conditions.
+ */
+export function getWACalculator(): WeightedAverageCalculator {
+  // Always create new instance - DO NOT use singleton for financial calculations
+  return new WeightedAverageCalculator();
+}
+
+/**
+ * @deprecated No longer needed as we don't use singleton pattern
+ */
 export function resetWACalculator(): void {
-  waCalculatorInstance = null;
+  // No-op - kept for backwards compatibility
 }

@@ -197,6 +197,11 @@ export interface TaxSummary {
   distributionTaxRate: number; // Tax rate if profits are distributed
   potentialDistributionTax: number; // Tax if all profits distributed
 
+  // Loss carryforward tracking (business only)
+  // Negative netPnL can be carried forward to offset future gains
+  lossCarryforward: number; // Accumulated losses that can offset future gains (always >= 0)
+  hasLossCarryforward: boolean; // True if there are losses to carry forward
+
   // Breakdown by type
   tradingGains: number;
   tradingLosses: number;
@@ -208,9 +213,16 @@ export interface TaxSummary {
   airdropIncome: number;
   otherIncome: number;
 
+  // Fee breakdown
+  totalTradingFees: number; // Sum of all trading fees (reduces taxable gains)
+  totalMarginFees: number;  // Sum of margin/rollover fees
+
   // Stats
   totalTransactions: number;
   taxableTransactions: number;
+
+  // Warnings for manual review
+  warnings: string[];
 
   // Deprecated - keeping for backwards compatibility
   totalProceeds?: number;
@@ -223,22 +235,31 @@ export interface TaxEventInput {
   gain: number;
   proceeds?: number;
   costBasis?: number;
+  fee?: number;
   isMargin: boolean;
 }
 
 /**
  * Calculate tax summary for a year
+ *
+ * @param taxYear - The tax year to calculate for
+ * @param events - Array of tax events to process
+ * @param accountType - 'individual' or 'business'
+ * @param priorYearLossCarryforward - Losses carried forward from prior years (business only)
  */
 export function calculateTaxSummary(
   taxYear: number,
   events: TaxEventInput[],
-  accountType: AccountType = 'individual'
+  accountType: AccountType = 'individual',
+  priorYearLossCarryforward: number = 0
 ): TaxSummary {
   const taxRate = getTaxRate(taxYear, accountType);
   const distributionTaxRate = getEffectiveDistributionRate(taxYear);
 
   let totalGains = 0;
   let totalLosses = 0;
+  let totalTradingFees = 0;
+  let totalMarginFees = 0;
 
   let tradingGains = 0;
   let tradingLosses = 0;
@@ -251,12 +272,22 @@ export function calculateTaxSummary(
   let otherIncome = 0;
 
   let taxableTransactions = 0;
+  const warnings: string[] = [];
 
   for (const event of events) {
     if (event.gain > 0) {
       totalGains += event.gain;
     } else {
       totalLosses += Math.abs(event.gain);
+    }
+
+    // Track fees by type
+    if (event.fee && event.fee > 0) {
+      if (event.isMargin) {
+        totalMarginFees += event.fee;
+      } else {
+        totalTradingFees += event.fee;
+      }
     }
 
     // Categorize gains/losses
@@ -277,6 +308,10 @@ export function calculateTaxSummary(
       case 'STAKING_REWARD':
         stakingIncome += event.gain;
         if (event.gain !== 0) taxableTransactions++;
+        // Warn if staking income is zero (likely missing FMV)
+        if (event.gain === 0) {
+          warnings.push('Staking rewards have zero value - manual FMV calculation needed');
+        }
         break;
 
       case 'EARN_REWARD':
@@ -293,6 +328,10 @@ export function calculateTaxSummary(
       case 'FORK':
         airdropIncome += event.gain;
         if (event.gain !== 0) taxableTransactions++;
+        // Warn if airdrop income is zero (likely missing FMV)
+        if (event.gain === 0) {
+          warnings.push('Airdrops have zero value - manual FMV calculation needed');
+        }
         break;
 
       default:
@@ -310,21 +349,47 @@ export function calculateTaxSummary(
   let estimatedTax: number;
   let retainedProfit: number;
   let potentialDistributionTax: number;
+  let lossCarryforward = 0;
+  let hasLossCarryforward = false;
 
   if (accountType === 'business') {
     // Business: 0% tax on retained profits
     // Losses CAN offset gains for accounting purposes
     taxableAmount = 0; // No immediate tax liability
     estimatedTax = 0;
-    retainedProfit = netPnL; // Net P&L (gains minus losses)
-    potentialDistributionTax = netPnL > 0 ? netPnL * distributionTaxRate : 0;
+
+    // Apply prior year loss carryforward to this year's gains
+    const adjustedNetPnL = netPnL - priorYearLossCarryforward;
+    retainedProfit = adjustedNetPnL;
+
+    // Calculate new loss carryforward
+    if (adjustedNetPnL < 0) {
+      // This year's losses (after applying prior carryforward) carry to next year
+      lossCarryforward = Math.abs(adjustedNetPnL);
+      hasLossCarryforward = true;
+    }
+
+    // Only calculate distribution tax on profits after loss offset
+    potentialDistributionTax = adjustedNetPnL > 0 ? adjustedNetPnL * distributionTaxRate : 0;
+
+    if (priorYearLossCarryforward > 0) {
+      warnings.push(`Applied ${priorYearLossCarryforward.toFixed(2)} EUR loss carryforward from prior years`);
+    }
   } else {
     // Individual: Only gains taxable, losses NOT deductible
     taxableAmount = totalGains;
     estimatedTax = taxableAmount * taxRate;
     retainedProfit = 0;
     potentialDistributionTax = 0;
+
+    // Individuals cannot carry forward losses in Estonia
+    if (totalLosses > 0) {
+      warnings.push(`${totalLosses.toFixed(2)} EUR in losses cannot be deducted (Estonian individual tax rules)`);
+    }
   }
+
+  // Deduplicate warnings
+  const uniqueWarnings = [...new Set(warnings)];
 
   return {
     taxYear,
@@ -338,6 +403,8 @@ export function calculateTaxSummary(
     retainedProfit,
     distributionTaxRate,
     potentialDistributionTax,
+    lossCarryforward,
+    hasLossCarryforward,
     tradingGains,
     tradingLosses,
     marginGains,
@@ -347,8 +414,11 @@ export function calculateTaxSummary(
     creditIncome,
     airdropIncome,
     otherIncome,
+    totalTradingFees,
+    totalMarginFees,
     totalTransactions: events.length,
     taxableTransactions,
+    warnings: uniqueWarnings,
     // Backwards compatibility
     netGainLoss: netPnL,
   };

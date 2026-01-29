@@ -25,6 +25,17 @@ import type {
   CostBasisMethod,
 } from '@/lib/kraken/types';
 
+/**
+ * Lot matching detail for cost basis audit trail
+ */
+export interface LotMatch {
+  lotId: string;
+  amount: number;
+  costBasis: number;
+  acquisitionDate: Date;
+  holdingPeriodDays: number;
+}
+
 export interface TaxEvent {
   id: string;
   transactionId: string;
@@ -39,6 +50,15 @@ export interface TaxEvent {
   gain: number;
   taxableAmount: number;
   costBasisMethod: CostBasisMethod;
+
+  // Cost basis audit trail (FIFO only - shows which lots were matched)
+  matchedLots?: LotMatch[];
+
+  // Fee tracking
+  fee?: number;
+
+  // Warnings for this event
+  warnings?: string[];
 }
 
 export interface ProcessingResult {
@@ -87,6 +107,20 @@ export class TaxCalculator {
       const price = parseFloat(trade.price);
       const cost = parseFloat(trade.cost);
       const fee = parseFloat(trade.fee);
+
+      // Input validation - prevent corrupted calculations
+      if (!Number.isFinite(volume) || volume < 0) {
+        throw new Error(`Invalid volume: ${trade.vol}`);
+      }
+      if (!Number.isFinite(price) || price < 0) {
+        throw new Error(`Invalid price: ${trade.price}`);
+      }
+      if (!Number.isFinite(cost) || cost < 0) {
+        throw new Error(`Invalid cost: ${trade.cost}`);
+      }
+      if (!Number.isFinite(fee) || fee < 0) {
+        throw new Error(`Invalid fee: ${trade.fee}`);
+      }
 
       const type: TransactionType = trade.margin ? 'MARGIN_TRADE' : 'TRADE';
       const category = categorizeTransaction(type, volume, trade.type);
@@ -160,6 +194,14 @@ export class TaxCalculator {
       const amount = parseFloat(entry.amount);
       const fee = parseFloat(entry.fee);
 
+      // Input validation - prevent corrupted calculations
+      if (!Number.isFinite(amount)) {
+        throw new Error(`Invalid amount: ${entry.amount}`);
+      }
+      if (!Number.isFinite(fee)) {
+        throw new Error(`Invalid fee: ${entry.fee}`);
+      }
+
       const type = mapKrakenLedgerType(entry.type, entry.subtype);
       const category = categorizeTransaction(type, amount);
 
@@ -183,24 +225,35 @@ export class TaxCalculator {
       switch (type) {
         case 'DEPOSIT':
           // Deposits establish cost basis at market value
-          // Note: We need market price at time of deposit for accurate tracking
-          // For now, we'll treat as zero cost basis (conservative approach)
+          // WARNING: Zero cost basis means potential double taxation if these
+          // assets were purchased elsewhere. Users should track original cost
+          // basis externally and consider manual adjustments for accurate reporting.
           if (amount > 0) {
             this.fifoCalculator.addAcquisition(
               asset,
               amount,
-              0, // TODO: Fetch historical price
+              0, // Zero cost basis - see warning above
               timestamp,
               transaction.id
             );
             this.waCalculator.addAcquisition(asset, amount, 0);
+
+            // Log warning for audit trail
+            this.errors.push({
+              id: transaction.id,
+              error: `WARNING: DEPOSIT of ${amount} ${asset} assigned zero cost basis. ` +
+                     `If transferred from another wallet, manually record original acquisition cost.`,
+            });
           }
           break;
 
         case 'STAKING_REWARD':
-          // Staking rewards are taxable income
+        case 'EARN_REWARD':
+        case 'CREDIT':
+          // Staking/Earn rewards are taxable income at fair market value when received
+          // CRITICAL: Estonian tax law requires these to be reported at FMV
           if (amount > 0 && year === this.taxYear) {
-            // Add to holdings at zero cost basis
+            // Add to holdings at zero cost basis (will be taxed when sold)
             this.fifoCalculator.addAcquisition(
               asset,
               amount,
@@ -210,8 +263,10 @@ export class TaxCalculator {
             );
             this.waCalculator.addAcquisition(asset, amount, 0);
 
-            // Create tax event for the reward
-            // TODO: Need to calculate fair market value at time of receipt
+            // Create tax event for the reward income
+            // WARNING: Fair market value calculation not yet implemented!
+            // Users should manually verify staking income amounts against
+            // the EUR value at time of receipt for accurate tax reporting.
             const taxEvent: TaxEvent = {
               id: `event_${++this.eventCounter}`,
               transactionId: transaction.id,
@@ -222,12 +277,18 @@ export class TaxCalculator {
               acquisitionDate: timestamp,
               acquisitionCost: 0,
               disposalDate: timestamp,
-              disposalProceeds: 0, // TODO: FMV
-              gain: 0, // TODO: FMV
-              taxableAmount: 0,
+              disposalProceeds: 0, // NEEDS FMV: fetch historical price
+              gain: 0, // NEEDS FMV: this should be fair market value at receipt
+              taxableAmount: 0, // NEEDS FMV: for Estonian tax, this = FMV
               costBasisMethod: this.costBasisMethod,
             };
             this.taxEvents.push(taxEvent);
+
+            // Log warning for audit trail
+            this.errors.push({
+              id: transaction.id,
+              error: `WARNING: ${type} of ${amount} ${asset} needs manual FMV calculation for tax reporting`,
+            });
           }
           break;
 
@@ -279,19 +340,44 @@ export class TaxCalculator {
     disposalDate: Date
   ): void {
     const gain = result.gain;
+    const warnings: string[] = [];
 
     // In Estonia, only gains are taxable
     const taxableAmount = gain > 0 ? gain : 0;
 
-    // For FIFO, use the oldest acquisition date
+    // For FIFO, use the oldest acquisition date and build audit trail
     let acquisitionDate = disposalDate;
     let acquisitionCost = 0;
+    let matchedLots: LotMatch[] | undefined;
 
     if ('matchedLots' in result && result.matchedLots.length > 0) {
       acquisitionDate = result.matchedLots[0].acquisitionDate;
       acquisitionCost = result.totalCostBasis;
+
+      // Build lot matching audit trail
+      matchedLots = result.matchedLots.map(lot => ({
+        lotId: lot.lotId,
+        amount: lot.amount,
+        costBasis: lot.costBasis,
+        acquisitionDate: lot.acquisitionDate,
+        holdingPeriodDays: lot.holdingPeriodDays,
+      }));
+
+      // Warn if holding period is very short (potential wash sale concern)
+      const shortHolds = result.matchedLots.filter(lot => lot.holdingPeriodDays < 30);
+      if (shortHolds.length > 0 && gain < 0) {
+        warnings.push(
+          `Short holding period (${shortHolds[0].holdingPeriodDays} days) with loss - ` +
+          `verify no wash sale implications if applicable`
+        );
+      }
     } else if ('costBasis' in result) {
       acquisitionCost = result.costBasis;
+    }
+
+    // Warn if no cost basis found (full proceeds taxable)
+    if (acquisitionCost === 0 && result.disposalProceeds > 0) {
+      warnings.push('No cost basis found - full proceeds treated as gain');
     }
 
     const taxEvent: TaxEvent = {
@@ -308,6 +394,9 @@ export class TaxCalculator {
       gain,
       taxableAmount,
       costBasisMethod: this.costBasisMethod,
+      matchedLots,
+      fee: transaction.fee,
+      warnings: warnings.length > 0 ? warnings : undefined,
     };
 
     this.taxEvents.push(taxEvent);
@@ -350,17 +439,27 @@ export class TaxCalculator {
   /**
    * Get processing results
    */
-  getResults(): ProcessingResult {
-    // Generate summary
+  getResults(accountType: 'individual' | 'business' = 'individual', priorLossCarryforward: number = 0): ProcessingResult {
+    // Generate summary with fee tracking
     const taxEventInputs: TaxEventInput[] = this.taxEvents.map(event => ({
       type: event.type,
       gain: event.gain,
       proceeds: event.disposalProceeds,
       costBasis: event.acquisitionCost,
+      fee: event.fee,
       isMargin: event.type === 'MARGIN_TRADE' || event.type === 'MARGIN_SETTLEMENT',
     }));
 
-    const summary = calculateTaxSummary(this.taxYear, taxEventInputs);
+    const summary = calculateTaxSummary(this.taxYear, taxEventInputs, accountType, priorLossCarryforward);
+
+    // Add any tax event warnings to summary warnings
+    const eventWarnings = this.taxEvents
+      .filter(e => e.warnings && e.warnings.length > 0)
+      .flatMap(e => e.warnings || []);
+
+    if (eventWarnings.length > 0) {
+      summary.warnings = [...summary.warnings, ...eventWarnings];
+    }
 
     return {
       transactions: this.transactions,
@@ -413,19 +512,36 @@ export class TaxCalculator {
   }
 }
 
-// Singleton instance
-let taxCalculatorInstance: TaxCalculator | null = null;
+/**
+ * Factory function to create a new TaxCalculator instance.
+ *
+ * IMPORTANT: Do NOT use a singleton pattern here!
+ * Each API request should have its own calculator instance to prevent
+ * race conditions where concurrent requests could corrupt each other's
+ * calculations (e.g., different years, different cost basis methods).
+ */
+export function createTaxCalculator(
+  method?: CostBasisMethod,
+  year?: number
+): TaxCalculator {
+  return new TaxCalculator(method, year);
+}
 
+/**
+ * @deprecated Use createTaxCalculator() instead.
+ * This function now creates a new instance each time to prevent race conditions.
+ */
 export function getTaxCalculator(
   method?: CostBasisMethod,
   year?: number
 ): TaxCalculator {
-  if (!taxCalculatorInstance) {
-    taxCalculatorInstance = new TaxCalculator(method, year);
-  }
-  return taxCalculatorInstance;
+  // Always create new instance - DO NOT use singleton for financial calculations
+  return new TaxCalculator(method, year);
 }
 
+/**
+ * @deprecated No longer needed as we don't use singleton pattern
+ */
 export function resetTaxCalculator(): void {
-  taxCalculatorInstance = null;
+  // No-op - kept for backwards compatibility
 }

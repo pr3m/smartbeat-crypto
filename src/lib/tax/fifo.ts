@@ -153,10 +153,14 @@ export class FIFOCalculator {
       remainingToDispose -= disposeFromLot;
     }
 
-    // Remove fully depleted lots
+    // Remove fully depleted lots (with relative tolerance for precision errors)
     this.holdings.set(
       asset,
-      lots.filter(lot => lot.remainingAmount > 0)
+      lots.filter(lot => {
+        // Use relative tolerance: lot is "empty" if remaining is < 0.0001% of original
+        const relativeThreshold = lot.amount * 1e-10;
+        return lot.remainingAmount > relativeThreshold;
+      })
     );
 
     // Calculate gain
@@ -265,16 +269,32 @@ export class FIFOCalculator {
   }
 }
 
-// Singleton instance for app-wide use
-let fifoCalculatorInstance: FIFOCalculator | null = null;
-
-export function getFIFOCalculator(): FIFOCalculator {
-  if (!fifoCalculatorInstance) {
-    fifoCalculatorInstance = new FIFOCalculator();
-  }
-  return fifoCalculatorInstance;
+/**
+ * Factory function to create a new FIFOCalculator instance.
+ *
+ * IMPORTANT: Do NOT use a singleton pattern here!
+ * Each API request should have its own calculator instance to prevent
+ * race conditions where concurrent requests could corrupt each other's
+ * calculations.
+ */
+export function createFIFOCalculator(
+  initialLots?: AcquisitionLot[]
+): FIFOCalculator {
+  return new FIFOCalculator(initialLots);
 }
 
+/**
+ * @deprecated Use createFIFOCalculator() instead.
+ * This function now creates a new instance each time to prevent race conditions.
+ */
+export function getFIFOCalculator(): FIFOCalculator {
+  // Always create new instance - DO NOT use singleton for financial calculations
+  return new FIFOCalculator();
+}
+
+/**
+ * @deprecated No longer needed as we don't use singleton pattern
+ */
 export function resetFIFOCalculator(): void {
-  fifoCalculatorInstance = null;
+  // No-op - kept for backwards compatibility
 }

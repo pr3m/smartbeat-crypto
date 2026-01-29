@@ -3,6 +3,21 @@ import { prisma } from '@/lib/db';
 import { getTaxRate, getEffectiveDistributionRate, type AccountType } from '@/lib/tax/estonia-rules';
 
 /**
+ * Centralized error logger for tax calculations
+ */
+function logTaxError(context: string, error: unknown, details?: Record<string, unknown>): void {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const errorStack = error instanceof Error ? error.stack : undefined;
+
+  console.error(`[TAX_ERROR] ${context}:`, {
+    message: errorMessage,
+    stack: errorStack,
+    ...details,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+/**
  * GET /api/tax/summary - Get tax summary for a year
  */
 export async function GET(request: NextRequest) {
@@ -10,6 +25,14 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const yearParam = searchParams.get('year');
     const year = yearParam ? parseInt(yearParam) : new Date().getFullYear();
+
+    // Validate year
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      return NextResponse.json(
+        { error: `Invalid year: ${yearParam}. Must be between 2000 and 2100.` },
+        { status: 400 }
+      );
+    }
 
     // Get account type from settings
     const settings = await prisma.settings.findUnique({ where: { id: 'default' } });
@@ -36,6 +59,20 @@ export async function GET(request: NextRequest) {
       where: { taxYear: year },
     });
 
+    // Get prior year loss carryforward for business accounts
+    let priorLossCarryforward = 0;
+    if (accountType === 'business' && year > 2020) {
+      // Calculate cumulative losses from prior years
+      const priorYearEvents = await prisma.taxEvent.findMany({
+        where: { taxYear: { lt: year } },
+        select: { gain: true },
+      });
+      const priorNetPnL = priorYearEvents.reduce((sum, e) => sum + (e.gain || 0), 0);
+      if (priorNetPnL < 0) {
+        priorLossCarryforward = Math.abs(priorNetPnL);
+      }
+    }
+
     // Calculate totals
     let totalGains = 0;
     let totalLosses = 0;
@@ -46,8 +83,12 @@ export async function GET(request: NextRequest) {
     let stakingIncome = 0;
     let earnIncome = 0;
     let airdropIncome = 0;
+    let creditIncome = 0;
+    let totalTradingFees = 0;
+    let totalMarginFees = 0;
     let totalTransactions = transactions.length;
     let taxableTransactions = 0;
+    const warnings: string[] = [];
 
     // Process tax events (for spot trades FIFO calculation)
     for (const event of taxEvents) {
@@ -66,9 +107,20 @@ export async function GET(request: NextRequest) {
 
     // Track processed margin order IDs to avoid double-counting
     const processedMarginOrderIds = new Set<string>();
+    let stakingRewardsWithoutFMV = 0;
+    let airdropsWithoutFMV = 0;
 
     // Process transactions for breakdown
     for (const tx of transactions) {
+      // Track fees
+      if (tx.fee && tx.fee > 0) {
+        if (tx.type === 'MARGIN_TRADE' || tx.type === 'ROLLOVER') {
+          totalMarginFees += tx.fee;
+        } else {
+          totalTradingFees += tx.fee;
+        }
+      }
+
       if (tx.type === 'TRADE' && tx.side === 'sell') {
         // Spot trades are handled via tax events above
         taxableTransactions++;
@@ -95,6 +147,9 @@ export async function GET(request: NextRequest) {
       } else if (tx.type === 'STAKING_REWARD') {
         // For staking, the income is the value at time of receipt
         const income = Math.abs(tx.amount) * (tx.price || 0);
+        if (income === 0 && tx.amount > 0) {
+          stakingRewardsWithoutFMV++;
+        }
         stakingIncome += income;
         totalGains += income;
         taxableTransactions++;
@@ -104,12 +159,35 @@ export async function GET(request: NextRequest) {
         earnIncome += income;
         totalGains += income;
         taxableTransactions++;
+      } else if (tx.type === 'CREDIT') {
+        // Credits/bonuses from Kraken
+        const income = Math.abs(tx.amount) * (tx.price || 0);
+        creditIncome += income;
+        totalGains += income;
+        taxableTransactions++;
       } else if (tx.type === 'AIRDROP' || tx.type === 'FORK') {
         const income = Math.abs(tx.amount) * (tx.price || 0);
+        if (income === 0 && tx.amount > 0) {
+          airdropsWithoutFMV++;
+        }
         airdropIncome += income;
         totalGains += income;
         taxableTransactions++;
       }
+    }
+
+    // Generate warnings
+    if (stakingRewardsWithoutFMV > 0) {
+      warnings.push(`${stakingRewardsWithoutFMV} staking reward(s) have zero FMV - manual calculation needed`);
+    }
+    if (airdropsWithoutFMV > 0) {
+      warnings.push(`${airdropsWithoutFMV} airdrop(s) have zero FMV - manual calculation needed`);
+    }
+    if (accountType === 'individual' && totalLosses > 0) {
+      warnings.push(`${totalLosses.toFixed(2)} EUR in losses cannot be deducted (Estonian individual tax rules)`);
+    }
+    if (priorLossCarryforward > 0) {
+      warnings.push(`Applied ${priorLossCarryforward.toFixed(2)} EUR loss carryforward from prior years`);
     }
 
     // Calculate net P&L
@@ -120,13 +198,25 @@ export async function GET(request: NextRequest) {
     let estimatedTax: number;
     let retainedProfit: number;
     let potentialDistributionTax: number;
+    let lossCarryforward = 0;
+    let hasLossCarryforward = false;
 
     if (accountType === 'business') {
       // Business: 0% tax on retained profits, losses offset gains
       taxableAmount = 0;
       estimatedTax = 0;
-      retainedProfit = netPnL;
-      potentialDistributionTax = netPnL > 0 ? netPnL * distributionTaxRate : 0;
+
+      // Apply prior year loss carryforward
+      const adjustedNetPnL = netPnL - priorLossCarryforward;
+      retainedProfit = adjustedNetPnL;
+
+      // Calculate new loss carryforward
+      if (adjustedNetPnL < 0) {
+        lossCarryforward = Math.abs(adjustedNetPnL);
+        hasLossCarryforward = true;
+      }
+
+      potentialDistributionTax = adjustedNetPnL > 0 ? adjustedNetPnL * distributionTaxRate : 0;
     } else {
       // Individual: Only gains taxable, losses NOT deductible
       taxableAmount = totalGains;
@@ -147,21 +237,27 @@ export async function GET(request: NextRequest) {
       retainedProfit,
       distributionTaxRate,
       potentialDistributionTax,
+      lossCarryforward,
+      hasLossCarryforward,
       tradingGains,
       tradingLosses,
       marginGains,
       marginLosses,
       stakingIncome,
       earnIncome,
+      creditIncome,
       airdropIncome,
       otherIncome: 0,
+      totalTradingFees,
+      totalMarginFees,
       totalTransactions,
       taxableTransactions,
+      warnings,
     };
 
     return NextResponse.json(summary);
   } catch (error) {
-    console.error('Get tax summary error:', error);
+    logTaxError('Get tax summary', error, { year: yearParam });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to get tax summary' },
       { status: 500 }
@@ -232,7 +328,7 @@ export async function POST(request: NextRequest) {
       byMonth,
     });
   } catch (error) {
-    console.error('Get tax breakdown error:', error);
+    logTaxError('Get tax breakdown', error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to get tax breakdown' },
       { status: 500 }

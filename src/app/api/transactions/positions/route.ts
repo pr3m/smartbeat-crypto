@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 
+// Position status enum for type safety
+type PositionStatus = 'OPEN' | 'CLOSED' | 'PARTIAL';
+type PositionDirection = 'LONG' | 'SHORT';
+
 interface GroupedPosition {
   id: string;
   pair: string;
-  direction: 'LONG' | 'SHORT';
-  status: 'OPEN' | 'CLOSED' | 'PARTIAL';
+  direction: PositionDirection;
+  status: PositionStatus;
 
   // Entry details
   entryTime: Date;
@@ -31,11 +35,56 @@ interface GroupedPosition {
   realizedPnL: number | null;
   pnlSource: 'kraken' | 'calculated'; // Track where P&L came from
 
+  // Volume matching validation
+  volumeMatch: {
+    matched: boolean;
+    entryVolume: number;
+    exitVolume: number;
+    discrepancy: number; // Percentage difference
+  };
+
+  // Warnings for this position
+  warnings: string[];
+
   // Raw transaction IDs for drill-down
   transactionIds: string[];
   positionTxId: string | null; // Kraken's position identifier
   openingTradeId: string | null;
   closingTradeId: string | null;
+}
+
+/**
+ * Validate transaction has required fields for position grouping
+ */
+function validateTransaction(t: Transaction): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  if (!t.timestamp) {
+    errors.push(`Transaction ${t.id}: missing timestamp`);
+  }
+  if (!t.side && t.type === 'MARGIN_TRADE') {
+    errors.push(`Transaction ${t.id}: missing side (buy/sell)`);
+  }
+  if (t.amount === null || t.amount === undefined || !Number.isFinite(t.amount)) {
+    errors.push(`Transaction ${t.id}: invalid amount`);
+  }
+  if (t.cost !== null && !Number.isFinite(t.cost)) {
+    errors.push(`Transaction ${t.id}: invalid cost value`);
+  }
+  if (t.fee !== null && !Number.isFinite(t.fee)) {
+    errors.push(`Transaction ${t.id}: invalid fee value`);
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Round number for display (avoid floating point artifacts)
+ */
+function roundForDisplay(value: number, decimals: number = 8): number {
+  if (!Number.isFinite(value)) return 0;
+  const factor = Math.pow(10, decimals);
+  return Math.round(value * factor) / factor;
 }
 
 /**
@@ -146,11 +195,35 @@ interface Transaction {
   }>;
 }
 
+interface GroupingResult {
+  positions: GroupedPosition[];
+  validationErrors: string[];
+}
+
 function groupIntoPositions(transactions: Transaction[]): GroupedPosition[] {
   const positions: GroupedPosition[] = [];
+  const validationErrors: string[] = [];
 
-  // Separate by type
-  const marginTrades = transactions.filter(t => t.type === 'MARGIN_TRADE');
+  // Validate all transactions first
+  for (const t of transactions) {
+    const validation = validateTransaction(t);
+    if (!validation.valid) {
+      validationErrors.push(...validation.errors);
+    }
+  }
+
+  // Log validation errors but continue processing
+  if (validationErrors.length > 0) {
+    console.warn('Position grouping validation warnings:', validationErrors);
+  }
+
+  // Filter to valid margin trades only
+  const marginTrades = transactions.filter(t =>
+    t.type === 'MARGIN_TRADE' &&
+    t.timestamp &&
+    t.side &&
+    Number.isFinite(t.amount)
+  );
   const settlements = transactions.filter(t => t.type === 'MARGIN_SETTLEMENT');
   const rollovers = transactions.filter(t => t.type === 'ROLLOVER');
 
@@ -287,8 +360,12 @@ function groupIntoPositions(transactions: Transaction[]): GroupedPosition[] {
           currentPosition.exitTrades.push(trade);
           currentPosition.openVolume -= volume;
 
-          // Check if position is fully closed (within small tolerance)
-          if (currentPosition.openVolume <= 0.00000001) {
+          // Check if position is fully closed (using relative tolerance for precision)
+          // This handles different asset decimal precisions correctly
+          const entryVolume = currentPosition.entryTrades.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+          const isPositionClosed = currentPosition.openVolume <= 0 ||
+            (entryVolume > 0 && Math.abs(currentPosition.openVolume / entryVolume) < 1e-8);
+          if (isPositionClosed) {
             // Create grouped position
             positions.push(createGroupedPosition(
               pair,
@@ -306,8 +383,13 @@ function groupIntoPositions(transactions: Transaction[]): GroupedPosition[] {
       }
     }
 
-    // Handle any remaining open position
-    if (currentPosition && currentPosition.openVolume > 0.00000001) {
+    // Handle any remaining open position (using relative tolerance)
+    const remainingEntryVolume = currentPosition?.entryTrades.reduce((sum, t) => sum + Math.abs(t.amount), 0) || 0;
+    const hasOpenVolume = currentPosition && (
+      currentPosition.openVolume > 0 &&
+      (remainingEntryVolume === 0 || Math.abs(currentPosition.openVolume / remainingEntryVolume) >= 1e-8)
+    );
+    if (hasOpenVolume) {
       positions.push(createGroupedPosition(
         pair,
         currentPosition.direction,
@@ -329,20 +411,30 @@ function groupIntoPositions(transactions: Transaction[]): GroupedPosition[] {
 
 function createGroupedPosition(
   pair: string,
-  direction: 'LONG' | 'SHORT',
+  direction: PositionDirection,
   entryTrades: Transaction[],
   exitTrades: Transaction[],
   allRollovers: Transaction[],
   allSettlements: Transaction[],
-  status: 'OPEN' | 'CLOSED' | 'PARTIAL',
+  status: PositionStatus,
   positionTxIdParam: string | null
 ): GroupedPosition {
+  const warnings: string[] = [];
+
   // Calculate entry metrics (aggregate all entry trades)
   const entryTime = entryTrades[0].timestamp;
-  const totalEntryVolume = entryTrades.reduce((sum, t) => sum + Math.abs(t.amount), 0);
-  const totalEntryCost = entryTrades.reduce((sum, t) => sum + (t.cost || 0), 0);
-  const avgEntryPrice = totalEntryVolume > 0 ? totalEntryCost / totalEntryVolume : 0;
-  const entryFees = entryTrades.reduce((sum, t) => sum + (t.fee || 0), 0);
+  const totalEntryVolume = roundForDisplay(
+    entryTrades.reduce((sum, t) => sum + Math.abs(t.amount), 0)
+  );
+  const totalEntryCost = roundForDisplay(
+    entryTrades.reduce((sum, t) => sum + (t.cost || 0), 0)
+  );
+  const avgEntryPrice = roundForDisplay(
+    totalEntryVolume > 0 ? totalEntryCost / totalEntryVolume : 0
+  );
+  const entryFees = roundForDisplay(
+    entryTrades.reduce((sum, t) => sum + (t.fee || 0), 0)
+  );
 
   // Calculate exit metrics - aggregate from exit trades OR from all entry trades' close data
   let exitTime: Date | null = null;
@@ -353,9 +445,15 @@ function createGroupedPosition(
   if (exitTrades.length > 0) {
     // Use exit trades data
     exitTime = exitTrades[exitTrades.length - 1].timestamp;
-    totalExitVolume = exitTrades.reduce((sum, t) => sum + Math.abs(t.amount), 0);
-    totalExitProceeds = exitTrades.reduce((sum, t) => sum + (t.cost || 0), 0);
-    exitFees = exitTrades.reduce((sum, t) => sum + (t.fee || 0), 0);
+    totalExitVolume = roundForDisplay(
+      exitTrades.reduce((sum, t) => sum + Math.abs(t.amount), 0)
+    );
+    totalExitProceeds = roundForDisplay(
+      exitTrades.reduce((sum, t) => sum + (t.cost || 0), 0)
+    );
+    exitFees = roundForDisplay(
+      exitTrades.reduce((sum, t) => sum + (t.fee || 0), 0)
+    );
   } else if (status === 'CLOSED') {
     // Aggregate close data from ALL entry trades (when closing trades are in different year)
     for (const trade of entryTrades) {
@@ -365,23 +463,42 @@ function createGroupedPosition(
         exitFees += trade.closeFee || 0;
       }
     }
+    totalExitVolume = roundForDisplay(totalExitVolume);
+    totalExitProceeds = roundForDisplay(totalExitProceeds);
+    exitFees = roundForDisplay(exitFees);
   }
 
-  const avgExitPrice = totalExitVolume > 0 ? totalExitProceeds / totalExitVolume : null;
+  const avgExitPrice = totalExitVolume > 0
+    ? roundForDisplay(totalExitProceeds / totalExitVolume)
+    : null;
+
+  // Volume matching validation
+  const volumeDiscrepancy = totalEntryVolume > 0
+    ? Math.abs((totalExitVolume - totalEntryVolume) / totalEntryVolume)
+    : 0;
+  const volumeMatched = status !== 'CLOSED' || volumeDiscrepancy < 0.01; // 1% tolerance
+
+  if (status === 'CLOSED' && !volumeMatched) {
+    warnings.push(
+      `Volume mismatch: entry ${totalEntryVolume.toFixed(6)} vs exit ${totalExitVolume.toFixed(6)} ` +
+      `(${(volumeDiscrepancy * 100).toFixed(2)}% discrepancy)`
+    );
+  }
 
   // Find related rollover fees (between entry and exit time, same asset)
   const asset = pair.replace(/EUR$|USD$|GBP$/, '');
-  const lastEntryTime = entryTrades[entryTrades.length - 1].timestamp;
   const positionEndTime = exitTime || new Date();
   const relatedRollovers = allRollovers.filter(r =>
     r.asset === asset &&
     r.timestamp >= entryTime &&
     r.timestamp <= positionEndTime
   );
-  const marginFees = relatedRollovers.reduce((sum, r) => sum + Math.abs(r.fee || 0), 0);
+  const marginFees = roundForDisplay(
+    relatedRollovers.reduce((sum, r) => sum + Math.abs(r.fee || 0), 0)
+  );
 
   // Calculate total fees
-  const totalFees = entryFees + exitFees + marginFees;
+  const totalFees = roundForDisplay(entryFees + exitFees + marginFees);
 
   // Calculate realized P&L - SUM all netPnl from entry trades (Kraken's authoritative data)
   let realizedPnL: number | null = null;
@@ -390,17 +507,51 @@ function createGroupedPosition(
   if (status === 'CLOSED' && entryTrades.length > 0) {
     // Sum netPnl from ALL entry trades
     const tradesWithNetPnl = entryTrades.filter(t => t.netPnl !== null);
+
     if (tradesWithNetPnl.length > 0) {
-      realizedPnL = tradesWithNetPnl.reduce((sum, t) => sum + (t.netPnl || 0), 0);
+      realizedPnL = roundForDisplay(
+        tradesWithNetPnl.reduce((sum, t) => sum + (t.netPnl || 0), 0)
+      );
       pnlSource = 'kraken';
+
+      // Warn if not all trades have netPnl
+      if (tradesWithNetPnl.length < entryTrades.length) {
+        warnings.push(
+          `Only ${tradesWithNetPnl.length}/${entryTrades.length} trades have Kraken P&L data`
+        );
+      }
     } else {
       // Fallback: Calculate from cost/proceeds
       if (direction === 'LONG') {
-        realizedPnL = totalExitProceeds - totalEntryCost - totalFees;
+        realizedPnL = roundForDisplay(totalExitProceeds - totalEntryCost - totalFees);
       } else {
-        realizedPnL = totalEntryCost - totalExitProceeds - totalFees;
+        realizedPnL = roundForDisplay(totalEntryCost - totalExitProceeds - totalFees);
       }
       pnlSource = 'calculated';
+      warnings.push('P&L calculated from cost/proceeds (no Kraken net field)');
+    }
+
+    // Cross-validate calculated vs Kraken P&L if both available
+    if (pnlSource === 'kraken' && realizedPnL !== null) {
+      let calculatedPnL: number;
+      if (direction === 'LONG') {
+        calculatedPnL = totalExitProceeds - totalEntryCost - totalFees;
+      } else {
+        calculatedPnL = totalEntryCost - totalExitProceeds - totalFees;
+      }
+
+      const pnlDiff = Math.abs(realizedPnL - calculatedPnL);
+      const pnlDiffPercent = Math.abs(realizedPnL) > 0.01
+        ? (pnlDiff / Math.abs(realizedPnL)) * 100
+        : 0;
+
+      // Warn if calculated differs significantly from Kraken (>5% or >1 EUR)
+      if (pnlDiffPercent > 5 || pnlDiff > 1) {
+        warnings.push(
+          `P&L validation: Kraken ${realizedPnL.toFixed(2)} vs calculated ${calculatedPnL.toFixed(2)} ` +
+          `(${pnlDiffPercent.toFixed(1)}% diff)`
+        );
+      }
     }
   }
 
@@ -426,6 +577,15 @@ function createGroupedPosition(
       ? `${exitTrades.length} fills`
       : entryTrades[0]?.closingTradeId || null;
 
+  // Check for cross-year position
+  if (exitTime) {
+    const entryYear = entryTime.getFullYear();
+    const exitYear = exitTime.getFullYear();
+    if (entryYear !== exitYear) {
+      warnings.push(`Cross-year position: opened ${entryYear}, closed ${exitYear}`);
+    }
+  }
+
   return {
     id: `pos_${entryTrades[0].id}`,
     pair,
@@ -447,6 +607,13 @@ function createGroupedPosition(
     totalFees,
     realizedPnL,
     pnlSource,
+    volumeMatch: {
+      matched: volumeMatched,
+      entryVolume: totalEntryVolume,
+      exitVolume: totalExitVolume,
+      discrepancy: roundForDisplay(volumeDiscrepancy * 100, 2),
+    },
+    warnings,
     transactionIds,
     positionTxId,
     openingTradeId,
