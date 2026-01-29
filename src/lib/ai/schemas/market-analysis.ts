@@ -29,6 +29,26 @@ export const AIIndicatorsSchema = z.object({
 });
 
 /**
+ * Conditional Setup Schema - For AI-generated trade setups
+ * These represent potential trade ideas that need user confirmation
+ */
+export const ConditionalSetupSchema = z.object({
+  type: z.string(), // e.g., "SHORT_REJECTION", "LONG_BREAKOUT", "LONG_SUPPORT_BOUNCE"
+  entryZone: z.tuple([z.string(), z.string()]), // [low, high] price range as strings
+  stopLoss: z.string(), // Stop loss price as string
+  targets: z.array(z.object({
+    price: z.string(),
+    probability: coerceNumber,
+  })),
+  positionSizePct: coerceNumber.optional().default(1), // % of available margin
+  activationCriteria: z.array(z.string()), // Conditions that must be met to enter
+  invalidation: z.array(z.string()), // Conditions that invalidate the setup
+  estimatedHoldHours: z.tuple([z.number(), z.number()]).optional(), // [min, max] hours
+});
+
+export type ConditionalSetup = z.infer<typeof ConditionalSetupSchema>;
+
+/**
  * AI Trade Data Schema - The structured output from market analysis
  * Made flexible to handle AI variations in output format
  */
@@ -53,6 +73,8 @@ export const AITradeDataSchema = z.object({
     resistance: z.array(coerceNumber).optional().default([]),
   }).optional(),
   confidence: coerceNumber.optional().default(50),
+  // Conditional setups - alternative trade ideas from AI
+  conditionalSetups: z.array(ConditionalSetupSchema).optional(),
 });
 
 /**

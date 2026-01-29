@@ -156,3 +156,38 @@ json_instructions: |
   - momentumScore: -100 to +100
   - confidence: 0-100 overall AI confidence score
   - If action is "WAIT", still provide key levels and indicators but leave entry/stopLoss/targets as null
+
+  IMPORTANT: When action is "WAIT" but you have conditional trade setups (e.g., "short on rejection at resistance", "long on breakout"), include them in the conditionalSetups array. Each setup should include:
+  - type: descriptive name like "SHORT_REJECTION", "LONG_BREAKOUT", "SHORT_BREAKDOWN"
+  - entryZone: [low, high] as string prices e.g. ["1.6000", "1.6030"]
+  - stopLoss: string price e.g. "1.6064"
+  - targets: array of {price: string, probability: number} e.g. [{"price": "1.5934", "probability": 0.7}]
+  - positionSizePct: recommended % of capital (1-5, typically 1 for risky setups)
+  - activationCriteria: array of conditions that must be met to enter
+  - invalidation: array of conditions that would cancel the setup
+
+  Example conditionalSetups:
+  ```
+  "conditionalSetups": [
+    {
+      "type": "SHORT_REJECTION",
+      "entryZone": ["1.6000", "1.6030"],
+      "stopLoss": "1.6064",
+      "targets": [
+        {"price": "1.5934", "probability": 0.7},
+        {"price": "1.5794", "probability": 0.5},
+        {"price": "1.5650", "probability": 0.3}
+      ],
+      "positionSizePct": 1,
+      "activationCriteria": [
+        "15m bearish rejection candle at resistance",
+        "RSI >65 rolling over",
+        "Volume ratio >1.3x on rejection"
+      ],
+      "invalidation": [
+        "15m close above 1.6064",
+        "1H acceptance above resistance zone"
+      ]
+    }
+  ]
+  ```

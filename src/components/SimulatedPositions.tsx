@@ -53,11 +53,20 @@ export function SimulatedPositions({ currentPrice, onPositionChange }: Simulated
     const equity = simulatedBalance?.equity ?? 2000;
 
     for (const pos of positions) {
+      // Calculate liquidation price fallback if API value not available
+      let liqPrice = pos.liquidationPrice ?? 0;
+      if (liqPrice === 0 && pos.avgEntryPrice > 0 && pos.leverage > 0) {
+        const liqDistance = pos.avgEntryPrice / pos.leverage * 0.8;
+        liqPrice = pos.side === 'long'
+          ? pos.avgEntryPrice - liqDistance
+          : pos.avgEntryPrice + liqDistance;
+      }
+
       const health = calculatePositionHealth({
         side: pos.side,
         entryPrice: pos.avgEntryPrice,
         currentPrice,
-        liquidationPrice: pos.liquidationPrice ?? 0,
+        liquidationPrice: liqPrice,
         leverage: pos.leverage,
         marginUsed: pos.marginUsed ?? pos.totalCost / pos.leverage,
         equity,
@@ -169,8 +178,34 @@ export function SimulatedPositions({ currentPrice, onPositionChange }: Simulated
       </h4>
 
       {positions.map((pos) => {
-        const pnl = pos.unrealizedPnlLevered ?? 0;
-        const pnlPercent = pos.unrealizedPnlLeveredPercent ?? 0;
+        // Use API-calculated P&L, or calculate client-side if not available
+        let pnl = pos.unrealizedPnlLevered ?? 0;
+        let pnlPercent = pos.unrealizedPnlLeveredPercent ?? 0;
+
+        // Client-side fallback calculation when API P&L is 0 but we have prices
+        if (pnl === 0 && currentPrice > 0 && pos.avgEntryPrice > 0) {
+          const priceDiff = pos.side === 'long'
+            ? currentPrice - pos.avgEntryPrice
+            : pos.avgEntryPrice - currentPrice;
+          const rawPnl = priceDiff * pos.volume;
+          const margin = pos.totalCost / pos.leverage;
+          // Calculate levered P&L (after fees, as % of margin)
+          pnl = rawPnl - pos.totalFees;
+          pnlPercent = margin > 0 ? (pnl / margin) * 100 : 0;
+        }
+
+        // Calculate liquidation price fallback if API value not available
+        let liquidationPrice = pos.liquidationPrice ?? 0;
+        if (liquidationPrice === 0 && pos.avgEntryPrice > 0 && pos.leverage > 0) {
+          // Simple approximation: liquidation at ~80% loss of margin
+          // Long: price drops by margin/position_value * 0.8
+          // Short: price rises by the same ratio
+          const liqDistance = pos.avgEntryPrice / pos.leverage * 0.8;
+          liquidationPrice = pos.side === 'long'
+            ? pos.avgEntryPrice - liqDistance
+            : pos.avgEntryPrice + liqDistance;
+        }
+
         const isProfitable = pnl >= 0;
         const isClosing = closingPosition === pos.id;
         const health = positionHealthMap.get(pos.id);
@@ -259,7 +294,7 @@ export function SimulatedPositions({ currentPrice, onPositionChange }: Simulated
               <div>
                 <span className="text-tertiary">Liq: </span>
                 <span className={`mono ${pos.side === 'long' ? 'text-red-400' : 'text-green-400'}`}>
-                  €{(pos.liquidationPrice ?? 0).toFixed(4)}
+                  €{liquidationPrice.toFixed(4)}
                 </span>
               </div>
             </div>
@@ -303,27 +338,53 @@ export function SimulatedPositions({ currentPrice, onPositionChange }: Simulated
       })}
 
       {/* Position Analysis Modal */}
-      {analyzingPosition && positionHealthMap.get(analyzingPosition.id) && (
-        <PositionAnalysisModal
-          isOpen={true}
-          onClose={() => setAnalyzingPosition(null)}
-          positionId={analyzingPosition.id}
-          positionData={{
-            pair: analyzingPosition.pair,
-            side: analyzingPosition.side,
-            leverage: analyzingPosition.leverage,
-            entryPrice: analyzingPosition.avgEntryPrice,
-            currentPrice,
-            liquidationPrice: analyzingPosition.liquidationPrice ?? 0,
-            volume: analyzingPosition.volume,
-            unrealizedPnl: analyzingPosition.unrealizedPnlLevered ?? 0,
-            pnlPercent: analyzingPosition.unrealizedPnlLeveredPercent ?? 0,
-            marginUsed: analyzingPosition.marginUsed ?? analyzingPosition.totalCost / analyzingPosition.leverage,
-            hoursOpen: positionHealthMap.get(analyzingPosition.id)!.hoursOpen,
-          }}
-          health={positionHealthMap.get(analyzingPosition.id)!}
-        />
-      )}
+      {analyzingPosition && positionHealthMap.get(analyzingPosition.id) && (() => {
+        // Calculate fallback values for modal
+        const pos = analyzingPosition;
+        let modalPnl = pos.unrealizedPnlLevered ?? 0;
+        let modalPnlPercent = pos.unrealizedPnlLeveredPercent ?? 0;
+        let modalLiqPrice = pos.liquidationPrice ?? 0;
+
+        // Client-side fallback calculation
+        if (modalPnl === 0 && currentPrice > 0 && pos.avgEntryPrice > 0) {
+          const priceDiff = pos.side === 'long'
+            ? currentPrice - pos.avgEntryPrice
+            : pos.avgEntryPrice - currentPrice;
+          const rawPnl = priceDiff * pos.volume;
+          const margin = pos.totalCost / pos.leverage;
+          modalPnl = rawPnl - pos.totalFees;
+          modalPnlPercent = margin > 0 ? (modalPnl / margin) * 100 : 0;
+        }
+
+        if (modalLiqPrice === 0 && pos.avgEntryPrice > 0 && pos.leverage > 0) {
+          const liqDistance = pos.avgEntryPrice / pos.leverage * 0.8;
+          modalLiqPrice = pos.side === 'long'
+            ? pos.avgEntryPrice - liqDistance
+            : pos.avgEntryPrice + liqDistance;
+        }
+
+        return (
+          <PositionAnalysisModal
+            isOpen={true}
+            onClose={() => setAnalyzingPosition(null)}
+            positionId={pos.id}
+            positionData={{
+              pair: pos.pair,
+              side: pos.side,
+              leverage: pos.leverage,
+              entryPrice: pos.avgEntryPrice,
+              currentPrice,
+              liquidationPrice: modalLiqPrice,
+              volume: pos.volume,
+              unrealizedPnl: modalPnl,
+              pnlPercent: modalPnlPercent,
+              marginUsed: pos.marginUsed ?? pos.totalCost / pos.leverage,
+              hoursOpen: positionHealthMap.get(pos.id)!.hoursOpen,
+            }}
+            health={positionHealthMap.get(pos.id)!}
+          />
+        );
+      })()}
     </div>
   );
 }

@@ -77,6 +77,30 @@ export interface OpenOrder {
   createdAt: string;
 }
 
+export interface DraftOrder {
+  id: string;
+  pair: string;
+  side: 'buy' | 'sell';
+  orderType: string;
+  price: number | null;
+  price2: number | null;
+  volume: number;
+  displayVolume: number | null;
+  leverage: number;
+  trailingOffset: number | null;
+  trailingOffsetType: string | null;
+  source: 'manual' | 'ai';
+  aiSetupType: string | null;
+  aiAnalysisId: string | null;
+  activationCriteria: string | null;
+  invalidation: string | null;
+  positionSizePct: number | null;
+  status: string;
+  submittedOrderId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface FearGreedData {
   value: number;
   classification: string;
@@ -114,7 +138,7 @@ interface TradingDataContextValue {
   simulatedPositions: SimulatedPosition[];
   simulatedPositionsLoading: boolean;
   simulatedPositionsError: string | null;
-  refreshSimulatedPositions: (force?: boolean) => void;
+  refreshSimulatedPositions: (force?: boolean, overridePrice?: number) => void;
   hasOpenSimulatedPosition: boolean;
   openOrders: OpenOrder[];
   openOrdersLoading: boolean;
@@ -122,6 +146,9 @@ interface TradingDataContextValue {
   fearGreed: FearGreedData | null;
   fearGreedLoading: boolean;
   refreshFearGreed: (force?: boolean) => void;
+  draftOrders: DraftOrder[];
+  draftOrdersLoading: boolean;
+  refreshDraftOrders: (force?: boolean) => void;
 }
 
 const TradingDataContext = createContext<TradingDataContextValue | null>(null);
@@ -158,15 +185,15 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
   const [tradeBalanceError, setTradeBalanceError] = useState<string | null>(null);
 
   const [openPositions, setOpenPositions] = useState<Position[]>([]);
-  const [openPositionsLoading, setOpenPositionsLoading] = useState(false);
+  const [openPositionsLoading, setOpenPositionsLoading] = useState(true); // Start true to prevent flash
   const [openPositionsError, setOpenPositionsError] = useState<string | null>(null);
 
   const [simulatedBalance, setSimulatedBalance] = useState<SimulatedBalanceData | null>(null);
-  const [simulatedBalanceLoading, setSimulatedBalanceLoading] = useState(false);
+  const [simulatedBalanceLoading, setSimulatedBalanceLoading] = useState(true); // Start true to prevent flash
   const [simulatedBalanceError, setSimulatedBalanceError] = useState<string | null>(null);
 
   const [simulatedPositions, setSimulatedPositions] = useState<SimulatedPosition[]>([]);
-  const [simulatedPositionsLoading, setSimulatedPositionsLoading] = useState(false);
+  const [simulatedPositionsLoading, setSimulatedPositionsLoading] = useState(true); // Start true to prevent flash
   const [simulatedPositionsError, setSimulatedPositionsError] = useState<string | null>(null);
 
   const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
@@ -175,6 +202,9 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
 
   const [fearGreed, setFearGreed] = useState<FearGreedData | null>(null);
   const [fearGreedLoading, setFearGreedLoading] = useState(false);
+
+  const [draftOrders, setDraftOrders] = useState<DraftOrder[]>([]);
+  const [draftOrdersLoading, setDraftOrdersLoading] = useState(false);
 
   const [isVisible, setIsVisible] = useState(true);
 
@@ -186,8 +216,10 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
   const lastSimPositionsFetchRef = useRef(0);
   const lastOpenOrdersFetchRef = useRef(0);
   const lastFearGreedFetchRef = useRef(0);
+  const lastDraftOrdersFetchRef = useRef(0);
   const priceRef = useRef(0);
   const initialMountRef = useRef(true);
+  const hadInitialPriceRef = useRef(false);
 
   useEffect(() => {
     const handleVisibility = () => setIsVisible(document.visibilityState === 'visible');
@@ -514,7 +546,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     }
   }, [enabled, isVisible, testMode]);
 
-  const fetchSimulatedPositions = useCallback(async (force = false) => {
+  const fetchSimulatedPositions = useCallback(async (force = false, overridePrice?: number) => {
     if (!testMode) return;
     if (!enabled) return;
     if (!isVisible && !force) return;
@@ -529,7 +561,8 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     setSimulatedPositionsError(null);
 
     try {
-      const currentPrice = priceRef.current || 0;
+      // Use override price if provided, otherwise use ref
+      const currentPrice = overridePrice ?? priceRef.current ?? 0;
       const res = await fetch(`/api/simulated/positions?open=true&currentPrice=${currentPrice}`);
       const data = await res.json();
 
@@ -566,8 +599,8 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     fetchSimulatedBalance(force);
   }, [fetchSimulatedBalance]);
 
-  const refreshSimulatedPositions = useCallback((force = false) => {
-    fetchSimulatedPositions(force);
+  const refreshSimulatedPositions = useCallback((force = false, overridePrice?: number) => {
+    fetchSimulatedPositions(force, overridePrice);
   }, [fetchSimulatedPositions]);
 
   const fetchOpenOrders = useCallback(async (force = false) => {
@@ -657,6 +690,42 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     fetchFearGreed(force);
   }, [fetchFearGreed]);
 
+  // Draft Orders fetch
+  const fetchDraftOrders = useCallback(async (force = false) => {
+    if (!enabled) return;
+    if (!isVisible && !force) return;
+
+    const now = Date.now();
+    if (!force && now - lastDraftOrdersFetchRef.current < TRADING_REFRESH_INTERVAL_MS) {
+      return;
+    }
+
+    lastDraftOrdersFetchRef.current = now;
+    setDraftOrdersLoading(true);
+
+    try {
+      // Filter drafts by current mode (testMode)
+      const res = await fetch(`/api/draft-orders?status=pending&testMode=${testMode}`);
+      if (!res.ok) throw new Error('Failed to fetch draft orders');
+      const data = await res.json();
+
+      if (data.error) {
+        console.error('Draft Orders API error:', data.error);
+        return;
+      }
+
+      setDraftOrders(data.drafts || []);
+    } catch (err) {
+      console.error('Error fetching draft orders:', err);
+    } finally {
+      setDraftOrdersLoading(false);
+    }
+  }, [enabled, isVisible, testMode]);
+
+  const refreshDraftOrders = useCallback((force = false) => {
+    fetchDraftOrders(force);
+  }, [fetchDraftOrders]);
+
   useEffect(() => {
     if (!enabled) return;
     // Force fetch on initial mount to ensure data loads reliably
@@ -685,12 +754,23 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     return () => clearInterval(interval);
   }, [enabled, refreshTradeBalance]);
 
+  // Initial fetch of live positions - wait for price to ensure UI can display current price
   useEffect(() => {
     if (!enabled || testMode) return;
+    if (price <= 0) return; // Wait for WebSocket to provide price
+    if (hadInitialPriceRef.current) return; // Already done initial fetch
+
+    hadInitialPriceRef.current = true;
     refreshOpenPositions();
+  }, [enabled, testMode, price, refreshOpenPositions]);
+
+  // Periodic refresh of live positions (separate from initial fetch)
+  useEffect(() => {
+    if (!enabled || testMode) return;
+
     const interval = setInterval(() => refreshOpenPositions(), TRADING_REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [enabled, refreshOpenPositions, testMode]);
+  }, [enabled, testMode, refreshOpenPositions]);
 
   useEffect(() => {
     if (!enabled || !testMode) return;
@@ -699,12 +779,28 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     return () => clearInterval(interval);
   }, [enabled, refreshSimulatedBalance, testMode]);
 
+  // Initial fetch of simulated positions - wait for price to be available to avoid flicker
   useEffect(() => {
     if (!enabled || !testMode) return;
-    refreshSimulatedPositions();
+    if (price <= 0) return; // Wait for WebSocket to provide price
+    if (hadInitialPriceRef.current) return; // Already done initial fetch
+
+    hadInitialPriceRef.current = true;
+    refreshSimulatedPositions(true, price);
+  }, [enabled, testMode, price, refreshSimulatedPositions]);
+
+  // Periodic refresh of simulated positions (separate from initial fetch)
+  useEffect(() => {
+    if (!enabled || !testMode) return;
+
     const interval = setInterval(() => refreshSimulatedPositions(), TRADING_REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [enabled, refreshSimulatedPositions, testMode]);
+  }, [enabled, testMode, refreshSimulatedPositions]);
+
+  // Reset price-aware fetch flag when testMode changes
+  useEffect(() => {
+    hadInitialPriceRef.current = false;
+  }, [testMode]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -720,6 +816,15 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     const interval = setInterval(() => refreshFearGreed(), FEAR_GREED_CACHE_MS);
     return () => clearInterval(interval);
   }, [enabled, refreshFearGreed, FEAR_GREED_CACHE_MS]);
+
+  // Fetch Draft Orders on mount and periodically refresh
+  // Force refresh when testMode changes to show mode-specific drafts
+  useEffect(() => {
+    if (!enabled) return;
+    refreshDraftOrders(true); // Force refresh to handle mode change
+    const interval = setInterval(() => refreshDraftOrders(), TRADING_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [enabled, refreshDraftOrders, testMode]);
 
   // Check and fill limit orders when price changes (test mode only)
   useEffect(() => {
@@ -804,6 +909,9 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     fearGreed,
     fearGreedLoading,
     refreshFearGreed,
+    draftOrders,
+    draftOrdersLoading,
+    refreshDraftOrders,
   }), [
     wsStatus,
     price,
@@ -843,6 +951,9 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     fearGreed,
     fearGreedLoading,
     refreshFearGreed,
+    draftOrders,
+    draftOrdersLoading,
+    refreshDraftOrders,
   ]);
 
   return (

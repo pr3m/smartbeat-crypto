@@ -58,6 +58,20 @@ export interface EditingOrderData {
   leverage: number;
 }
 
+export interface EditingDraftData {
+  id: string;
+  side: 'buy' | 'sell';
+  orderType: string;
+  price?: number;
+  price2?: number;
+  volume: number;
+  leverage: number;
+  trailingOffset?: number;
+  trailingOffsetType?: 'percent' | 'absolute';
+  displayVolume?: number;
+  aiSetupType?: string;
+}
+
 interface TradeExecutionPanelProps {
   currentPrice: number;
   bestBid: number;
@@ -65,8 +79,10 @@ interface TradeExecutionPanelProps {
   testMode?: boolean;
   entryConditions?: EntryConditionsSnapshot | null;
   editingOrder?: EditingOrderData | null;
+  editingDraft?: EditingDraftData | null;
   onOrderExecuted?: () => void;
   onCancelEdit?: () => void;
+  onDraftSaved?: () => void;
 }
 
 export function TradeExecutionPanel({
@@ -76,8 +92,10 @@ export function TradeExecutionPanel({
   testMode = false,
   entryConditions,
   editingOrder,
+  editingDraft,
   onOrderExecuted,
   onCancelEdit,
+  onDraftSaved,
 }: TradeExecutionPanelProps) {
   const { addToast } = useToast();
 
@@ -148,6 +166,32 @@ export function TradeExecutionPanel({
       setTotal(totalValue.toFixed(2));
     }
   }, [editingOrder]);
+
+  // Populate form when editing a draft
+  useEffect(() => {
+    if (editingDraft) {
+      setSide(editingDraft.side);
+      setOrderType(editingDraft.orderType);
+      if (editingDraft.price) {
+        setPrice(editingDraft.price.toFixed(5));
+      }
+      if (editingDraft.price2) {
+        setPrice2(editingDraft.price2.toFixed(5));
+      }
+      setAmount(editingDraft.volume.toString());
+      if (editingDraft.displayVolume) {
+        setDisplayVol(editingDraft.displayVolume.toString());
+      }
+      if (editingDraft.trailingOffsetType) {
+        setOffsetType(editingDraft.trailingOffsetType);
+      }
+      // Calculate total
+      if (editingDraft.price) {
+        const totalValue = editingDraft.price * editingDraft.volume;
+        setTotal(totalValue.toFixed(2));
+      }
+    }
+  }, [editingDraft]);
 
   // Parse trade balance values
   const parsedBalance = useMemo(() => {
@@ -239,6 +283,74 @@ export function TradeExecutionPanel({
   // Set price to best bid/ask
   const setBestBidPrice = () => setPrice(bestBid.toFixed(5));
   const setBestAskPrice = () => setPrice(bestAsk.toFixed(5));
+
+  // Save as draft
+  const [savingDraft, setSavingDraft] = useState(false);
+
+  const saveAsDraft = async () => {
+    const amountNum = parseFloat(amount) || 0;
+    if (amountNum <= 0) {
+      addToast({
+        title: 'Invalid Amount',
+        message: 'Please enter a valid amount',
+        type: 'error',
+      });
+      return;
+    }
+
+    setSavingDraft(true);
+
+    try {
+      const draftData = {
+        pair: 'XRPEUR',
+        side,
+        orderType,
+        price: orderType !== 'market' && price ? parseFloat(price) : null,
+        price2: orderTypeConfig.hasPrice2 && price2 ? parseFloat(price2) : null,
+        volume: amountNum,
+        displayVolume: orderTypeConfig.hasDisplayVol && displayVol ? parseFloat(displayVol) : null,
+        leverage: useMargin ? leverage : 1,
+        trailingOffset: orderTypeConfig.isOffset && price ? parseFloat(price) : null,
+        trailingOffsetType: orderTypeConfig.isOffset ? offsetType : null,
+        source: 'manual',
+      };
+
+      const response = await fetch('/api/draft-orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(draftData),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || result.error) {
+        throw new Error(result.error || 'Failed to save draft');
+      }
+
+      addToast({
+        title: 'Draft Saved',
+        message: `${side.toUpperCase()} ${amountNum.toFixed(2)} XRP saved as draft`,
+        type: 'success',
+      });
+
+      // Reset form
+      setAmount('');
+      setTotal('');
+      setPrice('');
+      setPrice2('');
+      setDisplayVol('');
+
+      onDraftSaved?.();
+    } catch (err) {
+      addToast({
+        title: 'Save Failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+        type: 'error',
+      });
+    } finally {
+      setSavingDraft(false);
+    }
+  };
 
   // Submit order
   const handleSubmit = () => {
@@ -398,8 +510,36 @@ export function TradeExecutionPanel({
 
   return (
     <div className="card p-4">
+      {/* Editing Draft Banner */}
+      {editingDraft && (
+        <div className="mb-4 p-3 rounded-lg bg-purple-500/20 border border-purple-500/40 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-purple-400 text-sm font-semibold flex items-center gap-1">
+              <span>🤖</span> Editing Draft
+            </span>
+            <span className="text-xs text-purple-300">
+              {editingDraft.side === 'buy' ? 'LONG' : 'SHORT'} {editingDraft.volume} XRP
+              {editingDraft.price ? ` @ €${editingDraft.price.toFixed(4)}` : ''}
+            </span>
+            {editingDraft.aiSetupType && (
+              <span className="px-2 py-0.5 rounded text-xs bg-purple-500/30 text-purple-200">
+                {editingDraft.aiSetupType}
+              </span>
+            )}
+          </div>
+          {onCancelEdit && (
+            <button
+              onClick={onCancelEdit}
+              className="text-xs px-2 py-1 rounded bg-purple-500/30 text-purple-300 hover:bg-purple-500/40 transition-colors"
+            >
+              Cancel Edit
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Editing Order Banner */}
-      {editingOrder && (
+      {editingOrder && !editingDraft && (
         <div className="mb-4 p-3 rounded-lg bg-blue-500/20 border border-blue-500/40 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-blue-400 text-sm font-semibold">Editing Order</span>
@@ -869,27 +1009,41 @@ export function TradeExecutionPanel({
         )}
       </div>
 
-      {/* Execute Button */}
-      <button
-        onClick={handleSubmit}
-        disabled={!orderPreview || orderPreview.risk.isCritical}
-        className={`w-full py-4 rounded-lg font-bold text-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-          testMode
-            ? 'bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-400 hover:to-orange-500 text-black'
-            : isBuy
-            ? 'bg-green-500 hover:bg-green-400 text-black'
-            : 'bg-red-500 hover:bg-red-400 text-white'
-        }`}
-      >
-        <div className="flex flex-col items-center">
-          <span>
-            {testMode ? 'TEST ' : ''}{validateOnly ? 'Validate' : isBuy ? 'LONG' : 'SHORT'} XRP {useMargin ? `${leverage}x` : ''}
-          </span>
-          <span className="text-xs opacity-70">
-            {validateOnly ? '(Dry Run)' : isBuy ? '(Buy Order)' : '(Sell Order)'}
-          </span>
-        </div>
-      </button>
+      {/* Action Buttons */}
+      <div className="space-y-2">
+        {/* Execute Button */}
+        <button
+          onClick={handleSubmit}
+          disabled={!orderPreview || orderPreview.risk.isCritical}
+          className={`w-full py-4 rounded-lg font-bold text-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+            testMode
+              ? 'bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-400 hover:to-orange-500 text-black'
+              : isBuy
+              ? 'bg-green-500 hover:bg-green-400 text-black'
+              : 'bg-red-500 hover:bg-red-400 text-white'
+          }`}
+        >
+          <div className="flex flex-col items-center">
+            <span>
+              {testMode ? 'TEST ' : ''}{validateOnly ? 'Validate' : isBuy ? 'LONG' : 'SHORT'} XRP {useMargin ? `${leverage}x` : ''}
+            </span>
+            <span className="text-xs opacity-70">
+              {validateOnly ? '(Dry Run)' : isBuy ? '(Buy Order)' : '(Sell Order)'}
+            </span>
+          </div>
+        </button>
+
+        {/* Save as Draft Button - only show for non-market orders */}
+        {orderType !== 'market' && (
+          <button
+            onClick={saveAsDraft}
+            disabled={savingDraft || !amount || parseFloat(amount) <= 0}
+            className="w-full py-2 rounded-lg font-semibold text-sm transition-colors border-2 border-dashed border-purple-500/50 bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:border-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {savingDraft ? 'Saving...' : '💾 Save as Draft'}
+          </button>
+        )}
+      </div>
 
       {/* Current Price Reference */}
       <div className="mt-3 flex justify-between text-xs text-tertiary">

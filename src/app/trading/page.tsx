@@ -11,8 +11,9 @@ import { TradingDataProvider, useTradingData, TRADING_TIMEFRAMES, TRADING_REFRES
 import { useToast } from '@/components/Toast';
 import { requestNotificationPermission, sendBrowserNotification } from '@/components/Toast';
 import { Tooltip, HelpIcon } from '@/components/Tooltip';
-import { TradeExecutionPanel, type EditingOrderData } from '@/components/TradeExecutionPanel';
+import { TradeExecutionPanel, type EditingOrderData, type EditingDraftData } from '@/components/TradeExecutionPanel';
 import { type OpenOrderData } from '@/components/OpenOrders';
+import { type DraftOrder } from '@/components/DraftOrders';
 import { TradeDrawer } from '@/components/TradeDrawer';
 import { FloatingTradeButton } from '@/components/FloatingTradeButton';
 import { SimulatedBalance } from '@/components/SimulatedBalance';
@@ -21,7 +22,9 @@ import { TradeHistory } from '@/components/TradeHistory';
 import { TradeAnalysisPanel } from '@/components/TradeAnalysisPanel';
 import { TradingTabs, type TradingTab } from '@/components/TradingTabs';
 import { SetupTab } from '@/components/tabs/SetupTab';
+import { OrdersTab } from '@/components/tabs/OrdersTab';
 import { PositionsTab } from '@/components/tabs/PositionsTab';
+import { HistoryTab } from '@/components/tabs/HistoryTab';
 import { ReportsTab } from '@/components/tabs/ReportsTab';
 import { FearGreedGauge } from '@/components/FearGreedGauge';
 import type { LiquidationAnalysis } from '@/lib/trading/liquidation';
@@ -70,6 +73,8 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     openPositions,
     simulatedPositions,
     fearGreed,
+    openOrders,
+    draftOrders,
   } = useTradingData();
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [displayTf, setDisplayTf] = useState<number>(15);
@@ -79,7 +84,12 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
   // Tab state
   const [activeTab, setActiveTab] = useState<TradingTab>('setup');
   const [positionsCount, setPositionsCount] = useState(0);
+  const [historyCount, setHistoryCount] = useState(0);
   const [reportsCount, setReportsCount] = useState(0);
+
+  // Calculate orders count (open orders + pending drafts)
+  const pendingDrafts = draftOrders.filter(d => d.status === 'pending');
+  const ordersCount = openOrders.length + pendingDrafts.length;
 
   // Microstructure data from Market Microstructure section
   const [microData, setMicroData] = useState<MicrostructureInput | null>(null);
@@ -101,6 +111,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
 
   // Order editing state
   const [editingOrder, setEditingOrder] = useState<EditingOrderData | null>(null);
+  const [editingDraft, setEditingDraft] = useState<EditingDraftData | null>(null);
 
   // Toast notifications (must be before callbacks that use it)
   const { addToast } = useToast();
@@ -147,6 +158,25 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
   // Handle cancel edit
   const handleCancelEdit = useCallback(() => {
     setEditingOrder(null);
+    setEditingDraft(null);
+  }, []);
+
+  // Handle edit draft from DraftOrders component
+  const handleEditDraft = useCallback((draft: DraftOrder) => {
+    setEditingDraft({
+      id: draft.id,
+      side: draft.side,
+      orderType: draft.orderType,
+      price: draft.price || undefined,
+      price2: draft.price2 || undefined,
+      volume: draft.volume,
+      leverage: draft.leverage,
+      trailingOffset: draft.trailingOffset || undefined,
+      trailingOffsetType: draft.trailingOffsetType as 'percent' | 'absolute' | undefined,
+      displayVolume: draft.displayVolume || undefined,
+      aiSetupType: draft.aiSetupType || undefined,
+    });
+    setIsDrawerOpen(true);
   }, []);
 
   // Build market snapshot for AI analysis
@@ -374,6 +404,20 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
       .catch(console.error);
   }, []);
 
+  // Fetch history count on mount and when testMode changes
+  useEffect(() => {
+    const endpoint = testMode
+      ? '/api/simulated/positions/history'
+      : '/api/trading/history';
+
+    fetch(endpoint)
+      .then(r => r.json())
+      .then(d => {
+        setHistoryCount((d.positions || []).length);
+      })
+      .catch(console.error);
+  }, [testMode]);
+
   // Update positions count when simulated positions change
   useEffect(() => {
     if (testMode) {
@@ -505,7 +549,9 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
         activeTab={activeTab}
         onTabChange={setActiveTab}
         counts={{
+          orders: ordersCount,
           positions: positionsCount,
+          history: historyCount,
           reports: reportsCount,
         }}
       />
@@ -765,6 +811,15 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
         </div>
       )}
 
+      {/* Orders Tab - Full Width */}
+      {activeTab === 'orders' && (
+        <OrdersTab
+          testMode={testMode}
+          onEditOrder={handleEditOrder}
+          onEditDraft={handleEditDraft}
+        />
+      )}
+
       {/* Positions Tab - Full Width */}
       {activeTab === 'positions' && (
         <PositionsTab
@@ -781,14 +836,30 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
                 setPositionsCount(openCount);
               })
               .catch(console.error);
+            // Refresh history count when position changes (might have closed)
+            const historyEndpoint = testMode
+              ? '/api/simulated/positions/history'
+              : '/api/trading/history';
+            fetch(historyEndpoint)
+              .then(r => r.json())
+              .then(d => {
+                setHistoryCount((d.positions || []).length);
+              })
+              .catch(console.error);
           }}
         />
+      )}
+
+      {/* History Tab - Full Width */}
+      {activeTab === 'history' && (
+        <HistoryTab testMode={testMode} />
       )}
 
       {/* Reports Tab - Full Width */}
       {activeTab === 'reports' && (
         <ReportsTab
           onReportsCountChange={setReportsCount}
+          testMode={testMode}
         />
       )}
 
@@ -813,6 +884,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
             bestAsk={bestAsk || price * 1.0001}
             testMode={testMode}
             editingOrder={editingOrder}
+            editingDraft={editingDraft}
             onOrderExecuted={handleOrderExecuted}
             onCancelEdit={handleCancelEdit}
           />

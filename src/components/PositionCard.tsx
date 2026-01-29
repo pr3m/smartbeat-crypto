@@ -57,13 +57,15 @@ export function PositionCard({
 }: PositionCardProps) {
   const [expandedRisk, setExpandedRisk] = useState(false);
 
-  // Calculate P&L
+  // Calculate P&L (guard against invalid currentPrice)
   const calculateGrossPnL = (): number => {
     const { side, volume, entryPrice, currentPrice, fee } = position;
+    // If currentPrice is 0 or invalid, use entryPrice to show 0 P&L (minus fees)
+    const effectivePrice = currentPrice > 0 ? currentPrice : entryPrice;
     if (side === 'long') {
-      return (currentPrice - entryPrice) * volume - fee;
+      return (effectivePrice - entryPrice) * volume - fee;
     } else {
-      return (entryPrice - currentPrice) * volume - fee;
+      return (entryPrice - effectivePrice) * volume - fee;
     }
   };
 
@@ -294,13 +296,15 @@ interface PositionsSummaryProps {
 }
 
 export function PositionsSummary({ positions }: PositionsSummaryProps) {
-  // P&L calculation helper (same as in PositionCard)
+  // P&L calculation helper (same as in PositionCard, with guard for invalid price)
   const calculateGrossPnL = (pos: PositionCardData): number => {
     const { side, volume, entryPrice, currentPrice, fee } = pos;
+    // If currentPrice is 0 or invalid, use entryPrice to show 0 P&L (minus fees)
+    const effectivePrice = currentPrice > 0 ? currentPrice : entryPrice;
     if (side === 'long') {
-      return (currentPrice - entryPrice) * volume - fee;
+      return (effectivePrice - entryPrice) * volume - fee;
     } else {
-      return (entryPrice - currentPrice) * volume - fee;
+      return (entryPrice - effectivePrice) * volume - fee;
     }
   };
 

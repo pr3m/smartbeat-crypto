@@ -1,20 +1,24 @@
 'use client';
 
-export type TradingTab = 'setup' | 'positions' | 'reports';
+export type TradingTab = 'setup' | 'orders' | 'positions' | 'history' | 'reports';
 
 interface TradingTabsProps {
   activeTab: TradingTab;
   onTabChange: (tab: TradingTab) => void;
   counts?: {
+    orders?: number;
     positions?: number;
+    history?: number;
     reports?: number;
   };
 }
 
 export function TradingTabs({ activeTab, onTabChange, counts }: TradingTabsProps) {
-  const tabs: { id: TradingTab; label: string; icon: string; countKey?: 'positions' | 'reports' }[] = [
+  const tabs: { id: TradingTab; label: string; icon: string; countKey?: 'orders' | 'positions' | 'history' | 'reports' }[] = [
     { id: 'setup', label: 'Setup', icon: '📊' },
+    { id: 'orders', label: 'Orders', icon: '📋', countKey: 'orders' },
     { id: 'positions', label: 'Positions', icon: '📈', countKey: 'positions' },
+    { id: 'history', label: 'History', icon: '📜', countKey: 'history' },
     { id: 'reports', label: 'Reports', icon: '📝', countKey: 'reports' },
   ];
 

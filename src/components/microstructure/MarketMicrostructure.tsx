@@ -9,7 +9,6 @@ import { SpreadMonitor } from './SpreadMonitor';
 import { LargeOrderAlert } from './LargeOrderAlert';
 import { Tooltip, HelpIcon } from '@/components/Tooltip';
 import type { MicrostructureInput } from '@/lib/kraken/types';
-import { calculateAverageSpread } from '@/lib/trading/microstructure';
 
 interface MarketMicrostructureProps {
   pair?: string;
@@ -22,42 +21,18 @@ export function MarketMicrostructure({ pair = 'XRP/EUR', onDataChange }: MarketM
   // Only connect when expanded (lazy connection)
   const { status, data, aggregated, resetCVD } = useKrakenWebSocketV2(pair, isExpanded);
 
-  // Use aggregated summary for recommendations (updated every minute, more stable)
-  // Fall back to real-time data if no aggregated data yet
-  const microstructureInput = useMemo((): MicrostructureInput | null => {
-    // If we have aggregated data with history, use it (updated every minute)
+  // Use aggregated summary for recommendations (updated every minute for stability)
+  const recommendationInput = useMemo((): MicrostructureInput | null => {
     if (aggregated.history.length > 0) {
       return aggregated.summary;
     }
+    return null;
+  }, [aggregated.history.length, aggregated.summary]);
 
-    // Fall back to real-time data while aggregating first minute
-    if (!data.orderBook || data.trades.length === 0) {
-      return null;
-    }
-
-    const { avgSpreadPercent } = calculateAverageSpread(data.spreadHistory);
-
-    // Count recent large orders (last 5 minutes)
-    const fiveMinAgo = Date.now() - 5 * 60 * 1000;
-    const recentLargeOrders = data.largeOrders.filter(o => o.timestamp > fiveMinAgo);
-    const recentLargeBuys = recentLargeOrders.filter(o => o.side === 'buy').length;
-    const recentLargeSells = recentLargeOrders.filter(o => o.side === 'sell').length;
-
-    return {
-      imbalance: data.orderBook.imbalance,
-      cvd: data.cvd,
-      cvdHistory: data.cvdHistory,
-      spreadPercent: data.orderBook.spreadPercent,
-      avgSpreadPercent,
-      recentLargeBuys,
-      recentLargeSells,
-    };
-  }, [aggregated.history.length, aggregated.summary, data.orderBook, data.cvd, data.cvdHistory, data.spreadHistory, data.largeOrders, data.trades.length]);
-
-  // Notify parent of data changes (now only updates when aggregated data updates - every minute)
+  // Notify parent of data changes only when aggregated data updates (once per minute)
   useEffect(() => {
-    onDataChange?.(microstructureInput);
-  }, [microstructureInput, onDataChange]);
+    onDataChange?.(recommendationInput);
+  }, [recommendationInput, onDataChange]);
 
   const handleToggle = useCallback(() => {
     setIsExpanded(prev => !prev);

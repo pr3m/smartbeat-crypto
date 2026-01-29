@@ -185,11 +185,13 @@ export function PositionsTab({ testMode, currentPrice, onPositionChange }: Posit
   }, [currentPrice, tfData, openPrice, high24h, low24h, volume24h, btcTrend, btcChange, fearGreed]);
 
   // Calculate P&L for a position (used for filtering)
+  // Guard against invalid currentPrice (shows 0 P&L minus fees if price unavailable)
   const calculatePnL = (pos: PositionCardData): number => {
+    const effectivePrice = pos.currentPrice > 0 ? pos.currentPrice : pos.entryPrice;
     if (pos.side === 'long') {
-      return (pos.currentPrice - pos.entryPrice) * pos.volume - pos.fee;
+      return (effectivePrice - pos.entryPrice) * pos.volume - pos.fee;
     } else {
-      return (pos.entryPrice - pos.currentPrice) * pos.volume - pos.fee;
+      return (pos.entryPrice - effectivePrice) * pos.volume - pos.fee;
     }
   };
 

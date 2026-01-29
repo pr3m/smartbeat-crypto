@@ -291,6 +291,7 @@ export function SetupTab({
             navigator.clipboard.writeText(aiAnalysis.analysis);
             addToast({ title: 'Copied', message: 'Analysis copied to clipboard', type: 'success', duration: 2000 });
           }}
+          testMode={testMode}
         />
       )}
 

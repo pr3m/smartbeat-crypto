@@ -2,6 +2,8 @@
 
 import { useState, useMemo } from 'react';
 import type { AIAnalysisResponse } from '@/lib/ai/types';
+import { useToast } from './Toast';
+import { useTradingData } from './TradingDataProvider';
 
 interface AIAnalysisPanelProps {
   analysis: AIAnalysisResponse;
@@ -10,6 +12,10 @@ interface AIAnalysisPanelProps {
   onCopyAnalysis: () => void;
   /** When true, renders in a more compact style without outer card wrapper */
   embedded?: boolean;
+  /** Callback after draft orders are created */
+  onDraftsCreated?: () => void;
+  /** Current trading mode - drafts created here will be mode-specific */
+  testMode?: boolean;
 }
 
 interface ParsedSection {
@@ -151,8 +157,12 @@ function getSectionStyle(type: ParsedSection['type']) {
   }
 }
 
-export function AIAnalysisPanel({ analysis, onClose, onCopyInput, onCopyAnalysis, embedded = false }: AIAnalysisPanelProps) {
+export function AIAnalysisPanel({ analysis, onClose, onCopyInput, onCopyAnalysis, embedded = false, onDraftsCreated, testMode = true }: AIAnalysisPanelProps) {
   const [showDebug, setShowDebug] = useState(false);
+  const [creatingDrafts, setCreatingDrafts] = useState(false);
+  const [conditionalSetupsExpanded, setConditionalSetupsExpanded] = useState(true);
+  const { addToast } = useToast();
+  const { refreshDraftOrders, simulatedBalance } = useTradingData();
 
   // Safely get analysis text - handle non-string responses from GPT-5.2
   const analysisText = (() => {
@@ -179,6 +189,296 @@ export function AIAnalysisPanel({ analysis, onClose, onCopyInput, onCopyAnalysis
 
   // Check if we have any content to show
   const hasContent = sections.length > 0 || tradeData;
+
+  // Check if we can create draft orders (has actionable trade recommendation)
+  const canCreateDrafts = tradeData &&
+    tradeData.action !== 'WAIT' &&
+    tradeData.entry &&
+    tradeData.entry.low != null &&
+    tradeData.entry.high != null;
+
+  // Create draft orders from trade data
+  const handleCreateDraftOrders = async () => {
+    if (!tradeData || !canCreateDrafts) return;
+
+    setCreatingDrafts(true);
+    const createdDrafts: string[] = [];
+
+    try {
+      // Determine side from action
+      const side = tradeData.action === 'LONG' ? 'buy' : 'sell';
+      const oppositeSide = side === 'buy' ? 'sell' : 'buy';
+
+      // Calculate entry price (midpoint of zone)
+      const entryLow = tradeData.entry!.low;
+      const entryHigh = tradeData.entry!.high;
+      const entryPrice = (entryLow + entryHigh) / 2;
+
+      // Calculate volume from position size
+      const positionSizePct = tradeData.positionSizePct || 1;
+      const availableMargin = simulatedBalance?.freeMargin || 1000;
+      const leverage = 10;
+      const marginToUse = (availableMargin * positionSizePct) / 100;
+      const positionValue = marginToUse * leverage;
+      const volume = entryPrice > 0 ? positionValue / entryPrice : 100;
+
+      // 1. Create entry order (limit at entry midpoint)
+      const entryRes = await fetch('/api/draft-orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pair: 'XRPEUR',
+          side,
+          orderType: 'limit',
+          price: entryPrice,
+          volume,
+          leverage,
+          source: 'ai',
+          aiSetupType: `${tradeData.action}_ENTRY`,
+          activationCriteria: [`Entry zone: ${entryLow.toFixed(4)} - ${entryHigh.toFixed(4)}`],
+          positionSizePct,
+          testMode,
+        }),
+      });
+      if (entryRes.ok) {
+        const data = await entryRes.json();
+        createdDrafts.push(data.draft?.id);
+      }
+
+      // 2. Create stop loss order
+      if (tradeData.stopLoss != null) {
+        const slRes = await fetch('/api/draft-orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pair: 'XRPEUR',
+            side: oppositeSide,
+            orderType: 'stop-loss',
+            price: tradeData.stopLoss,
+            volume,
+            leverage,
+            source: 'ai',
+            aiSetupType: `${tradeData.action}_SL`,
+            testMode,
+          }),
+        });
+        if (slRes.ok) {
+          const data = await slRes.json();
+          createdDrafts.push(data.draft?.id);
+        }
+      }
+
+      // 3. Create take profit orders
+      if (tradeData.targets && tradeData.targets.length > 0) {
+        let remainingVolume = volume;
+
+        for (let i = 0; i < tradeData.targets.length; i++) {
+          const target = tradeData.targets[i];
+          const targetPrice = typeof target.price === 'string' ? parseFloat(target.price) : Number(target.price);
+
+          if (!targetPrice || isNaN(targetPrice)) continue;
+
+          // Calculate volume for this target
+          let targetVolume: number;
+          if (i === tradeData.targets.length - 1) {
+            targetVolume = remainingVolume;
+          } else {
+            const prob = target.probability != null ? Number(target.probability) : 0.33;
+            targetVolume = Math.max(volume * 0.1, volume * prob * 0.5);
+            targetVolume = Math.min(targetVolume, remainingVolume * 0.8);
+            remainingVolume -= targetVolume;
+          }
+
+          const tpRes = await fetch('/api/draft-orders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              pair: 'XRPEUR',
+              side: oppositeSide,
+              orderType: 'take-profit',
+              price: targetPrice,
+              volume: targetVolume,
+              leverage,
+              source: 'ai',
+              aiSetupType: `${tradeData.action}_TP${i + 1}`,
+              testMode,
+            }),
+          });
+          if (tpRes.ok) {
+            const data = await tpRes.json();
+            createdDrafts.push(data.draft?.id);
+          }
+        }
+      }
+
+      // Success notification
+      addToast({
+        title: 'Draft Orders Created',
+        message: `Created ${createdDrafts.length} draft orders from AI analysis`,
+        type: 'success',
+      });
+
+      // Refresh draft orders list
+      refreshDraftOrders(true);
+      onDraftsCreated?.();
+
+    } catch (error) {
+      console.error('Error creating draft orders:', error);
+      addToast({
+        title: 'Error Creating Drafts',
+        message: error instanceof Error ? error.message : 'Unknown error',
+        type: 'error',
+      });
+    } finally {
+      setCreatingDrafts(false);
+    }
+  };
+
+  // Track which conditional setup is being created
+  const [creatingSetupIndex, setCreatingSetupIndex] = useState<number | null>(null);
+
+  // Create draft orders from a conditional setup
+  const handleCreateFromConditionalSetup = async (setup: {
+    type: string;
+    entryZone: [string, string];
+    stopLoss: string;
+    targets: Array<{ price: string; probability: number }>;
+    positionSizePct?: number;
+    activationCriteria?: string[];
+    invalidation?: string[];
+  }, index: number) => {
+    setCreatingSetupIndex(index);
+    const createdDrafts: string[] = [];
+
+    try {
+      // Determine side from setup type
+      const setupType = setup.type.toUpperCase();
+      const side = setupType.includes('SHORT') ? 'sell' : 'buy';
+      const oppositeSide = side === 'buy' ? 'sell' : 'buy';
+
+      // Parse prices
+      const entryLow = parseFloat(setup.entryZone[0]);
+      const entryHigh = parseFloat(setup.entryZone[1]);
+      const entryPrice = (entryLow + entryHigh) / 2;
+      const stopLossPrice = parseFloat(setup.stopLoss);
+
+      // Calculate volume
+      const positionSizePct = setup.positionSizePct || 1;
+      const availableMargin = simulatedBalance?.freeMargin || 1000;
+      const leverage = 10;
+      const marginToUse = (availableMargin * positionSizePct) / 100;
+      const positionValue = marginToUse * leverage;
+      const volume = entryPrice > 0 ? positionValue / entryPrice : 100;
+
+      // 1. Create entry order
+      const entryRes = await fetch('/api/draft-orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pair: 'XRPEUR',
+          side,
+          orderType: 'limit',
+          price: entryPrice,
+          volume,
+          leverage,
+          source: 'ai',
+          aiSetupType: setup.type,
+          activationCriteria: setup.activationCriteria,
+          invalidation: setup.invalidation,
+          positionSizePct,
+          testMode,
+        }),
+      });
+      if (entryRes.ok) {
+        const data = await entryRes.json();
+        createdDrafts.push(data.draft?.id);
+      }
+
+      // 2. Create stop loss order
+      if (stopLossPrice > 0) {
+        const slRes = await fetch('/api/draft-orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pair: 'XRPEUR',
+            side: oppositeSide,
+            orderType: 'stop-loss',
+            price: stopLossPrice,
+            volume,
+            leverage,
+            source: 'ai',
+            aiSetupType: `${setup.type}_SL`,
+            testMode,
+          }),
+        });
+        if (slRes.ok) {
+          const data = await slRes.json();
+          createdDrafts.push(data.draft?.id);
+        }
+      }
+
+      // 3. Create take profit orders
+      if (setup.targets && setup.targets.length > 0) {
+        let remainingVolume = volume;
+
+        for (let i = 0; i < setup.targets.length; i++) {
+          const target = setup.targets[i];
+          const targetPrice = parseFloat(target.price);
+
+          if (!targetPrice || isNaN(targetPrice)) continue;
+
+          let targetVolume: number;
+          if (i === setup.targets.length - 1) {
+            targetVolume = remainingVolume;
+          } else {
+            const prob = target.probability || 0.33;
+            targetVolume = Math.max(volume * 0.1, volume * prob * 0.5);
+            targetVolume = Math.min(targetVolume, remainingVolume * 0.8);
+            remainingVolume -= targetVolume;
+          }
+
+          const tpRes = await fetch('/api/draft-orders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              pair: 'XRPEUR',
+              side: oppositeSide,
+              orderType: 'take-profit',
+              price: targetPrice,
+              volume: targetVolume,
+              leverage,
+              source: 'ai',
+              aiSetupType: `${setup.type}_TP${i + 1}`,
+              testMode,
+            }),
+          });
+          if (tpRes.ok) {
+            const data = await tpRes.json();
+            createdDrafts.push(data.draft?.id);
+          }
+        }
+      }
+
+      addToast({
+        title: 'Draft Orders Created',
+        message: `Created ${createdDrafts.length} drafts for ${setup.type}`,
+        type: 'success',
+      });
+
+      refreshDraftOrders(true);
+      onDraftsCreated?.();
+
+    } catch (error) {
+      console.error('Error creating draft orders:', error);
+      addToast({
+        title: 'Error Creating Drafts',
+        message: error instanceof Error ? error.message : 'Unknown error',
+        type: 'error',
+      });
+    } finally {
+      setCreatingSetupIndex(null);
+    }
+  };
 
   return (
     <div className={embedded ? '' : 'card border border-purple-500/30 bg-gradient-to-br from-purple-900/20 to-blue-900/20 overflow-hidden'}>
@@ -367,6 +667,187 @@ export function AIAnalysisPanel({ analysis, onClose, onCopyInput, onCopyAnalysis
               )}
             </div>
           )}
+
+          {/* Create Draft Orders Button */}
+          {canCreateDrafts && (
+            <div className="mt-4 pt-3 border-t border-purple-500/20">
+              <button
+                onClick={handleCreateDraftOrders}
+                disabled={creatingDrafts}
+                className="w-full py-2.5 px-4 rounded-lg font-semibold text-sm transition-all flex items-center justify-center gap-2 border-2 border-dashed border-purple-500/50 bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 hover:border-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {creatingDrafts ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Creating Drafts...
+                  </>
+                ) : (
+                  <>
+                    <span>📋</span>
+                    Create Draft Orders
+                    <span className="text-xs opacity-70">
+                      (Entry + SL{tradeData.targets && tradeData.targets.length > 0 ? ` + ${tradeData.targets.length} TP` : ''})
+                    </span>
+                  </>
+                )}
+              </button>
+              <p className="text-xs text-tertiary text-center mt-2">
+                Creates draft orders from this trade plan. Review before submitting.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Conditional Setups Section */}
+      {tradeData?.conditionalSetups && tradeData.conditionalSetups.length > 0 && (
+        <div className="px-4 py-3 border-b border-purple-500/20">
+          <button
+            onClick={() => setConditionalSetupsExpanded(!conditionalSetupsExpanded)}
+            className="w-full text-left text-xs text-tertiary uppercase tracking-wider mb-3 flex items-center gap-2 hover:text-secondary transition-colors"
+          >
+            <span className={`transition-transform ${conditionalSetupsExpanded ? '' : '-rotate-90'}`}>▼</span>
+            <span>🎯</span>
+            Conditional Trade Setups
+            <span className="text-purple-400 font-normal normal-case">
+              (activate when conditions are met)
+            </span>
+            <span className="ml-auto text-tertiary font-normal normal-case">
+              {tradeData.conditionalSetups.length} setup{tradeData.conditionalSetups.length !== 1 ? 's' : ''}
+            </span>
+          </button>
+
+          {conditionalSetupsExpanded && <div className="space-y-3">
+            {tradeData.conditionalSetups.map((setup, i) => {
+              const isShort = setup.type.toUpperCase().includes('SHORT');
+              const entryLow = parseFloat(setup.entryZone[0]);
+              const entryHigh = parseFloat(setup.entryZone[1]);
+              const entryMid = (entryLow + entryHigh) / 2;
+              const stopLoss = parseFloat(setup.stopLoss);
+
+              return (
+                <div
+                  key={i}
+                  className={`rounded-lg border-2 border-dashed p-3 ${
+                    isShort
+                      ? 'border-red-500/40 bg-red-500/5'
+                      : 'border-green-500/40 bg-green-500/5'
+                  }`}
+                >
+                  {/* Setup Header */}
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                        isShort ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                      }`}>
+                        {isShort ? 'SHORT' : 'LONG'}
+                      </span>
+                      <span className="text-sm font-semibold text-primary">
+                        {setup.type.replace(/_/g, ' ')}
+                      </span>
+                    </div>
+                    {setup.positionSizePct && (
+                      <span className="text-xs text-tertiary">
+                        {setup.positionSizePct}% capital
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Price Levels */}
+                  <div className="grid grid-cols-3 gap-2 text-xs mb-3">
+                    <div className="p-2 rounded bg-blue-500/10 text-center">
+                      <div className="text-tertiary">Entry Zone</div>
+                      <div className="font-mono text-blue-400">
+                        €{entryLow.toFixed(4)} - €{entryHigh.toFixed(4)}
+                      </div>
+                    </div>
+                    <div className="p-2 rounded bg-red-500/10 text-center">
+                      <div className="text-tertiary">Stop Loss</div>
+                      <div className="font-mono text-red-400">€{stopLoss.toFixed(4)}</div>
+                    </div>
+                    <div className="p-2 rounded bg-green-500/10 text-center">
+                      <div className="text-tertiary">Targets</div>
+                      <div className="font-mono text-green-400">
+                        {setup.targets.length} level{setup.targets.length > 1 ? 's' : ''}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Targets Detail */}
+                  {setup.targets.length > 0 && (
+                    <div className="flex gap-1 mb-3">
+                      {setup.targets.slice(0, 3).map((t, ti) => (
+                        <div key={ti} className="flex-1 p-1.5 rounded bg-green-500/10 text-center text-xs">
+                          <span className="text-tertiary">TP{ti + 1}: </span>
+                          <span className="font-mono text-green-400">€{parseFloat(t.price).toFixed(4)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Activation Criteria */}
+                  {setup.activationCriteria && setup.activationCriteria.length > 0 && (
+                    <div className="mb-2 p-2 rounded bg-blue-500/10 border border-blue-500/20">
+                      <div className="text-xs text-blue-400 mb-1 font-semibold">
+                        Activation Criteria:
+                      </div>
+                      <ul className="text-xs text-blue-300 space-y-0.5">
+                        {setup.activationCriteria.slice(0, 3).map((crit, ci) => (
+                          <li key={ci}>• {crit}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Invalidation */}
+                  {setup.invalidation && setup.invalidation.length > 0 && (
+                    <div className="mb-3 p-2 rounded bg-yellow-500/10 border border-yellow-500/20">
+                      <div className="text-xs text-yellow-400 mb-1 font-semibold">
+                        Invalid if:
+                      </div>
+                      <ul className="text-xs text-yellow-300 space-y-0.5">
+                        {setup.invalidation.slice(0, 2).map((inv, ii) => (
+                          <li key={ii}>• {inv}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Create Draft Button */}
+                  <button
+                    onClick={() => handleCreateFromConditionalSetup(setup, i)}
+                    disabled={creatingSetupIndex !== null}
+                    className={`w-full py-2 rounded-lg font-semibold text-sm transition-all flex items-center justify-center gap-2 border-2 border-dashed disabled:opacity-50 disabled:cursor-not-allowed ${
+                      isShort
+                        ? 'border-red-500/50 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:border-red-500'
+                        : 'border-green-500/50 bg-green-500/10 text-green-400 hover:bg-green-500/20 hover:border-green-500'
+                    }`}
+                  >
+                    {creatingSetupIndex === i ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Creating...
+                      </>
+                    ) : (
+                      <>
+                        <span>📋</span>
+                        Create Draft Orders
+                        <span className="text-xs opacity-70">
+                          (Entry + SL + {setup.targets.length} TP)
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              );
+            })}
+          </div>}
         </div>
       )}
 

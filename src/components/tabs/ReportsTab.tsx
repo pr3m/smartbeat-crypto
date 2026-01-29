@@ -27,11 +27,12 @@ interface AIReport {
 
 interface ReportsTabProps {
   onReportsCountChange?: (count: number) => void;
+  testMode?: boolean;
 }
 
 type ActionFilter = 'all' | 'LONG' | 'SHORT' | 'WAIT';
 
-export function ReportsTab({ onReportsCountChange }: ReportsTabProps) {
+export function ReportsTab({ onReportsCountChange, testMode = true }: ReportsTabProps) {
   const { addToast } = useToast();
   const [reports, setReports] = useState<AIReport[]>([]);
   const [total, setTotal] = useState(0);
@@ -349,6 +350,7 @@ export function ReportsTab({ onReportsCountChange }: ReportsTabProps) {
                         addToast({ title: 'Copied', message: 'Analysis copied', type: 'success', duration: 2000 });
                       }}
                       embedded
+                      testMode={testMode}
                     />
                     {/* Inline Chat for Follow-up Questions */}
                     <div className="px-4 pb-4">

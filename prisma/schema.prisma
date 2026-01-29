@@ -259,14 +259,26 @@ model SimulatedOrder {
   id                String   @id @default(cuid())
   pair              String
   type              String   // "buy" | "sell"
-  orderType         String   // "market", "limit", etc.
-  price             Float?
+  orderType         String   // "market", "limit", "stop-loss", "stop-loss-limit", "take-profit", "take-profit-limit", "trailing-stop", "trailing-stop-limit", "iceberg"
+  price             Float?   // Primary price (limit/trigger)
+  price2            Float?   // Secondary price (for *-limit types)
   volume            Float
   leverage          Int      @default(10)
-  status            String   // "open", "filled", "cancelled"
+  status            String   // "open", "filled", "cancelled", "triggered"
   filledVolume      Float    @default(0)
   marketPriceAtOrder Float
   entryConditions   String?  // JSON snapshot of indicators/recommendation
+
+  // Advanced order type fields
+  trailingOffset    Float?   // For trailing stop
+  trailingOffsetType String? // "percent" | "absolute"
+  trailingHighWater Float?   // Highest price seen (for trailing sells)
+  trailingLowWater  Float?   // Lowest price seen (for trailing buys)
+  displayVolume     Float?   // For iceberg orders - visible volume
+  filledDisplayVol  Float    @default(0) // For iceberg - filled portion of current display
+  isTriggered       Boolean  @default(false) // For two-stage orders (stop-loss-limit etc.)
+  triggeredAt       DateTime?
+
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
   fills             SimulatedFill[]
@@ -444,6 +456,52 @@ model AgentLog {
   createdAt DateTime   @default(now())
 
   @@index([agentId, createdAt])
+}
+
+// ============================================
+// Draft Orders for AI-Generated Trade Ideas
+// ============================================
+
+model DraftOrder {
+  id                String   @id @default(cuid())
+
+  // Order basics
+  pair              String   @default("XRPEUR")
+  side              String   // "buy" | "sell"
+  orderType         String   // market, limit, stop-loss, stop-loss-limit, take-profit, take-profit-limit, trailing-stop, trailing-stop-limit, iceberg
+
+  // Price fields
+  price             Float?   // Primary price (limit/trigger)
+  price2            Float?   // Secondary price (for *-limit types)
+  trailingOffset    Float?   // For trailing stop
+  trailingOffsetType String? // "percent" | "absolute"
+
+  // Volume
+  volume            Float
+  displayVolume     Float?   // For iceberg orders
+
+  // Margin
+  leverage          Int      @default(10)
+
+  // AI source tracking
+  source            String   @default("manual") // "manual" | "ai"
+  aiSetupType       String?  // e.g., "SHORT_REJECTION", "LONG_BREAKOUT"
+  aiAnalysisId      String?  // Reference to AIMarketAnalysis
+  activationCriteria String? // JSON array
+  invalidation       String? // JSON array
+  positionSizePct    Float?
+
+  // Status
+  status            String   @default("pending") // "pending" | "submitted" | "cancelled"
+  submittedOrderId  String?  // Reference to actual order
+  testMode          Boolean  @default(true)      // Which mode this draft was created for
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([source])
+  @@index([testMode, status])
 }
 
 // ============================================

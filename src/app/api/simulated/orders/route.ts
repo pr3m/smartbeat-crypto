@@ -109,6 +109,7 @@ export async function GET(request: Request) {
 /**
  * POST /api/simulated/orders
  * Create a new simulated order (market orders fill immediately)
+ * Supports all 9 Kraken order types
  */
 export async function POST(request: Request) {
   try {
@@ -116,11 +117,15 @@ export async function POST(request: Request) {
     const {
       pair = 'XRPEUR',
       type, // 'buy' | 'sell'
-      orderType = 'market', // 'market' | 'limit'
-      price, // Limit price (required for limit orders)
+      orderType = 'market', // market, limit, stop-loss, stop-loss-limit, take-profit, take-profit-limit, trailing-stop, trailing-stop-limit, iceberg
+      price, // Primary price (limit/trigger)
+      price2, // Secondary price for *-limit types
       volume, // Position size in XRP
       leverage = 10,
       marketPrice, // Current market price
+      trailingOffset, // For trailing stop orders
+      trailingOffsetType, // 'percent' | 'absolute'
+      displayVolume, // For iceberg orders
       entryConditions, // JSON snapshot of indicators
     } = body;
 
@@ -134,8 +139,21 @@ export async function POST(request: Request) {
     if (!marketPrice || marketPrice <= 0) {
       return NextResponse.json({ error: 'Market price required' }, { status: 400 });
     }
-    if (orderType === 'limit' && (!price || price <= 0)) {
-      return NextResponse.json({ error: 'Limit price required for limit orders' }, { status: 400 });
+    // Validate price based on order type
+    const needsPrice = ['limit', 'stop-loss', 'stop-loss-limit', 'take-profit', 'take-profit-limit', 'iceberg'].includes(orderType);
+    const needsTrailingOffset = ['trailing-stop', 'trailing-stop-limit'].includes(orderType);
+
+    if (needsPrice && (!price || price <= 0)) {
+      return NextResponse.json({ error: `Price required for ${orderType} orders` }, { status: 400 });
+    }
+    if (needsTrailingOffset && (!trailingOffset || trailingOffset <= 0)) {
+      return NextResponse.json({ error: 'Trailing offset required for trailing stop orders' }, { status: 400 });
+    }
+
+    // *-limit types need secondary price
+    const needsPrice2 = ['stop-loss-limit', 'take-profit-limit', 'trailing-stop-limit'].includes(orderType);
+    if (needsPrice2 && (!price2 || price2 <= 0)) {
+      return NextResponse.json({ error: `Secondary price required for ${orderType} orders` }, { status: 400 });
     }
 
     // Get current balance
@@ -148,7 +166,8 @@ export async function POST(request: Request) {
     }
 
     // Calculate required margin
-    const executionPrice = orderType === 'market' ? marketPrice : price;
+    // For trailing stops, use market price for margin calculation
+    const executionPrice = orderType === 'market' || needsTrailingOffset ? marketPrice : price;
     const marginRequired = calculateMarginRequired(volume, executionPrice, leverage);
 
     // Check available margin (considering open positions)
@@ -170,18 +189,28 @@ export async function POST(request: Request) {
       );
     }
 
-    // Create the order
+    // Calculate initial trailing high/low water mark
+    const initialHighWater = type === 'sell' ? marketPrice : null; // For trailing sell (exit long)
+    const initialLowWater = type === 'buy' ? marketPrice : null; // For trailing buy (exit short)
+
+    // Create the order with all fields
     const order = await prisma.simulatedOrder.create({
       data: {
         pair,
         type,
         orderType,
-        price: orderType === 'limit' ? price : null,
+        price: needsPrice ? price : null,
+        price2: needsPrice2 ? price2 : null,
         volume,
         leverage,
         status: orderType === 'market' ? 'filled' : 'open',
         filledVolume: orderType === 'market' ? volume : 0,
         marketPriceAtOrder: marketPrice,
+        trailingOffset: needsTrailingOffset ? trailingOffset : null,
+        trailingOffsetType: needsTrailingOffset ? (trailingOffsetType || 'percent') : null,
+        trailingHighWater: initialHighWater,
+        trailingLowWater: initialLowWater,
+        displayVolume: orderType === 'iceberg' ? (displayVolume || volume * 0.1) : null,
         entryConditions: entryConditions ? JSON.stringify(entryConditions) : null,
       },
     });
@@ -198,7 +227,7 @@ export async function POST(request: Request) {
       });
     }
 
-    // For limit orders, return the pending order
+    // For non-market orders, return the pending order
     return NextResponse.json({
       success: true,
       order,
