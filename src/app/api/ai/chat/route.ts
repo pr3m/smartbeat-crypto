@@ -9,13 +9,34 @@ import { prisma } from '@/lib/db';
 import { assistantTools, executeTool, type ToolName } from '@/lib/ai/tools';
 import { trackAIUsage } from '@/lib/ai/usage-tracker';
 
-const SYSTEM_PROMPT = `You are SmartBeat Assistant, an AI helper for the SmartBeatCrypto trading application.
+const SYSTEM_PROMPT = `You are SmartBeat Assistant, an AI helper for the SmartBeatCrypto trading application, optimized for **Martingale swing trading** strategy.
+
+**Trading Strategy Context: Martingale Swing Trading**
+- Primary timeframe: 15m for entry timing
+- Confirmation: Daily (1D), 4H, 1H for trend context
+- Alert timeframe: 5m for early warnings and momentum spikes
+- Target moves: 1-5% swings, typically held hours to 2-3 days
+- Strategy: Scale into positions at predetermined DCA levels (-3%, -5% for longs)
+- Always provide analysis for BOTH long AND short setups when asked about trading
+
+**Multi-Timeframe Weights:**
+- Daily (1D): 35% - Primary trend filter
+- 4H: 30% - Trend determination
+- 1H: 20% - Setup confirmation
+- 15m: 10% - Entry timing
+- 5m: 5% - Spike detection
+
+**Strength-Based Scoring:**
+- Grade A (80-100): Strong setup, high conviction
+- Grade B (65-79): Good setup, standard entry
+- Grade C (50-64): Forming setup, wait or partial
+- Grade D (35-49): Weak setup, avoid
+- Grade F (0-34): No setup
 
 **CRITICAL: Use Context Data First**
 - The user's message often includes context with current data (positions, prices, P&L, etc.)
 - If the data you need is already in the context, USE IT DIRECTLY - don't call tools
 - Only call tools when you need ADDITIONAL data not in the context
-- Example: If context shows "Current Price: €2.50", use that price for calculations
 
 **Tool Usage (only when needed):**
 - Available: get_positions, get_market_data, analyze_position, get_trading_recommendation, calculate_tax, query_transactions
@@ -24,7 +45,8 @@ const SYSTEM_PROMPT = `You are SmartBeat Assistant, an AI helper for the SmartBe
 **Response Format:**
 - Be direct and concise
 - Format: €1,234.56 for money, +/- for P&L
-- If you can answer from context, do so immediately
+- When discussing trades, always mention both long AND short potential
+- Highlight momentum opportunities for Martingale entries
 
 **Current Context:**
 {context}
@@ -391,7 +413,21 @@ function buildContextInfo(context: string): string {
 
   switch (context) {
     case 'trading':
-      return `User is viewing the Trading dashboard. They may ask about current positions, market conditions, or trading recommendations. The trading pair is XRP/EUR.`;
+      return `User is viewing the Trading dashboard for XRP/EUR Martingale swing trading.
+
+**When answering trading questions:**
+- Always analyze BOTH long AND short setups with strength grades
+- Reference the multi-timeframe analysis (1D, 4H, 1H, 15m, 5m)
+- Consider DCA/Martingale levels for position management
+- Highlight momentum alerts and spike opportunities
+- For open positions, assess €300 target feasibility
+- Be direct about risks and invalidation levels
+
+**Key Technical Thresholds:**
+- RSI Long zone: 20-45 (entry), RSI Short zone: 55-80 (entry)
+- MACD Histogram: >0 for longs, <0 for shorts
+- Volume: >1.3x average for confirmation
+- ATR >3% = high volatility warning`;
 
     case 'tax':
       return `User is viewing the Tax Reports section. They may ask about tax calculations, taxable events, or Estonian tax rules. Current tax year context: ${year}. Estonian tax rate: ${year >= 2026 ? '24%' : '22%'}.`;

@@ -1,5 +1,6 @@
 'use client';
 
+import { useMemo } from 'react';
 import type { TradingRecommendation, MicrostructureInput, OHLCData, Indicators } from '@/lib/kraken/types';
 import type { AIAnalysisResponse } from '@/lib/ai/types';
 import type { LiquidationAnalysis } from '@/lib/trading/liquidation';
@@ -100,7 +101,8 @@ export function SetupTab({
   onEditOrder,
   addToast,
 }: SetupTabProps) {
-  const chartData = tfData[displayTf]?.ohlc || [];
+  // Memoize chartData to prevent new array reference on every render when data is missing
+  const chartData = useMemo(() => tfData[displayTf]?.ohlc || [], [tfData, displayTf]);
 
   const formatVolume = (v: number) => {
     if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';

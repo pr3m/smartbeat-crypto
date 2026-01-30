@@ -54,6 +54,17 @@ export function useKrakenWebSocketV2(
     spreadHistory: [],
   });
 
+  // Track page visibility to reduce updates when tab is hidden
+  const isPageVisibleRef = useRef(true);
+  useEffect(() => {
+    const handleVisibility = () => {
+      isPageVisibleRef.current = document.visibilityState === 'visible';
+    };
+    handleVisibility();
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, []);
+
   // Aggregated microstructure for stable recommendations
   const [aggregated, setAggregated] = useState<AggregatedMicrostructure>({
     current: null,
@@ -207,6 +218,11 @@ export function useKrakenWebSocketV2(
   }, []);
 
   const scheduleUpdate = useCallback(() => {
+    // Skip UI updates when page is hidden to prevent rendering overhead
+    if (!isPageVisibleRef.current) {
+      return;
+    }
+
     // If already throttled, mark pending and return
     if (throttleRef.current) {
       pendingUpdateRef.current = true;
@@ -238,7 +254,7 @@ export function useKrakenWebSocketV2(
     // Set throttle - don't recurse, just check pending flag once
     throttleRef.current = setTimeout(() => {
       throttleRef.current = null;
-      if (pendingUpdateRef.current) {
+      if (pendingUpdateRef.current && isPageVisibleRef.current) {
         pendingUpdateRef.current = false;
         // Get fresh order book data and update once more
         const freshOrderBook = getOrderBookData();
@@ -290,9 +306,14 @@ export function useKrakenWebSocketV2(
     const eurValue = price * qty;
     const isLarge = eurValue >= LARGE_ORDER_THRESHOLD_EUR;
 
-    // Update CVD
+    // Update CVD (always, even when page hidden, to keep calculations accurate)
     const delta = side === 'buy' ? eurValue : -eurValue;
     cvdRef.current += delta;
+
+    // Skip UI state updates when page is hidden to prevent rendering overhead
+    if (!isPageVisibleRef.current) {
+      return;
+    }
 
     const tradeEntry: TradeEntry = {
       id: trade.trade_id,

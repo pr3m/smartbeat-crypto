@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import { useKrakenWebSocketV2, type MicrostructureData } from '@/hooks/useKrakenWebSocketV2';
+import { useKrakenWebSocketV2 } from '@/hooks/useKrakenWebSocketV2';
 import { OrderBookDepth } from './OrderBookDepth';
 import { TradeFlow } from './TradeFlow';
 import { CVDChart } from './CVDChart';

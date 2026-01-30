@@ -336,6 +336,7 @@ export interface Indicators {
   volRatio: number;
   score: number;
   bias: 'bullish' | 'bearish' | 'neutral';
+  trendStrength: 'strong' | 'moderate' | 'weak';
 }
 
 export interface TimeframeData {
@@ -348,6 +349,28 @@ export interface ChecklistItem {
   value: string;
 }
 
+// Individual direction recommendation with weighted strength
+export interface DirectionRecommendation {
+  strength: number; // 0-100 weighted strength score
+  confidence: number; // 0-100 confidence in the setup
+  grade: 'A' | 'B' | 'C' | 'D' | 'F'; // Letter grade based on strength
+  reasons: string[]; // Contributing factors
+  warnings: string[]; // Risk factors and cautions
+  checklist: {
+    trend1d?: ChecklistItem; // Daily trend filter
+    trend4h: ChecklistItem;
+    setup1h: ChecklistItem;
+    entry15m: ChecklistItem;
+    volume: ChecklistItem;
+    btcAlign: ChecklistItem;
+    macdMomentum: ChecklistItem;
+    flowConfirm?: ChecklistItem;
+    liqBias?: ChecklistItem;
+  };
+  passedCount: number;
+  totalCount: number;
+}
+
 export interface TradingRecommendation {
   action: 'LONG' | 'SHORT' | 'WAIT' | 'SPIKE ↑' | 'SPIKE ↓';
   confidence: number;
@@ -355,14 +378,26 @@ export interface TradingRecommendation {
   reason: string;
   longScore: number;
   shortScore: number;
-  totalItems: number; // Total checklist items (6 base + extras)
+  totalItems: number; // Total checklist items (7 base + extras)
+  // NEW: Separate recommendations for each direction
+  long: DirectionRecommendation;
+  short: DirectionRecommendation;
+  // Warnings for sudden moves/liquidation risks
+  warnings: string[];
+  // Momentum indicator for sudden move opportunities
+  momentumAlert?: {
+    direction: 'up' | 'down';
+    strength: 'strong' | 'moderate';
+    reason: string;
+  };
   checklist: {
+    trend1d?: ChecklistItem; // Daily trend filter (NEW)
     trend4h: ChecklistItem;
     setup1h: ChecklistItem;
     entry15m: ChecklistItem;
     volume: ChecklistItem;
     btcAlign: ChecklistItem;
-    rsiExtreme: ChecklistItem;
+    macdMomentum: ChecklistItem; // MACD histogram momentum (replaces rsiExtreme)
     flowConfirm?: ChecklistItem; // Option B: Flow confirmation
     liqBias?: ChecklistItem; // Liquidation bias alignment
   };

@@ -71,6 +71,7 @@ export interface MarketSnapshot {
     '15m': TimeframeSnapshot | null;
     '1h': TimeframeSnapshot | null;
     '4h': TimeframeSnapshot | null;
+    '1d': TimeframeSnapshot | null; // Daily timeframe for primary trend (NEW)
   };
   recommendation: {
     action: string;
@@ -79,6 +80,25 @@ export interface MarketSnapshot {
     longScore: number;
     shortScore: number;
     totalItems: number;
+    // NEW: Strength-based recommendations for both directions
+    long?: {
+      grade: string;
+      strength: number;
+      reasons: string[];
+      warnings: string[];
+    };
+    short?: {
+      grade: string;
+      strength: number;
+      reasons: string[];
+      warnings: string[];
+    };
+    warnings?: string[];
+    momentumAlert?: {
+      direction: string;
+      strength: string;
+      reason: string;
+    } | null;
   } | null;
   microstructure?: {
     imbalance: number;
@@ -103,9 +123,11 @@ export interface MarketSnapshot {
 
 export interface TimeframeSnapshot {
   bias: string;
+  trendStrength: 'strong' | 'moderate' | 'weak'; // NEW: trend strength indicator
   rsi: number;
   macd: number;
   macdSignal?: number;
+  histogram?: number; // NEW: MACD histogram for momentum
   bbPosition: number;
   bbUpper?: number;
   bbLower?: number;

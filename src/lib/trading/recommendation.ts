@@ -7,6 +7,7 @@
 import type {
   Indicators,
   TradingRecommendation,
+  DirectionRecommendation,
   TimeframeData,
   ChecklistItem,
   MicrostructureInput,
@@ -14,6 +15,7 @@ import type {
 } from '@/lib/kraken/types';
 
 export interface TimeframeWeights {
+  '1d': number;
   '4h': number;
   '1h': number;
   '15m': number;
@@ -21,30 +23,33 @@ export interface TimeframeWeights {
 }
 
 export const DEFAULT_WEIGHTS: TimeframeWeights = {
-  '4h': 40, // Trend determination
-  '1h': 30, // Setup confirmation
-  '15m': 20, // Entry timing
-  '5m': 10, // Spike detection
+  '1d': 35, // Primary trend filter (NEW)
+  '4h': 30, // Trend determination (reduced from 40)
+  '1h': 20, // Setup confirmation (reduced from 30)
+  '15m': 10, // Entry timing (reduced from 20)
+  '5m': 5,  // Spike detection (reduced from 10)
 };
 
 export interface LongChecks {
+  trend1d?: boolean; // Daily trend filter (NEW)
   trend4h: boolean;
   setup1h: boolean;
   entry15m: boolean;
   volume: boolean;
   btcAlign: boolean;
-  rsiExtreme: boolean;
+  macdMomentum: boolean; // MACD histogram > 0 (replaces rsiExtreme)
   flowConfirm?: boolean; // Option B: Flow confirmation
   liqBias?: boolean; // Liquidation bias alignment
 }
 
 export interface ShortChecks {
+  trend1d?: boolean; // Daily trend filter (NEW)
   trend4h: boolean;
   setup1h: boolean;
   entry15m: boolean;
   volume: boolean;
   btcAlign: boolean;
-  rsiExtreme: boolean;
+  macdMomentum: boolean; // MACD histogram < 0 (replaces rsiExtreme)
   flowConfirm?: boolean; // Option B: Flow confirmation
   liqBias?: boolean; // Liquidation bias alignment
 }
@@ -305,17 +310,19 @@ export function evaluateLongConditions(
   ind15m: Indicators,
   btcTrend: 'bull' | 'bear' | 'neut',
   micro?: MicrostructureInput | null,
-  liq?: LiquidationInput | null
+  liq?: LiquidationInput | null,
+  ind1d?: Indicators | null
 ): LongChecks {
   const flowAnalysis = analyzeFlow('long', micro || null);
   const liqAnalysis = analyzeLiquidation('long', liq || null);
   return {
+    trend1d: ind1d ? ind1d.bias !== 'bearish' : undefined, // Daily not bearish (NEW)
     trend4h: ind4h.bias === 'bullish',
     setup1h: ind1h.bias === 'bullish',
-    entry15m: ind15m.rsi < 35, // Oversold = buy signal
+    entry15m: ind15m.rsi < 45 && ind15m.rsi > 20, // Oversold zone 20-45 (was <35)
     volume: ind15m.volRatio > 1.3,
-    btcAlign: btcTrend !== 'bear',
-    rsiExtreme: ind15m.rsi < 35,
+    btcAlign: btcTrend === 'bull' || (btcTrend === 'neut' && ind4h.bias === 'bullish'), // Stricter BTC alignment
+    macdMomentum: ind15m.histogram !== undefined && ind15m.histogram > 0, // Replaces rsiExtreme
     flowConfirm: flowAnalysis.flowConfirmPass,
     liqBias: liqAnalysis.aligned,
   };
@@ -330,17 +337,19 @@ export function evaluateShortConditions(
   ind15m: Indicators,
   btcTrend: 'bull' | 'bear' | 'neut',
   micro?: MicrostructureInput | null,
-  liq?: LiquidationInput | null
+  liq?: LiquidationInput | null,
+  ind1d?: Indicators | null
 ): ShortChecks {
   const flowAnalysis = analyzeFlow('short', micro || null);
   const liqAnalysis = analyzeLiquidation('short', liq || null);
   return {
+    trend1d: ind1d ? ind1d.bias !== 'bullish' : undefined, // Daily not bullish (NEW)
     trend4h: ind4h.bias === 'bearish',
     setup1h: ind1h.bias === 'bearish',
-    entry15m: ind15m.rsi > 65, // Overbought = sell signal
+    entry15m: ind15m.rsi > 55 && ind15m.rsi < 80, // Overbought zone 55-80 (was >65)
     volume: ind15m.volRatio > 1.3,
-    btcAlign: btcTrend !== 'bull',
-    rsiExtreme: ind15m.rsi > 65,
+    btcAlign: btcTrend === 'bear' || (btcTrend === 'neut' && ind4h.bias === 'bearish'), // Stricter BTC alignment
+    macdMomentum: ind15m.histogram !== undefined && ind15m.histogram < 0, // Replaces rsiExtreme
     flowConfirm: flowAnalysis.flowConfirmPass,
     liqBias: liqAnalysis.aligned,
   };
@@ -348,10 +357,15 @@ export function evaluateShortConditions(
 
 /**
  * Count passing conditions (excluding flowConfirm and liqBias for base score)
+ * Base conditions: trend1d (if present), trend4h, setup1h, entry15m, volume, btcAlign, macdMomentum
  */
 export function countPassed(checks: LongChecks | ShortChecks, includeExtras = false): number {
-  const { flowConfirm, liqBias, ...baseChecks } = checks;
-  const baseCount = Object.values(baseChecks).filter(Boolean).length;
+  const { flowConfirm, liqBias, trend1d, ...coreChecks } = checks;
+  // Count core checks (always 6: trend4h, setup1h, entry15m, volume, btcAlign, macdMomentum)
+  let baseCount = Object.values(coreChecks).filter(Boolean).length;
+  // Add trend1d if present (it's optional when daily data not loaded)
+  if (trend1d !== undefined && trend1d) baseCount++;
+
   if (includeExtras) {
     let extras = 0;
     if (flowConfirm !== undefined && flowConfirm) extras++;
@@ -359,6 +373,14 @@ export function countPassed(checks: LongChecks | ShortChecks, includeExtras = fa
     return baseCount + extras;
   }
   return baseCount;
+}
+
+/**
+ * Get total base conditions count (excluding flowConfirm and liqBias)
+ */
+export function getTotalBaseConditions(checks: LongChecks | ShortChecks): number {
+  // 6 core conditions + 1 if daily data present
+  return checks.trend1d !== undefined ? 7 : 6;
 }
 
 /**
@@ -370,14 +392,17 @@ export function getMissingConditions(
   includeExtras = false
 ): string[] {
   const missing: string[] = [];
+  if (checks.trend1d !== undefined && !checks.trend1d) {
+    missing.push('1D trend');
+  }
   if (!checks.trend4h) missing.push('4H trend');
   if (!checks.setup1h) missing.push('1H setup');
   if (!checks.entry15m)
-    missing.push(direction === 'long' ? '15m RSI oversold' : '15m RSI overbought');
+    missing.push(direction === 'long' ? '15m RSI oversold (20-45)' : '15m RSI overbought (55-80)');
   if (!checks.volume) missing.push('volume confirmation');
   if (!checks.btcAlign) missing.push('BTC alignment');
-  if (!checks.rsiExtreme)
-    missing.push(direction === 'long' ? 'RSI < 35' : 'RSI > 65');
+  if (!checks.macdMomentum)
+    missing.push(direction === 'long' ? 'MACD histogram > 0' : 'MACD histogram < 0');
   if (includeExtras && checks.flowConfirm === false) {
     missing.push('flow confirmation');
   }
@@ -419,7 +444,8 @@ export function formatChecklist(
   btcTrend: string,
   btcChange: number,
   micro?: MicrostructureInput | null,
-  liq?: LiquidationInput | null
+  liq?: LiquidationInput | null,
+  ind1d?: Indicators | null
 ): TradingRecommendation['checklist'] {
   const flowAnalysis = micro ? analyzeFlow(direction, micro) : null;
   const liqAnalysis = liq ? analyzeLiquidation(direction, liq) : null;
@@ -427,7 +453,7 @@ export function formatChecklist(
   const checklist: TradingRecommendation['checklist'] = {
     trend4h: {
       pass: checks.trend4h,
-      value: ind4h.bias + (checks.trend4h ? ' ✓' : ''),
+      value: ind4h.bias + (ind4h.trendStrength === 'strong' ? ' ★' : checks.trend4h ? ' ✓' : ''),
     },
     setup1h: {
       pass: checks.setup1h,
@@ -435,7 +461,7 @@ export function formatChecklist(
     },
     entry15m: {
       pass: checks.entry15m,
-      value: `RSI ${ind15m.rsi.toFixed(0)} (need ${direction === 'long' ? '<35' : '>65'})`,
+      value: `RSI ${ind15m.rsi.toFixed(0)} (need ${direction === 'long' ? '20-45' : '55-80'})`,
     },
     volume: {
       pass: checks.volume,
@@ -445,11 +471,21 @@ export function formatChecklist(
       pass: checks.btcAlign,
       value: `${btcTrend} ${btcChange.toFixed(1)}%`,
     },
-    rsiExtreme: {
-      pass: checks.rsiExtreme,
-      value: ind15m.rsi.toFixed(0),
+    macdMomentum: {
+      pass: checks.macdMomentum,
+      value: ind15m.histogram !== undefined
+        ? `Hist ${ind15m.histogram > 0 ? '+' : ''}${ind15m.histogram.toFixed(5)}`
+        : 'N/A',
     },
   };
+
+  // Add daily trend if available
+  if (ind1d && checks.trend1d !== undefined) {
+    checklist.trend1d = {
+      pass: checks.trend1d,
+      value: ind1d.bias + (ind1d.trendStrength === 'strong' ? ' ★' : checks.trend1d ? ' ✓' : ''),
+    };
+  }
 
   // Option B: Add flow confirmation to checklist when microstructure data available
   if (flowAnalysis) {
@@ -478,6 +514,234 @@ export function formatChecklist(
 }
 
 /**
+ * Weighted signal scoring for Martingale-optimized trading
+ * Each signal has a weight based on its importance for 15m entries with HTF confirmation
+ */
+interface SignalWeight {
+  name: string;
+  weight: number;
+  value: number; // 0-1 based on how well condition is met
+}
+
+/**
+ * Calculate weighted strength score for a direction (0-100)
+ * Considers both binary pass/fail AND how strongly the condition is met
+ */
+export function calculateDirectionStrength(
+  direction: 'long' | 'short',
+  checks: LongChecks | ShortChecks,
+  ind4h: Indicators,
+  ind1h: Indicators,
+  ind15m: Indicators,
+  ind5m: Indicators,
+  ind1d: Indicators | null,
+  btcTrend: 'bull' | 'bear' | 'neut',
+  micro: MicrostructureInput | null,
+  liq: LiquidationInput | null
+): { strength: number; signals: SignalWeight[]; reasons: string[]; warnings: string[] } {
+  const signals: SignalWeight[] = [];
+  const reasons: string[] = [];
+  const warnings: string[] = [];
+
+  // 1. Daily trend (weight: 20) - Primary filter
+  if (ind1d) {
+    let dailyValue = 0.5; // neutral
+    if (direction === 'long') {
+      if (ind1d.bias === 'bullish') dailyValue = 1.0;
+      else if (ind1d.bias === 'neutral') dailyValue = 0.6;
+      else dailyValue = 0.2; // bearish - warning but not zero
+    } else {
+      if (ind1d.bias === 'bearish') dailyValue = 1.0;
+      else if (ind1d.bias === 'neutral') dailyValue = 0.6;
+      else dailyValue = 0.2; // bullish
+    }
+    // Boost for strong trend
+    if (ind1d.trendStrength === 'strong' && dailyValue >= 0.6) dailyValue = Math.min(1, dailyValue + 0.1);
+    signals.push({ name: '1D Trend', weight: 20, value: dailyValue });
+    if (dailyValue >= 0.8) reasons.push(`Daily ${ind1d.bias}${ind1d.trendStrength === 'strong' ? ' (strong)' : ''}`);
+    if (dailyValue < 0.4) warnings.push(`⚠️ Counter-trend: Daily is ${ind1d.bias}`);
+  }
+
+  // 2. 4H trend (weight: 18) - Main trend
+  let htfValue = 0.5;
+  if (direction === 'long') {
+    if (ind4h.bias === 'bullish') htfValue = 1.0;
+    else if (ind4h.bias === 'neutral') htfValue = 0.5;
+    else htfValue = 0.2;
+  } else {
+    if (ind4h.bias === 'bearish') htfValue = 1.0;
+    else if (ind4h.bias === 'neutral') htfValue = 0.5;
+    else htfValue = 0.2;
+  }
+  if (ind4h.trendStrength === 'strong' && htfValue >= 0.5) htfValue = Math.min(1, htfValue + 0.15);
+  signals.push({ name: '4H Trend', weight: 18, value: htfValue });
+  if (htfValue >= 0.8) reasons.push(`4H ${ind4h.bias}${ind4h.trendStrength === 'strong' ? ' (strong)' : ''}`);
+  if (htfValue < 0.4) warnings.push(`⚠️ 4H opposes: ${ind4h.bias}`);
+
+  // 3. 1H setup (weight: 15) - Setup confirmation
+  let setupValue = 0.5;
+  if (direction === 'long') {
+    if (ind1h.bias === 'bullish') setupValue = 1.0;
+    else if (ind1h.bias === 'neutral') setupValue = 0.5;
+    else setupValue = 0.3;
+  } else {
+    if (ind1h.bias === 'bearish') setupValue = 1.0;
+    else if (ind1h.bias === 'neutral') setupValue = 0.5;
+    else setupValue = 0.3;
+  }
+  signals.push({ name: '1H Setup', weight: 15, value: setupValue });
+  if (setupValue >= 0.8) reasons.push(`1H confirms ${ind1h.bias}`);
+
+  // 4. 15m RSI entry (weight: 15) - Entry timing
+  let rsiValue = 0;
+  if (direction === 'long') {
+    // Ideal: RSI 25-40, acceptable: 20-50
+    if (ind15m.rsi >= 20 && ind15m.rsi <= 35) rsiValue = 1.0;
+    else if (ind15m.rsi > 35 && ind15m.rsi <= 45) rsiValue = 0.7;
+    else if (ind15m.rsi > 45 && ind15m.rsi <= 50) rsiValue = 0.4;
+    else if (ind15m.rsi < 20) rsiValue = 0.8; // Very oversold - slightly reduced (may be dumping)
+    else rsiValue = 0.2;
+  } else {
+    // Ideal: RSI 60-75, acceptable: 50-80
+    if (ind15m.rsi >= 65 && ind15m.rsi <= 80) rsiValue = 1.0;
+    else if (ind15m.rsi >= 55 && ind15m.rsi < 65) rsiValue = 0.7;
+    else if (ind15m.rsi >= 50 && ind15m.rsi < 55) rsiValue = 0.4;
+    else if (ind15m.rsi > 80) rsiValue = 0.8; // Very overbought
+    else rsiValue = 0.2;
+  }
+  signals.push({ name: '15m RSI', weight: 15, value: rsiValue });
+  if (rsiValue >= 0.8) reasons.push(`RSI ${ind15m.rsi.toFixed(0)} ${direction === 'long' ? 'oversold' : 'overbought'}`);
+
+  // 5. Volume (weight: 12) - Confirmation
+  let volValue = 0.3;
+  if (ind15m.volRatio >= 2.0) volValue = 1.0;
+  else if (ind15m.volRatio >= 1.5) volValue = 0.8;
+  else if (ind15m.volRatio >= 1.3) volValue = 0.6;
+  else if (ind15m.volRatio >= 1.0) volValue = 0.4;
+  signals.push({ name: 'Volume', weight: 12, value: volValue });
+  if (volValue >= 0.8) reasons.push(`Volume ${ind15m.volRatio.toFixed(1)}x`);
+
+  // 6. BTC alignment (weight: 8) - Correlation
+  let btcValue = 0.5;
+  if (direction === 'long') {
+    if (btcTrend === 'bull') btcValue = 1.0;
+    else if (btcTrend === 'neut') btcValue = 0.6;
+    else btcValue = 0.3;
+  } else {
+    if (btcTrend === 'bear') btcValue = 1.0;
+    else if (btcTrend === 'neut') btcValue = 0.6;
+    else btcValue = 0.3;
+  }
+  signals.push({ name: 'BTC Align', weight: 8, value: btcValue });
+  if (btcValue >= 0.8) reasons.push(`BTC ${btcTrend}`);
+  if (btcValue < 0.4) warnings.push(`⚠️ BTC opposing: ${btcTrend}`);
+
+  // 7. MACD momentum (weight: 8) - Momentum confirmation
+  let macdValue = 0.5;
+  const hist = ind15m.histogram ?? 0;
+  if (direction === 'long') {
+    if (hist > 0) macdValue = Math.min(1, 0.6 + Math.abs(hist) * 1000);
+    else macdValue = Math.max(0.1, 0.4 - Math.abs(hist) * 500);
+  } else {
+    if (hist < 0) macdValue = Math.min(1, 0.6 + Math.abs(hist) * 1000);
+    else macdValue = Math.max(0.1, 0.4 - Math.abs(hist) * 500);
+  }
+  signals.push({ name: 'MACD Mom', weight: 8, value: macdValue });
+  if (macdValue >= 0.7) reasons.push(`MACD histogram ${hist > 0 ? '+' : ''}${hist.toFixed(5)}`);
+
+  // 8. Flow/Microstructure (weight: 4) - When available
+  if (micro) {
+    const flowAnalysis = analyzeFlow(direction, micro);
+    let flowValue = 0.5;
+    if (flowAnalysis.status === 'aligned') flowValue = 0.9;
+    else if (flowAnalysis.status === 'neutral') flowValue = 0.5;
+    else flowValue = 0.2;
+    signals.push({ name: 'Flow', weight: 4, value: flowValue });
+    if (flowValue >= 0.8) reasons.push(`Flow aligned (${flowAnalysis.cvdTrend} CVD)`);
+    if (flowValue < 0.3) warnings.push(`⚠️ Flow opposing`);
+    if (flowAnalysis.hasDivergence) {
+      if ((direction === 'long' && flowAnalysis.divergenceType === 'bearish') ||
+          (direction === 'short' && flowAnalysis.divergenceType === 'bullish')) {
+        warnings.push(`⚠️ ${flowAnalysis.divergenceType} divergence detected`);
+      }
+    }
+  }
+
+  // Calculate weighted strength
+  let totalWeight = 0;
+  let weightedSum = 0;
+  for (const signal of signals) {
+    totalWeight += signal.weight;
+    weightedSum += signal.weight * signal.value;
+  }
+  const strength = Math.round((weightedSum / totalWeight) * 100);
+
+  return { strength, signals, reasons, warnings };
+}
+
+/**
+ * Get letter grade from strength score
+ */
+export function getGradeFromStrength(strength: number): 'A' | 'B' | 'C' | 'D' | 'F' {
+  if (strength >= 80) return 'A';
+  if (strength >= 65) return 'B';
+  if (strength >= 50) return 'C';
+  if (strength >= 35) return 'D';
+  return 'F';
+}
+
+/**
+ * Detect momentum opportunities (sudden moves for Martingale)
+ */
+export function detectMomentum(
+  ind5m: Indicators,
+  ind15m: Indicators,
+  ind1h: Indicators
+): { direction: 'up' | 'down'; strength: 'strong' | 'moderate'; reason: string } | null {
+  // Check for strong momentum conditions
+  const vol5m = ind5m.volRatio;
+  const vol15m = ind15m.volRatio;
+
+  // Strong upward momentum
+  if (ind5m.rsi < 30 && vol5m > 1.8 && ind15m.rsi < 40) {
+    return {
+      direction: 'up',
+      strength: vol5m > 2.5 ? 'strong' : 'moderate',
+      reason: `Oversold bounce: 5m RSI ${ind5m.rsi.toFixed(0)}, Vol ${vol5m.toFixed(1)}x`,
+    };
+  }
+
+  // Strong downward momentum
+  if (ind5m.rsi > 70 && vol5m > 1.8 && ind15m.rsi > 60) {
+    return {
+      direction: 'down',
+      strength: vol5m > 2.5 ? 'strong' : 'moderate',
+      reason: `Overbought drop: 5m RSI ${ind5m.rsi.toFixed(0)}, Vol ${vol5m.toFixed(1)}x`,
+    };
+  }
+
+  // Cascade momentum (when 15m and 1h align with 5m spike)
+  if (ind5m.volRatio > 2.0) {
+    if (ind5m.rsi < 35 && ind15m.macd < 0 && ind1h.macd < 0) {
+      return {
+        direction: 'down',
+        strength: 'strong',
+        reason: `Cascade selling: All TFs bearish momentum, Vol ${vol5m.toFixed(1)}x`,
+      };
+    }
+    if (ind5m.rsi > 65 && ind15m.macd > 0 && ind1h.macd > 0) {
+      return {
+        direction: 'up',
+        strength: 'strong',
+        reason: `Cascade buying: All TFs bullish momentum, Vol ${vol5m.toFixed(1)}x`,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Generate trading recommendation
  */
 export function generateRecommendation(
@@ -488,22 +752,29 @@ export function generateRecommendation(
   btcTrend: 'bull' | 'bear' | 'neut',
   btcChange: number,
   micro?: MicrostructureInput | null,
-  liq?: LiquidationInput | null
+  liq?: LiquidationInput | null,
+  tf1d?: TimeframeData | null,
+  currentPrice?: number
 ): TradingRecommendation | null {
   const ind4h = tf4h.indicators;
   const ind1h = tf1h.indicators;
   const ind15m = tf15m.indicators;
   const ind5m = tf5m.indicators;
+  const ind1d = tf1d?.indicators || null;
 
   if (!ind4h || !ind1h || !ind15m || !ind5m) {
     return null;
   }
 
-  // Evaluate both directions (with microstructure and liquidation data)
-  const longChecks = evaluateLongConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq);
-  const shortChecks = evaluateShortConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq);
+  // Evaluate both directions (with microstructure, liquidation, and daily data)
+  const longChecks = evaluateLongConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d);
+  const shortChecks = evaluateShortConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d);
 
-  // Base score (6 conditions, excluding flowConfirm and liqBias)
+  // Calculate weighted strength scores for BOTH directions
+  const longStrengthResult = calculateDirectionStrength('long', longChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null);
+  const shortStrengthResult = calculateDirectionStrength('short', shortChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null);
+
+  // Base score (6-7 conditions depending on daily availability, excluding flowConfirm and liqBias)
   const longPassed = countPassed(longChecks, false);
   const shortPassed = countPassed(shortChecks, false);
 
@@ -511,104 +782,145 @@ export function generateRecommendation(
   const longPassedFull = countPassed(longChecks, true);
   const shortPassedFull = countPassed(shortChecks, true);
 
-  // Calculate total items in checklist (6 base + extras if available)
-  let totalItems = 6;
+  // Calculate total items in checklist (6-7 base + extras if available)
+  let totalItems = getTotalBaseConditions(longChecks);
   if (micro) totalItems++;
   if (liq) totalItems++;
 
-  // Determine which setup is stronger (based on base score)
-  const bestSetup = longPassed >= shortPassed ? 'long' : 'short';
+  // Format checklists for BOTH directions
+  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d);
+  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d);
+
+  // Determine which setup is stronger (based on weighted strength)
+  const bestSetup = longStrengthResult.strength >= shortStrengthResult.strength ? 'long' : 'short';
   const bestChecks = bestSetup === 'long' ? longChecks : shortChecks;
-  const bestPassed = Math.max(longPassed, shortPassed);
-  const bestPassedFull = bestSetup === 'long' ? longPassedFull : shortPassedFull;
 
-  // Format checklist for UI (includes flowConfirm and liqBias when data available)
-  const checklist = formatChecklist(
-    bestChecks,
-    bestSetup,
-    ind4h,
-    ind1h,
-    ind15m,
-    btcTrend,
-    btcChange,
-    micro,
-    liq
-  );
+  // Flow analysis for both directions
+  const longFlowAnalysis = analyzeFlow('long', micro || null);
+  const shortFlowAnalysis = analyzeFlow('short', micro || null);
+  const longLiqAnalysis = analyzeLiquidation('long', liq || null);
+  const shortLiqAnalysis = analyzeLiquidation('short', liq || null);
 
-  // Generate base recommendation
+  // Build DirectionRecommendation for LONG
+  const longRec: DirectionRecommendation = {
+    strength: longStrengthResult.strength,
+    confidence: Math.min(95, Math.max(5, longStrengthResult.strength + longFlowAnalysis.adjustments.total + longLiqAnalysis.adjustments.total)),
+    grade: getGradeFromStrength(longStrengthResult.strength),
+    reasons: longStrengthResult.reasons,
+    warnings: [...longStrengthResult.warnings],
+    checklist: longChecklist,
+    passedCount: longPassedFull,
+    totalCount: totalItems,
+  };
+
+  // Build DirectionRecommendation for SHORT
+  const shortRec: DirectionRecommendation = {
+    strength: shortStrengthResult.strength,
+    confidence: Math.min(95, Math.max(5, shortStrengthResult.strength + shortFlowAnalysis.adjustments.total + shortLiqAnalysis.adjustments.total)),
+    grade: getGradeFromStrength(shortStrengthResult.strength),
+    reasons: shortStrengthResult.reasons,
+    warnings: [...shortStrengthResult.warnings],
+    checklist: shortChecklist,
+    passedCount: shortPassedFull,
+    totalCount: totalItems,
+  };
+
+  // Add liquidation warnings
+  if (liq) {
+    if (liq.bias === 'long_squeeze' && liq.biasStrength > 0.3) {
+      longRec.warnings.push(`⚠️ Long squeeze risk (${(liq.biasStrength * 100).toFixed(0)}%)`);
+    }
+    if (liq.bias === 'short_squeeze' && liq.biasStrength > 0.3) {
+      shortRec.warnings.push(`⚠️ Short squeeze risk (${(liq.biasStrength * 100).toFixed(0)}%)`);
+    }
+  }
+
+  // Detect momentum opportunities for Martingale
+  const momentum = detectMomentum(ind5m, ind15m, ind1h);
+
+  // Generate primary action recommendation
   let action: TradingRecommendation['action'] = 'WAIT';
   let reason = '';
   let baseConfidence = 0;
 
-  if (longPassed >= 5) {
+  // Use strength-based thresholds instead of binary pass/fail
+  if (longStrengthResult.strength >= 70 && longStrengthResult.strength > shortStrengthResult.strength + 15) {
     action = 'LONG';
-    reason = `Strong LONG setup: 4H bullish, 1H confirms, 15m RSI oversold at ${ind15m.rsi.toFixed(0)}. Volume ${ind15m.volRatio.toFixed(1)}x.`;
-    baseConfidence = 50 + longPassed * 8;
-  } else if (shortPassed >= 5) {
+    reason = `LONG Grade ${longRec.grade} (${longStrengthResult.strength}%): ${longStrengthResult.reasons.slice(0, 3).join(', ')}.`;
+    baseConfidence = longStrengthResult.strength;
+  } else if (shortStrengthResult.strength >= 70 && shortStrengthResult.strength > longStrengthResult.strength + 15) {
     action = 'SHORT';
-    reason = `Strong SHORT setup: 4H bearish, 1H confirms, 15m RSI overbought at ${ind15m.rsi.toFixed(0)}. Volume ${ind15m.volRatio.toFixed(1)}x.`;
-    baseConfidence = 50 + shortPassed * 8;
-  } else if (bestPassed >= 4) {
+    reason = `SHORT Grade ${shortRec.grade} (${shortStrengthResult.strength}%): ${shortStrengthResult.reasons.slice(0, 3).join(', ')}.`;
+    baseConfidence = shortStrengthResult.strength;
+  } else if (Math.max(longStrengthResult.strength, shortStrengthResult.strength) >= 55) {
     action = 'WAIT';
-    const missing = getMissingConditions(bestChecks, bestSetup, !!(micro || liq));
-    reason = `${bestSetup.toUpperCase()} setup at ${bestPassedFull}/${totalItems}. Missing: ${missing.join(', ')}. Wait for confirmation.`;
-    baseConfidence = 30 + bestPassed * 5;
+    const strongerDir = longStrengthResult.strength >= shortStrengthResult.strength ? 'LONG' : 'SHORT';
+    const strongerStrength = Math.max(longStrengthResult.strength, shortStrengthResult.strength);
+    reason = `${strongerDir} forming (${strongerStrength}%). Both: LONG ${longRec.grade} vs SHORT ${shortRec.grade}. Wait for stronger signal.`;
+    baseConfidence = strongerStrength * 0.7;
   } else {
     action = 'WAIT';
-    reason = `No clear setup. LONG: ${longPassedFull}/${totalItems}, SHORT: ${shortPassedFull}/${totalItems}. Wait for timeframes to align.`;
-    baseConfidence = 10 + bestPassed * 5;
+    reason = `Weak setups. LONG ${longRec.grade} (${longStrengthResult.strength}%), SHORT ${shortRec.grade} (${shortStrengthResult.strength}%). Wait for better entry.`;
+    baseConfidence = 20;
   }
 
-  // Check for 5m spike (can override WAIT)
+  // Check for 5m spike - for Martingale, allow spikes even against weak HTF
   const spike = detectSpike(ind5m);
   if (spike.isSpike && action === 'WAIT') {
+    // For Martingale, spikes are opportunities even against trend (with warnings)
+    const htfAllowsLongSpike = ind4h.bias !== 'bearish' && (ind1d ? ind1d.bias !== 'bearish' : true);
+    const htfAllowsShortSpike = ind4h.bias !== 'bullish' && (ind1d ? ind1d.bias !== 'bullish' : true);
+
     if (spike.direction === 'long') {
       action = 'SPIKE ↑';
-      reason = `⚡ 5m spike: RSI ${ind5m.rsi.toFixed(0)}, Volume ${ind5m.volRatio.toFixed(1)}x. Quick long with tight stop!`;
+      reason = `⚡ SPIKE opportunity: RSI ${ind5m.rsi.toFixed(0)}, Vol ${ind5m.volRatio.toFixed(1)}x.`;
+      baseConfidence = htfAllowsLongSpike ? 60 : 45;
+      if (!htfAllowsLongSpike) {
+        reason += ' ⚠️ Counter-trend - tight stops!';
+        longRec.warnings.push('Counter-trend spike - use tight stops');
+      }
     } else {
       action = 'SPIKE ↓';
-      reason = `⚡ 5m spike: RSI ${ind5m.rsi.toFixed(0)}, Volume ${ind5m.volRatio.toFixed(1)}x. Quick short with tight stop!`;
+      reason = `⚡ SPIKE opportunity: RSI ${ind5m.rsi.toFixed(0)}, Vol ${ind5m.volRatio.toFixed(1)}x.`;
+      baseConfidence = htfAllowsShortSpike ? 60 : 45;
+      if (!htfAllowsShortSpike) {
+        reason += ' ⚠️ Counter-trend - tight stops!';
+        shortRec.warnings.push('Counter-trend spike - use tight stops');
+      }
     }
-    baseConfidence = 55;
   }
 
-  // Option A: Analyze flow and calculate adjustments
-  const direction = action === 'LONG' || action === 'SPIKE ↑' ? 'long' :
-                    action === 'SHORT' || action === 'SPIKE ↓' ? 'short' : bestSetup;
-  const flowAnalysis = analyzeFlow(direction, micro || null);
-  const liqAnalysis = analyzeLiquidation(direction, liq || null);
+  // Collect all warnings
+  const allWarnings: string[] = [];
+  if (momentum) {
+    allWarnings.push(`🎯 Momentum ${momentum.direction}: ${momentum.reason}`);
+  }
+  if (ind15m.atr && currentPrice && currentPrice > 0) {
+    const atrPercent = (ind15m.atr / currentPrice) * 100;
+    if (atrPercent > 3) {
+      allWarnings.push(`⚠️ High volatility (ATR ${atrPercent.toFixed(1)}%)`);
+    }
+  }
+  if (longFlowAnalysis.hasDivergence) {
+    allWarnings.push(`Divergence: ${longFlowAnalysis.divergenceType}`);
+  }
 
-  // Apply flow and liquidation adjustments to confidence
+  // Apply adjustments to confidence
+  const flowAnalysis = bestSetup === 'long' ? longFlowAnalysis : shortFlowAnalysis;
+  const liqAnalysis = bestSetup === 'long' ? longLiqAnalysis : shortLiqAnalysis;
   let confidence = baseConfidence + flowAnalysis.adjustments.total + liqAnalysis.adjustments.total;
 
-  // Add flow context to reason if we have microstructure data
-  if (micro && action !== 'WAIT') {
-    if (flowAnalysis.status === 'aligned') {
-      reason += ` Flow aligned (${flowAnalysis.cvdTrend} CVD).`;
-    } else if (flowAnalysis.status === 'opposing') {
-      reason += ` ⚠️ Flow opposing - reduce size.`;
-    }
-    if (flowAnalysis.hasDivergence) {
-      reason += ` Divergence: ${flowAnalysis.divergenceType}.`;
-    }
-    if (flowAnalysis.spreadStatus === 'wide') {
-      reason += ` Wide spread - expect slippage.`;
+  // ATR volatility adjustment
+  if (ind15m.atr && currentPrice && currentPrice > 0) {
+    const atrPercent = (ind15m.atr / currentPrice) * 100;
+    if (atrPercent > 3) {
+      confidence -= 10;
+    } else if (atrPercent < 1.5) {
+      confidence += 5;
     }
   }
 
-  // Add liquidation context to reason if we have liquidation data
-  if (liq && action !== 'WAIT') {
-    if (liqAnalysis.aligned && liqAnalysis.biasStrength > 0.3) {
-      const targetStr = liqAnalysis.nearestTarget
-        ? ` Target: €${liqAnalysis.nearestTarget.toFixed(4)}`
-        : '';
-      reason += ` Liq bias aligned (${liqAnalysis.bias}).${targetStr}`;
-    } else if (!liqAnalysis.aligned) {
-      reason += ` ⚠️ Liq bias opposing (${liqAnalysis.bias}).`;
-    }
-  }
-
-  // Cap confidence at 95%, floor at 5%
+  // Cap confidence
   confidence = Math.min(Math.max(confidence, 5), 95);
 
   return {
@@ -619,7 +931,11 @@ export function generateRecommendation(
     longScore: longPassedFull,
     shortScore: shortPassedFull,
     totalItems,
-    checklist,
+    long: longRec,
+    short: shortRec,
+    warnings: allWarnings,
+    momentumAlert: momentum || undefined,
+    checklist: bestSetup === 'long' ? longChecklist : shortChecklist,
     flowStatus: micro ? {
       status: flowAnalysis.status,
       imbalance: flowAnalysis.imbalance,

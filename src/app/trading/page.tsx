@@ -185,9 +185,11 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
       if (!indicators) return null;
       return {
         bias: indicators.bias,
+        trendStrength: indicators.trendStrength, // NEW: trend strength indicator
         rsi: indicators.rsi,
         macd: indicators.macd,
         macdSignal: indicators.macdSignal,
+        histogram: indicators.histogram, // NEW: MACD histogram for momentum
         bbPosition: indicators.bbPos,
         bbUpper: indicators.bbUpper,
         bbLower: indicators.bbLower,
@@ -206,10 +208,13 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
         15: tfData[15].ohlc,
         60: tfData[60].ohlc,
         240: tfData[240].ohlc,
+        1440: tfData[1440]?.ohlc || [], // Include daily
       };
 
       // Only build chart context if we have sufficient data
-      const hasEnoughData = Object.values(ohlcByInterval).every(ohlc => ohlc.length >= 20);
+      const hasEnoughData = Object.entries(ohlcByInterval)
+        .filter(([key]) => key !== '1440') // Daily may have less data
+        .every(([, ohlc]) => ohlc.length >= 20);
       if (hasEnoughData) {
         const chartContext = buildChartContext(ohlcByInterval, 'XRP/EUR');
         chartContextString = formatChartContextForAI(chartContext);
@@ -273,6 +278,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
         '15m': buildTimeframeSnapshot(tfData[15].indicators),
         '1h': buildTimeframeSnapshot(tfData[60].indicators),
         '4h': buildTimeframeSnapshot(tfData[240].indicators),
+        '1d': buildTimeframeSnapshot(tfData[1440]?.indicators || null), // Daily timeframe for primary trend
       },
       recommendation: recommendation ? {
         action: recommendation.action,
@@ -281,6 +287,21 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
         longScore: recommendation.longScore,
         shortScore: recommendation.shortScore,
         totalItems: recommendation.totalItems,
+        // NEW: Include strength-based long/short analysis
+        long: recommendation.long ? {
+          grade: recommendation.long.grade,
+          strength: recommendation.long.strength,
+          reasons: recommendation.long.reasons,
+          warnings: recommendation.long.warnings,
+        } : undefined,
+        short: recommendation.short ? {
+          grade: recommendation.short.grade,
+          strength: recommendation.short.strength,
+          reasons: recommendation.short.reasons,
+          warnings: recommendation.short.warnings,
+        } : undefined,
+        warnings: recommendation.warnings,
+        momentumAlert: recommendation.momentumAlert || null,
       } : null,
       microstructure: microData ? {
         imbalance: microData.imbalance,
@@ -358,7 +379,9 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
       btcTrend,
       btcChange,
       microData, // Pass microstructure data for flow analysis
-      liqData // Pass liquidation data for liq bias analysis
+      liqData, // Pass liquidation data for liq bias analysis
+      tfData[1440], // Daily timeframe for trend filter (NEW)
+      price // Current price for ATR volatility calculation
     );
 
     console.log('Generated recommendation:', rec?.action, 'Long:', rec?.longScore, 'Short:', rec?.shortScore, 'Flow:', rec?.flowStatus?.status, 'Liq:', rec?.liquidationStatus?.bias);

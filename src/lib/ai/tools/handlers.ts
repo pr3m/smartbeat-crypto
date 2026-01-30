@@ -331,12 +331,13 @@ async function getTradingRecommendation(args: Record<string, unknown>): Promise<
   const pair = 'XRPEUR';
 
   try {
-    // Fetch OHLC data for all 4 timeframes
-    const [ohlc4h, ohlc1h, ohlc15m, ohlc5m] = await Promise.all([
+    // Fetch OHLC data for all 5 timeframes (including daily)
+    const [ohlc4h, ohlc1h, ohlc15m, ohlc5m, ohlc1d] = await Promise.all([
       fetchOHLC(pair, 240),
       fetchOHLC(pair, 60),
       fetchOHLC(pair, 15),
       fetchOHLC(pair, 5),
+      fetchOHLC(pair, 1440), // Daily
     ]);
 
     // Calculate indicators for each timeframe
@@ -344,6 +345,7 @@ async function getTradingRecommendation(args: Record<string, unknown>): Promise<
     const ind1h = calculateIndicators(ohlc1h);
     const ind15m = calculateIndicators(ohlc15m);
     const ind5m = calculateIndicators(ohlc5m);
+    const ind1d = calculateIndicators(ohlc1d);
 
     if (!ind4h || !ind1h || !ind15m || !ind5m) {
       return {
@@ -357,6 +359,7 @@ async function getTradingRecommendation(args: Record<string, unknown>): Promise<
     const tf1h: TimeframeData = { ohlc: ohlc1h, indicators: ind1h };
     const tf15m: TimeframeData = { ohlc: ohlc15m, indicators: ind15m };
     const tf5m: TimeframeData = { ohlc: ohlc5m, indicators: ind5m };
+    const tf1d: TimeframeData | null = ind1d ? { ohlc: ohlc1d, indicators: ind1d } : null;
 
     // Get BTC correlation if requested
     let btcTrend: 'bull' | 'bear' | 'neut' = 'neut';
@@ -377,20 +380,22 @@ async function getTradingRecommendation(args: Record<string, unknown>): Promise<
       }
     }
 
+    // Get current price for ATR volatility calculation
+    const currentPrice = ohlc15m[ohlc15m.length - 1]?.close || 0;
+
     // Generate recommendation
     const recommendation = generateRecommendation(
       tf4h, tf1h, tf15m, tf5m,
       btcTrend, btcChange,
       null, // microstructure (not available via API)
-      null  // liquidation data (not available via API)
+      null, // liquidation data (not available via API)
+      tf1d, // Daily timeframe for trend filter
+      currentPrice // For ATR volatility calculation
     );
 
     if (!recommendation) {
       return { success: false, error: 'Failed to generate recommendation' };
     }
-
-    // Get current price
-    const currentPrice = ohlc15m[ohlc15m.length - 1]?.close || 0;
 
     return {
       success: true,
@@ -1085,12 +1090,13 @@ async function getCurrentSetup(args: Record<string, unknown>): Promise<ToolResul
   const pair = 'XRPEUR';
 
   try {
-    // Fetch OHLC data for all timeframes
-    const [ohlc4h, ohlc1h, ohlc15m, ohlc5m] = await Promise.all([
+    // Fetch OHLC data for all timeframes (including daily)
+    const [ohlc4h, ohlc1h, ohlc15m, ohlc5m, ohlc1d] = await Promise.all([
       fetchOHLC(pair, 240),
       fetchOHLC(pair, 60),
       fetchOHLC(pair, 15),
       fetchOHLC(pair, 5),
+      fetchOHLC(pair, 1440), // Daily
     ]);
 
     // Calculate indicators
@@ -1098,6 +1104,7 @@ async function getCurrentSetup(args: Record<string, unknown>): Promise<ToolResul
     const ind1h = calculateIndicators(ohlc1h);
     const ind15m = calculateIndicators(ohlc15m);
     const ind5m = calculateIndicators(ohlc5m);
+    const ind1d = calculateIndicators(ohlc1d);
 
     if (!ind4h || !ind1h || !ind15m || !ind5m) {
       return { success: false, error: 'Insufficient data for setup analysis' };
@@ -1124,15 +1131,16 @@ async function getCurrentSetup(args: Record<string, unknown>): Promise<ToolResul
     const tf1h: TimeframeData = { ohlc: ohlc1h, indicators: ind1h };
     const tf15m: TimeframeData = { ohlc: ohlc15m, indicators: ind15m };
     const tf5m: TimeframeData = { ohlc: ohlc5m, indicators: ind5m };
+    const tf1d: TimeframeData | null = ind1d ? { ohlc: ohlc1d, indicators: ind1d } : null;
+
+    const currentPrice = ohlc15m[ohlc15m.length - 1]?.close || 0;
 
     // Generate recommendation to get checklist
-    const recommendation = generateRecommendation(tf4h, tf1h, tf15m, tf5m, btcTrend, btcChange, null, null);
+    const recommendation = generateRecommendation(tf4h, tf1h, tf15m, tf5m, btcTrend, btcChange, null, null, tf1d, currentPrice);
 
     if (!recommendation) {
       return { success: false, error: 'Failed to generate setup analysis' };
     }
-
-    const currentPrice = ohlc15m[ohlc15m.length - 1]?.close || 0;
 
     const data: Record<string, unknown> = {
       pair,
@@ -1162,7 +1170,7 @@ async function getCurrentSetup(args: Record<string, unknown>): Promise<ToolResul
         '15m_entry': {
           pass: recommendation.checklist.entry15m.pass,
           value: recommendation.checklist.entry15m.value,
-          requirement: 'RSI <35 for LONG, RSI >65 for SHORT',
+          requirement: 'RSI 20-45 for LONG, RSI 55-80 for SHORT',
         },
         'volume': {
           pass: recommendation.checklist.volume.pass,
@@ -1172,13 +1180,20 @@ async function getCurrentSetup(args: Record<string, unknown>): Promise<ToolResul
         'BTC_aligned': {
           pass: recommendation.checklist.btcAlign.pass,
           value: recommendation.checklist.btcAlign.value,
-          requirement: 'BTC not opposing trade direction',
+          requirement: 'BTC bull (or neutral + 4H bullish) for LONG',
         },
-        'RSI_extreme': {
-          pass: recommendation.checklist.rsiExtreme.pass,
-          value: recommendation.checklist.rsiExtreme.value,
-          requirement: '<35 for LONG, >65 for SHORT',
+        'MACD_momentum': {
+          pass: recommendation.checklist.macdMomentum.pass,
+          value: recommendation.checklist.macdMomentum.value,
+          requirement: 'Histogram >0 for LONG, <0 for SHORT',
         },
+        ...(recommendation.checklist.trend1d ? {
+          '1D_trend': {
+            pass: recommendation.checklist.trend1d.pass,
+            value: recommendation.checklist.trend1d.value,
+            requirement: 'not bearish for LONG, not bullish for SHORT',
+          },
+        } : {}),
       },
       reason: recommendation.reason,
       btc: {

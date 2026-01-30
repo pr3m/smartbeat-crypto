@@ -251,6 +251,12 @@ export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
   if (score >= 2) bias = 'bullish';
   else if (score <= -2) bias = 'bearish';
 
+  // Calculate trend strength from absolute score
+  const absScore = Math.abs(score);
+  const trendStrength: 'strong' | 'moderate' | 'weak' =
+    absScore >= 3 ? 'strong' :
+    absScore >= 2 ? 'moderate' : 'weak';
+
   return {
     rsi,
     macd,
@@ -263,6 +269,7 @@ export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
     volRatio,
     score,
     bias,
+    trendStrength,
   };
 }
 

@@ -11,6 +11,7 @@ export const TRADING_TIMEFRAMES = [
   { value: 15, label: '15m' },
   { value: 60, label: '1H' },
   { value: 240, label: '4H' },
+  { value: 1440, label: '1D' },
 ];
 
 export const TRADING_REFRESH_INTERVAL_SEC = 60;
@@ -178,6 +179,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     15: { ohlc: [], indicators: null },
     60: { ohlc: [], indicators: null },
     240: { ohlc: [], indicators: null },
+    1440: { ohlc: [], indicators: null },
   });
 
   const [tradeBalance, setTradeBalance] = useState<TradeBalance | null>(null);
@@ -293,6 +295,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
         15: { ohlc: [], indicators: null },
         60: { ohlc: [], indicators: null },
         240: { ohlc: [], indicators: null },
+        1440: { ohlc: [], indicators: null },
       };
 
       for (let i = 0; i < TRADING_TIMEFRAMES.length; i += 1) {

@@ -503,13 +503,14 @@ export function CandlestickChart({
     const macd = calculateMACDSeries(closes);
     const atrData = calculateATRSeries(highs, lows, closes);
 
-    // IMPORTANT: Do NOT filter out NaN values - keep all data points with same timestamps
-    // as the main chart so that logical range indices align correctly across all charts
+    // Filter out NaN values - lightweight-charts doesn't accept undefined values
     const toLineData = (values: number[]): LineData<UTCTimestamp>[] =>
-      values.map((v, i) => ({
-        time: Math.floor(data[i].time / 1000) as UTCTimestamp,
-        value: isNaN(v) ? undefined : v,
-      } as LineData<UTCTimestamp>));
+      values
+        .map((v, i) => ({
+          time: Math.floor(data[i].time / 1000) as UTCTimestamp,
+          value: v,
+        }))
+        .filter(point => !isNaN(point.value)) as LineData<UTCTimestamp>[];
 
     // Bollinger Bands
     if (bbUpperRef.current && bbMiddleRef.current && bbLowerRef.current) {
