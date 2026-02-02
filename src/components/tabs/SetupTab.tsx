@@ -69,7 +69,7 @@ interface SetupTabProps {
   onEditOrder?: (order: OpenOrderData) => void;
 
   // Toast
-  addToast: (toast: { title: string; message: string; type: string; duration?: number }) => void;
+  addToast: (toast: { title: string; message: string; type: 'success' | 'error' | 'signal' | 'info' | 'warning'; duration?: number }) => void;
 }
 
 export function SetupTab({
@@ -199,6 +199,52 @@ export function SetupTab({
                   ({recommendation.flowStatus.adjustments.total > 0 ? '+' : ''}{recommendation.flowStatus.adjustments.total}%)
                 </span>
               )}
+            </div>
+          </Tooltip>
+        )}
+
+        {/* Knife Status Indicator */}
+        {recommendation?.knifeStatus?.isKnife && (
+          <Tooltip
+            content={
+              <div className="text-xs">
+                <strong>Knife Detection</strong>
+                <p className="mt-1">{recommendation.knifeStatus.direction === 'falling' ? 'Falling' : 'Rising'} knife detected:</p>
+                <div className="mt-2 space-y-1">
+                  <div>Phase: {recommendation.knifeStatus.phase}</div>
+                  <div>Broken Level: {recommendation.knifeStatus.brokenLevel?.toFixed(5)}</div>
+                  <div>Knife Score: {recommendation.knifeStatus.knifeScore}%</div>
+                  <div>Reversal Readiness: {recommendation.knifeStatus.reversalReadiness}%</div>
+                  <div>Gate: {recommendation.knifeStatus.gateAction}</div>
+                  <div>Size Multiplier: {(recommendation.knifeStatus.sizeMultiplier * 100).toFixed(0)}%</div>
+                  {recommendation.knifeStatus.waitFor.length > 0 && (
+                    <div className="text-yellow-400">Wait for: {recommendation.knifeStatus.waitFor.join(', ')}</div>
+                  )}
+                  {recommendation.knifeStatus.flipSuggestion && (
+                    <div className="text-blue-400">
+                      Consider {recommendation.knifeStatus.direction === 'falling' ? 'SHORT' : 'LONG'} instead
+                    </div>
+                  )}
+                </div>
+              </div>
+            }
+            position="bottom"
+          >
+            <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs mb-3 ml-2 cursor-help ${
+              recommendation.knifeStatus.gateAction === 'block'
+                ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                : recommendation.knifeStatus.gateAction === 'warn'
+                ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
+                : 'bg-green-500/20 text-green-400 border border-green-500/30'
+            }`}>
+              <span className={`w-2 h-2 rounded-full ${
+                recommendation.knifeStatus.gateAction === 'block'
+                  ? 'bg-red-500'
+                  : recommendation.knifeStatus.gateAction === 'warn'
+                  ? 'bg-yellow-500'
+                  : 'bg-green-500'
+              }`} />
+              {recommendation.knifeStatus.direction === 'falling' ? 'Falling' : 'Rising'} Knife: {recommendation.knifeStatus.phase}
             </div>
           </Tooltip>
         )}

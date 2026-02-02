@@ -54,7 +54,7 @@ export function getOpenAIClient(config: ClientConfig = {}): ChatOpenAI {
         // Use Responses API to get reasoning summaries in content
         useResponsesApi: true,
         // Format reasoning summaries into message content
-        outputVersion: 'responses/v1',
+        outputVersion: 'responses/v1' as never,
         // Configure reasoning behavior
         reasoning: {
           effort: 'medium',  // Options: 'low', 'medium', 'high'
@@ -96,7 +96,7 @@ export function createOpenAIClient(config: ClientConfig = {}): ChatOpenAI {
       apiKey,
       model,
       useResponsesApi: true,
-      outputVersion: 'responses/v1',
+      outputVersion: 'responses/v1' as never,
       reasoning: {
         effort: 'medium',
         summary: 'auto',

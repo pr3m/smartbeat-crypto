@@ -337,6 +337,19 @@ export interface Indicators {
   score: number;
   bias: 'bullish' | 'bearish' | 'neutral';
   trendStrength: 'strong' | 'moderate' | 'weak';
+  // Professional trend analysis - EMA-based
+  ema20: number;
+  ema50: number;
+  ema200: number;
+  priceVsEma20: number; // % distance from EMA20
+  priceVsEma50: number; // % distance from EMA50
+  priceVsEma200: number; // % distance from EMA200
+  emaAlignment: 'bullish' | 'bearish' | 'mixed'; // EMA stacking order
+  ema20Slope: number; // Rate of change (momentum)
+  ema50Slope: number;
+  // Proper trend determination
+  trend: 'bullish' | 'bearish' | 'neutral'; // Based on price structure vs EMAs
+  trendScore: number; // -100 to +100 trend strength
 }
 
 export interface TimeframeData {
@@ -369,6 +382,41 @@ export interface DirectionRecommendation {
   };
   passedCount: number;
   totalCount: number;
+}
+
+// Knife detection types
+export type KnifePhase = 'none' | 'impulse' | 'capitulation' | 'stabilizing' | 'confirming' | 'safe';
+export type KnifeDirection = 'falling' | 'rising';
+
+export interface KnifeSignals {
+  decisiveBreak: boolean;
+  fastVelocity: boolean;
+  volumeExpansion: boolean;
+  capitulationCandle: boolean;
+  noNewExtreme: boolean;
+  atrContraction: boolean;
+  volumeFading: boolean;
+  hlSequence: boolean;
+  clvDrift: boolean;
+  reclaimed: boolean;
+  microStructureShift: boolean;
+  retestQuality: 'good' | 'poor' | 'none';
+  bounceSold: boolean;
+}
+
+export interface KnifeStatus {
+  isKnife: boolean;
+  direction: KnifeDirection | null;
+  phase: KnifePhase;
+  brokenLevel: number | null;
+  knifeScore: number;
+  reversalReadiness: number;
+  gateAction: 'block' | 'warn' | 'allow';
+  sizeMultiplier: number;
+  flipSuggestion: boolean;
+  signals: KnifeSignals;
+  waitFor: string[];
+  reasons: string[];
 }
 
 export interface TradingRecommendation {
@@ -432,6 +480,8 @@ export interface TradingRecommendation {
       total: number;
     };
   };
+  // Knife detection status
+  knifeStatus?: KnifeStatus;
 }
 
 // Microstructure data for recommendation engine

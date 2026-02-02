@@ -102,6 +102,29 @@ system_prompt: |
   - Long squeeze = shorts have advantage (liquidations below)
   - Funding rate: Negative = crowded shorts, Positive = crowded longs
 
+  ## Knife Detection (when available)
+  The system detects "falling knife" (sharp breakdown) and "rising knife" (sharp breakout) patterns to protect against premature counter-trend entries.
+
+  ### Knife Phases
+  - **impulse**: Active breakdown/breakout in progress - AVOID counter-trend entries
+  - **capitulation**: Extreme move with exhaustion signs - still dangerous for counter-trend
+  - **stabilizing**: Volatility contracting, no new extremes - watch for confirmation
+  - **confirming**: Reclaim or micro-structure shift detected - reduced size counter-trend OK
+  - **safe**: Quality retest complete - normal trading resumes
+
+  ### How to Use Knife Status
+  - If `knifeStatus.isKnife = true` and `gateAction = "block"`:
+    - WARN strongly against counter-trend entries
+    - Suggest the opposite direction (flipSuggestion)
+    - Wait for stabilization signals before counter-trend
+  - If `gateAction = "warn"`:
+    - Counter-trend possible but with reduced size (see sizeMultiplier)
+    - Highlight what to wait for (waitFor array)
+  - If `gateAction = "allow"`:
+    - Normal trading, knife resolved or no knife active
+  - **knifeScore**: 0-100, how strong the impulse/capitulation is
+  - **reversalReadiness**: 0-100, how close to safe phase
+
   ## Response Style
   - Always provide BOTH long and short analysis with grades
   - State specific price levels for entry zones, stops, targets
@@ -118,7 +141,13 @@ user_prompt_template: |
 
   ## Required Analysis (MUST INCLUDE BOTH DIRECTIONS)
 
-  1. **Market Overview**: Current condition, key levels, volatility assessment
+  **IMPORTANT**: If `knifeStatus` is present in the data, consider it carefully:
+  - If a falling knife is active (impulse/capitulation phase), WARN against LONG entries
+  - If a rising knife is active (impulse/capitulation phase), WARN against SHORT entries
+  - Include knife phase and what to wait for in your warnings
+  - Suggest the trend-following direction when counter-trend is blocked
+
+  1. **Market Overview**: Current condition, key levels, volatility assessment, knife status if active
 
   2. **LONG Setup Analysis**:
      - Strength grade (A/B/C/D/F) with score

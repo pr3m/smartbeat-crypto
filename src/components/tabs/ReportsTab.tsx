@@ -174,6 +174,8 @@ export function ReportsTab({ onReportsCountChange, testMode = true }: ReportsTab
     const tradeData: AITradeData | null = report.action ? {
       action: report.action as 'LONG' | 'SHORT' | 'WAIT',
       conviction: (report.conviction as 'high' | 'medium' | 'low') || 'medium',
+      positionSizePct: null,
+      timeHorizon: 'intraday' as const,
       entry: report.entryLow && report.entryHigh ? { low: report.entryLow, high: report.entryHigh } : null,
       stopLoss: report.stopLoss,
       targets: report.targets,

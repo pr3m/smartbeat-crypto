@@ -21,11 +21,11 @@ function logTaxError(context: string, error: unknown, details?: Record<string, u
  * GET /api/tax/summary - Get tax summary for a year
  */
 export async function GET(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const yearParam = searchParams.get('year');
-    const year = yearParam ? parseInt(yearParam) : new Date().getFullYear();
+  const { searchParams } = new URL(request.url);
+  const yearParam = searchParams.get('year');
+  const year = yearParam ? parseInt(yearParam) : new Date().getFullYear();
 
+  try {
     // Validate year
     if (isNaN(year) || year < 2000 || year > 2100) {
       return NextResponse.json(
@@ -257,7 +257,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(summary);
   } catch (error) {
-    logTaxError('Get tax summary', error, { year: yearParam });
+    logTaxError('Get tax summary', error, { year });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to get tax summary' },
       { status: 500 }

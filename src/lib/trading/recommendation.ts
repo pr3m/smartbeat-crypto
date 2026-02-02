@@ -12,7 +12,9 @@ import type {
   ChecklistItem,
   MicrostructureInput,
   LiquidationInput,
+  OHLCData,
 } from '@/lib/kraken/types';
+import { detectKnife, KNIFE_GATING_ENABLED, type KnifeAnalysis } from './knife-detection';
 
 export interface TimeframeWeights {
   '1d': number;
@@ -302,6 +304,452 @@ export function analyzeLiquidation(
 }
 
 /**
+ * Evaluate 1H setup conditions for LONG
+ * Professional setup confirmation looks for:
+ * 1. Trend alignment (EMA-based)
+ * 2. Pullback quality (price near EMA support)
+ * 3. Momentum alignment (MACD)
+ * 4. Structure (higher lows forming)
+ */
+export function evaluate1hLongSetup(ind1h: Indicators): {
+  pass: boolean;
+  score: number;
+  quality: 'strong' | 'moderate' | 'weak';
+  signals: string[];
+} {
+  let score = 0;
+  const signals: string[] = [];
+
+  // 1. Trend direction (most important - uses EMA structure)
+  if (ind1h.trend === 'bullish') {
+    score += 3;
+    signals.push('1H trend bullish');
+  } else if (ind1h.trend === 'neutral') {
+    score += 1;
+    signals.push('1H trend neutral');
+  }
+  // Bearish trend = 0 points
+
+  // 2. EMA alignment bonus
+  if (ind1h.emaAlignment === 'bullish') {
+    score += 2;
+    signals.push('EMA stack bullish');
+  } else if (ind1h.emaAlignment === 'mixed' && ind1h.priceVsEma20 > 0) {
+    score += 1;
+    signals.push('Price > EMA20');
+  }
+
+  // 3. Pullback to EMA support (ideal entry is near EMA, not extended)
+  // Best: Price 0-2% above EMA20 (healthy pullback)
+  // Good: Price 2-4% above (slightly extended)
+  // Bad: Price >4% above (overextended) or below EMA
+  if (ind1h.priceVsEma20 >= 0 && ind1h.priceVsEma20 <= 2) {
+    score += 2;
+    signals.push(`Pullback to EMA (${ind1h.priceVsEma20.toFixed(1)}%)`);
+  } else if (ind1h.priceVsEma20 > 2 && ind1h.priceVsEma20 <= 4) {
+    score += 1;
+    signals.push('Slightly extended');
+  } else if (ind1h.priceVsEma20 < 0 && ind1h.priceVsEma20 > -2) {
+    score += 1; // Reclaiming EMA - potential
+    signals.push('Reclaiming EMA');
+  }
+
+  // 4. MACD momentum - want positive or turning positive
+  const hist = ind1h.histogram ?? 0;
+  if (hist > 0 && ind1h.macd > 0) {
+    score += 2;
+    signals.push('MACD bullish');
+  } else if (hist > 0 || ind1h.macd > 0) {
+    score += 1;
+    signals.push('MACD turning');
+  }
+
+  // 5. EMA slope - want rising EMAs
+  if (ind1h.ema20Slope > 0.05) {
+    score += 1;
+    signals.push('EMA rising');
+  }
+
+  // Determine quality
+  const quality: 'strong' | 'moderate' | 'weak' =
+    score >= 8 ? 'strong' :
+    score >= 5 ? 'moderate' : 'weak';
+
+  return {
+    pass: score >= 4, // Need at least moderate setup
+    score,
+    quality,
+    signals,
+  };
+}
+
+/**
+ * Evaluate 1H setup conditions for SHORT
+ */
+export function evaluate1hShortSetup(ind1h: Indicators): {
+  pass: boolean;
+  score: number;
+  quality: 'strong' | 'moderate' | 'weak';
+  signals: string[];
+} {
+  let score = 0;
+  const signals: string[] = [];
+
+  // 1. Trend direction
+  if (ind1h.trend === 'bearish') {
+    score += 3;
+    signals.push('1H trend bearish');
+  } else if (ind1h.trend === 'neutral') {
+    score += 1;
+    signals.push('1H trend neutral');
+  }
+
+  // 2. EMA alignment
+  if (ind1h.emaAlignment === 'bearish') {
+    score += 2;
+    signals.push('EMA stack bearish');
+  } else if (ind1h.emaAlignment === 'mixed' && ind1h.priceVsEma20 < 0) {
+    score += 1;
+    signals.push('Price < EMA20');
+  }
+
+  // 3. Pullback to EMA resistance (ideal: price 0-2% below EMA20)
+  if (ind1h.priceVsEma20 <= 0 && ind1h.priceVsEma20 >= -2) {
+    score += 2;
+    signals.push(`Pullback to EMA (${ind1h.priceVsEma20.toFixed(1)}%)`);
+  } else if (ind1h.priceVsEma20 < -2 && ind1h.priceVsEma20 >= -4) {
+    score += 1;
+    signals.push('Slightly extended');
+  } else if (ind1h.priceVsEma20 > 0 && ind1h.priceVsEma20 < 2) {
+    score += 1;
+    signals.push('Testing EMA resistance');
+  }
+
+  // 4. MACD momentum - want negative
+  const hist = ind1h.histogram ?? 0;
+  if (hist < 0 && ind1h.macd < 0) {
+    score += 2;
+    signals.push('MACD bearish');
+  } else if (hist < 0 || ind1h.macd < 0) {
+    score += 1;
+    signals.push('MACD turning');
+  }
+
+  // 5. EMA slope - want falling EMAs
+  if (ind1h.ema20Slope < -0.05) {
+    score += 1;
+    signals.push('EMA falling');
+  }
+
+  const quality: 'strong' | 'moderate' | 'weak' =
+    score >= 8 ? 'strong' :
+    score >= 5 ? 'moderate' : 'weak';
+
+  return {
+    pass: score >= 4,
+    score,
+    quality,
+    signals,
+  };
+}
+
+/**
+ * Evaluate 15m entry conditions for LONG
+ * Professional entry timing uses multiple confirmations, not just RSI
+ *
+ * Good LONG entry requires at least 2 of:
+ * 1. RSI oversold (20-45) - momentum exhaustion
+ * 2. Price near lower BB (bbPos < 0.35) - mean reversion opportunity
+ * 3. MACD histogram turning positive - momentum shift
+ * 4. Price above 15m EMA20 or reclaiming it - structure support
+ */
+export function evaluate15mLongEntry(ind15m: Indicators): {
+  pass: boolean;
+  score: number;
+  signals: string[];
+} {
+  let score = 0;
+  const signals: string[] = [];
+
+  // 1. RSI oversold zone (classic entry signal)
+  if (ind15m.rsi >= 20 && ind15m.rsi <= 40) {
+    score += 2;
+    signals.push(`RSI ${ind15m.rsi.toFixed(0)} oversold`);
+  } else if (ind15m.rsi > 40 && ind15m.rsi <= 50) {
+    score += 1; // Approaching neutral - weaker signal
+    signals.push(`RSI ${ind15m.rsi.toFixed(0)} neutral-low`);
+  }
+
+  // 2. Bollinger Band position - price near lower band
+  if (ind15m.bbPos < 0.25) {
+    score += 2;
+    signals.push(`BB ${(ind15m.bbPos * 100).toFixed(0)}% (oversold)`);
+  } else if (ind15m.bbPos < 0.4) {
+    score += 1;
+    signals.push(`BB ${(ind15m.bbPos * 100).toFixed(0)}% (lower half)`);
+  }
+
+  // 3. MACD histogram positive or turning positive
+  const hist = ind15m.histogram ?? 0;
+  if (hist > 0) {
+    score += 2;
+    signals.push(`MACD hist +${hist.toFixed(5)}`);
+  } else if (hist > -0.0001) {
+    score += 1; // Histogram near zero, potentially turning
+    signals.push('MACD turning');
+  }
+
+  // 4. Price structure - above or reclaiming EMA20
+  if (ind15m.priceVsEma20 > 0) {
+    score += 1;
+    signals.push('Above EMA20');
+  } else if (ind15m.priceVsEma20 > -1) {
+    score += 0.5; // Within 1% of EMA20 - potential reclaim
+    signals.push('Near EMA20');
+  }
+
+  // Need at least 3 points (roughly 2 solid signals) to pass
+  return {
+    pass: score >= 3,
+    score,
+    signals,
+  };
+}
+
+/**
+ * Evaluate 15m entry conditions for SHORT
+ * Mirror of long entry but inverted
+ */
+export function evaluate15mShortEntry(ind15m: Indicators): {
+  pass: boolean;
+  score: number;
+  signals: string[];
+} {
+  let score = 0;
+  const signals: string[] = [];
+
+  // 1. RSI overbought zone
+  if (ind15m.rsi >= 60 && ind15m.rsi <= 80) {
+    score += 2;
+    signals.push(`RSI ${ind15m.rsi.toFixed(0)} overbought`);
+  } else if (ind15m.rsi >= 50 && ind15m.rsi < 60) {
+    score += 1;
+    signals.push(`RSI ${ind15m.rsi.toFixed(0)} neutral-high`);
+  }
+
+  // 2. Bollinger Band position - price near upper band
+  if (ind15m.bbPos > 0.75) {
+    score += 2;
+    signals.push(`BB ${(ind15m.bbPos * 100).toFixed(0)}% (overbought)`);
+  } else if (ind15m.bbPos > 0.6) {
+    score += 1;
+    signals.push(`BB ${(ind15m.bbPos * 100).toFixed(0)}% (upper half)`);
+  }
+
+  // 3. MACD histogram negative or turning negative
+  const hist = ind15m.histogram ?? 0;
+  if (hist < 0) {
+    score += 2;
+    signals.push(`MACD hist ${hist.toFixed(5)}`);
+  } else if (hist < 0.0001) {
+    score += 1;
+    signals.push('MACD turning');
+  }
+
+  // 4. Price structure - below or losing EMA20
+  if (ind15m.priceVsEma20 < 0) {
+    score += 1;
+    signals.push('Below EMA20');
+  } else if (ind15m.priceVsEma20 < 1) {
+    score += 0.5;
+    signals.push('Near EMA20');
+  }
+
+  return {
+    pass: score >= 3,
+    score,
+    signals,
+  };
+}
+
+/**
+ * Evaluate volume conditions for swing trading
+ *
+ * For swing trades:
+ * - High volume confirms breakouts and trend continuation
+ * - LOW volume on pullbacks is actually GOOD (healthy retracement)
+ * - Very low volume = no conviction = wait
+ *
+ * Context matters:
+ * - Trend continuation: want moderate-high volume (>1.2x)
+ * - Pullback entry: low volume is fine (0.7-1.2x)
+ * - Breakout: want high volume (>1.5x)
+ */
+export function evaluateVolume(
+  volRatio: number,
+  context: 'pullback' | 'breakout' | 'continuation'
+): { pass: boolean; quality: 'strong' | 'moderate' | 'weak'; description: string } {
+  if (context === 'pullback') {
+    // For pullback entries, low volume is actually preferred (no selling pressure)
+    if (volRatio >= 0.5 && volRatio <= 1.3) {
+      return { pass: true, quality: 'strong', description: `${volRatio.toFixed(2)}x (healthy pullback)` };
+    } else if (volRatio < 0.5) {
+      return { pass: true, quality: 'moderate', description: `${volRatio.toFixed(2)}x (very quiet)` };
+    } else {
+      return { pass: true, quality: 'weak', description: `${volRatio.toFixed(2)}x (high vol pullback)` };
+    }
+  } else if (context === 'breakout') {
+    // Breakouts need volume confirmation
+    if (volRatio >= 1.8) {
+      return { pass: true, quality: 'strong', description: `${volRatio.toFixed(2)}x (strong breakout)` };
+    } else if (volRatio >= 1.3) {
+      return { pass: true, quality: 'moderate', description: `${volRatio.toFixed(2)}x (confirmed)` };
+    } else {
+      return { pass: false, quality: 'weak', description: `${volRatio.toFixed(2)}x (weak breakout)` };
+    }
+  } else {
+    // Continuation - moderate volume is fine
+    if (volRatio >= 1.3) {
+      return { pass: true, quality: 'strong', description: `${volRatio.toFixed(2)}x` };
+    } else if (volRatio >= 0.8) {
+      return { pass: true, quality: 'moderate', description: `${volRatio.toFixed(2)}x (normal)` };
+    } else {
+      return { pass: false, quality: 'weak', description: `${volRatio.toFixed(2)}x (low)` };
+    }
+  }
+}
+
+/**
+ * Evaluate MACD momentum with dead zone
+ *
+ * The histogram value near zero is NEUTRAL, not bullish/bearish
+ * Dead zone: -0.0001 to +0.0001 = neutral (no clear momentum)
+ */
+export function evaluateMACDMomentum(
+  direction: 'long' | 'short',
+  histogram: number | undefined,
+  macd: number
+): { pass: boolean; strength: 'strong' | 'moderate' | 'weak' | 'neutral'; description: string } {
+  const hist = histogram ?? 0;
+
+  // Dead zone - histogram too small to be meaningful
+  const DEAD_ZONE = 0.00005;
+
+  if (Math.abs(hist) < DEAD_ZONE) {
+    return {
+      pass: false, // Neutral doesn't pass either direction
+      strength: 'neutral',
+      description: `Hist ${hist >= 0 ? '+' : ''}${hist.toFixed(5)} (neutral)`,
+    };
+  }
+
+  if (direction === 'long') {
+    if (hist > DEAD_ZONE) {
+      // Histogram positive - bullish momentum
+      const strength = hist > 0.0005 ? 'strong' :
+                       hist > 0.0001 ? 'moderate' : 'weak';
+      return {
+        pass: true,
+        strength,
+        description: `Hist +${hist.toFixed(5)} ${macd > 0 ? '(MACD+)' : ''}`,
+      };
+    } else {
+      // Histogram negative - bearish momentum, bad for longs
+      return {
+        pass: false,
+        strength: 'weak',
+        description: `Hist ${hist.toFixed(5)} (bearish)`,
+      };
+    }
+  } else {
+    // SHORT
+    if (hist < -DEAD_ZONE) {
+      // Histogram negative - bearish momentum
+      const strength = hist < -0.0005 ? 'strong' :
+                       hist < -0.0001 ? 'moderate' : 'weak';
+      return {
+        pass: true,
+        strength,
+        description: `Hist ${hist.toFixed(5)} ${macd < 0 ? '(MACD-)' : ''}`,
+      };
+    } else {
+      // Histogram positive - bullish momentum, bad for shorts
+      return {
+        pass: false,
+        strength: 'weak',
+        description: `Hist +${hist.toFixed(5)} (bullish)`,
+      };
+    }
+  }
+}
+
+/**
+ * Evaluate BTC alignment with nuance
+ *
+ * For swing trades:
+ * - BTC trending same direction = strong confirmation
+ * - BTC neutral = acceptable for strong setups
+ * - BTC opposing = warning, need very strong setup
+ */
+export function evaluateBTCAlignment(
+  direction: 'long' | 'short',
+  btcTrend: 'bull' | 'bear' | 'neut',
+  btcChange: number,
+  setupStrength: 'strong' | 'moderate' | 'weak'
+): { pass: boolean; quality: 'aligned' | 'neutral' | 'opposing'; description: string } {
+  if (direction === 'long') {
+    if (btcTrend === 'bull') {
+      return { pass: true, quality: 'aligned', description: `BTC bull ${btcChange.toFixed(1)}%` };
+    } else if (btcTrend === 'neut') {
+      // Neutral BTC passes for strong/moderate setups
+      const pass = setupStrength !== 'weak';
+      return { pass, quality: 'neutral', description: `BTC neut ${btcChange.toFixed(1)}%` };
+    } else {
+      // BTC bearish - only pass for very strong setups (divergence play)
+      return { pass: false, quality: 'opposing', description: `BTC bear ${btcChange.toFixed(1)}% ⚠️` };
+    }
+  } else {
+    // SHORT
+    if (btcTrend === 'bear') {
+      return { pass: true, quality: 'aligned', description: `BTC bear ${btcChange.toFixed(1)}%` };
+    } else if (btcTrend === 'neut') {
+      const pass = setupStrength !== 'weak';
+      return { pass, quality: 'neutral', description: `BTC neut ${btcChange.toFixed(1)}%` };
+    } else {
+      return { pass: false, quality: 'opposing', description: `BTC bull ${btcChange.toFixed(1)}% ⚠️` };
+    }
+  }
+}
+
+/**
+ * Determine entry context (pullback vs breakout vs continuation)
+ * This affects how we evaluate volume and other signals
+ */
+export function determineEntryContext(
+  ind15m: Indicators,
+  ind1h: Indicators,
+  direction: 'long' | 'short'
+): 'pullback' | 'breakout' | 'continuation' {
+  // Check if price is extended from EMA (potential breakout)
+  const extended = direction === 'long'
+    ? ind15m.priceVsEma20 > 2 && ind1h.priceVsEma20 > 3
+    : ind15m.priceVsEma20 < -2 && ind1h.priceVsEma20 < -3;
+
+  if (extended) {
+    return 'breakout';
+  }
+
+  // Check if price is near EMA (pullback)
+  const nearEma = Math.abs(ind15m.priceVsEma20) < 1.5;
+
+  if (nearEma) {
+    return 'pullback';
+  }
+
+  return 'continuation';
+}
+
+/**
  * Evaluate conditions for LONG entry
  */
 export function evaluateLongConditions(
@@ -315,14 +763,27 @@ export function evaluateLongConditions(
 ): LongChecks {
   const flowAnalysis = analyzeFlow('long', micro || null);
   const liqAnalysis = analyzeLiquidation('long', liq || null);
+  const entry15m = evaluate15mLongEntry(ind15m);
+  const setup1h = evaluate1hLongSetup(ind1h);
+
+  // Determine context for volume evaluation
+  const context = determineEntryContext(ind15m, ind1h, 'long');
+  const volumeEval = evaluateVolume(ind15m.volRatio, context);
+
+  // MACD with dead zone
+  const macdEval = evaluateMACDMomentum('long', ind15m.histogram, ind15m.macd);
+
+  // BTC alignment with setup strength context
+  const btcEval = evaluateBTCAlignment('long', btcTrend, 0, setup1h.quality);
+
   return {
-    trend1d: ind1d ? ind1d.bias !== 'bearish' : undefined, // Daily not bearish (NEW)
-    trend4h: ind4h.bias === 'bullish',
-    setup1h: ind1h.bias === 'bullish',
-    entry15m: ind15m.rsi < 45 && ind15m.rsi > 20, // Oversold zone 20-45 (was <35)
-    volume: ind15m.volRatio > 1.3,
-    btcAlign: btcTrend === 'bull' || (btcTrend === 'neut' && ind4h.bias === 'bullish'), // Stricter BTC alignment
-    macdMomentum: ind15m.histogram !== undefined && ind15m.histogram > 0, // Replaces rsiExtreme
+    trend1d: ind1d ? ind1d.trend !== 'bearish' : undefined,
+    trend4h: ind4h.trend === 'bullish',
+    setup1h: setup1h.pass,
+    entry15m: entry15m.pass,
+    volume: volumeEval.pass,
+    btcAlign: btcEval.pass,
+    macdMomentum: macdEval.pass,
     flowConfirm: flowAnalysis.flowConfirmPass,
     liqBias: liqAnalysis.aligned,
   };
@@ -342,14 +803,27 @@ export function evaluateShortConditions(
 ): ShortChecks {
   const flowAnalysis = analyzeFlow('short', micro || null);
   const liqAnalysis = analyzeLiquidation('short', liq || null);
+  const entry15m = evaluate15mShortEntry(ind15m);
+  const setup1h = evaluate1hShortSetup(ind1h);
+
+  // Determine context for volume evaluation
+  const context = determineEntryContext(ind15m, ind1h, 'short');
+  const volumeEval = evaluateVolume(ind15m.volRatio, context);
+
+  // MACD with dead zone
+  const macdEval = evaluateMACDMomentum('short', ind15m.histogram, ind15m.macd);
+
+  // BTC alignment with setup strength context
+  const btcEval = evaluateBTCAlignment('short', btcTrend, 0, setup1h.quality);
+
   return {
-    trend1d: ind1d ? ind1d.bias !== 'bullish' : undefined, // Daily not bullish (NEW)
-    trend4h: ind4h.bias === 'bearish',
-    setup1h: ind1h.bias === 'bearish',
-    entry15m: ind15m.rsi > 55 && ind15m.rsi < 80, // Overbought zone 55-80 (was >65)
-    volume: ind15m.volRatio > 1.3,
-    btcAlign: btcTrend === 'bear' || (btcTrend === 'neut' && ind4h.bias === 'bearish'), // Stricter BTC alignment
-    macdMomentum: ind15m.histogram !== undefined && ind15m.histogram < 0, // Replaces rsiExtreme
+    trend1d: ind1d ? ind1d.trend !== 'bullish' : undefined,
+    trend4h: ind4h.trend === 'bearish',
+    setup1h: setup1h.pass,
+    entry15m: entry15m.pass,
+    volume: volumeEval.pass,
+    btcAlign: btcEval.pass,
+    macdMomentum: macdEval.pass,
     flowConfirm: flowAnalysis.flowConfirmPass,
     liqBias: liqAnalysis.aligned,
   };
@@ -397,8 +871,11 @@ export function getMissingConditions(
   }
   if (!checks.trend4h) missing.push('4H trend');
   if (!checks.setup1h) missing.push('1H setup');
-  if (!checks.entry15m)
-    missing.push(direction === 'long' ? '15m RSI oversold (20-45)' : '15m RSI overbought (55-80)');
+  if (!checks.entry15m) {
+    missing.push(direction === 'long'
+      ? '15m entry (need RSI+BB+MACD confluence)'
+      : '15m entry (need RSI+BB+MACD confluence)');
+  }
   if (!checks.volume) missing.push('volume confirmation');
   if (!checks.btcAlign) missing.push('BTC alignment');
   if (!checks.macdMomentum)
@@ -433,6 +910,92 @@ export function detectSpike(ind5m: Indicators): {
 }
 
 /**
+ * Format EMA info for checklist display
+ */
+function formatEMAInfo(ind: Indicators): string {
+  const pricePos = ind.priceVsEma20 >= 0 ? '↑' : '↓';
+  const alignment = ind.emaAlignment === 'bullish' ? '🟢' :
+                    ind.emaAlignment === 'bearish' ? '🔴' : '🟡';
+  const slopeArrow = ind.ema20Slope > 0.1 ? '↗' :
+                     ind.ema20Slope < -0.1 ? '↘' : '→';
+  return `${ind.trend} ${alignment} EMA${pricePos}${ind.priceVsEma20.toFixed(1)}% ${slopeArrow}`;
+}
+
+/**
+ * Format 1H setup value with multi-signal info
+ */
+function format1hSetupValue(direction: 'long' | 'short', ind1h: Indicators): string {
+  const setup = direction === 'long'
+    ? evaluate1hLongSetup(ind1h)
+    : evaluate1hShortSetup(ind1h);
+
+  // Show quality and key signal
+  const topSignal = setup.signals[0] || '';
+  const qualityIcon = setup.quality === 'strong' ? '★' :
+                      setup.quality === 'moderate' ? '✓' : '';
+
+  return `${setup.score}/10 ${setup.quality} ${qualityIcon} ${topSignal}`;
+}
+
+/**
+ * Format 15m entry value with multi-signal info
+ */
+function formatEntry15mValue(direction: 'long' | 'short', ind15m: Indicators): string {
+  const entry = direction === 'long'
+    ? evaluate15mLongEntry(ind15m)
+    : evaluate15mShortEntry(ind15m);
+
+  // Show score and top signals
+  const topSignals = entry.signals.slice(0, 2).join(', ');
+  const scoreDisplay = `${entry.score.toFixed(1)}/3`;
+
+  if (entry.pass) {
+    return `✓ ${scoreDisplay} (${topSignals})`;
+  } else {
+    return `${scoreDisplay} - ${topSignals || 'weak signals'}`;
+  }
+}
+
+/**
+ * Format volume value with context
+ */
+function formatVolumeValue(
+  direction: 'long' | 'short',
+  ind15m: Indicators,
+  ind1h: Indicators
+): string {
+  const context = determineEntryContext(ind15m, ind1h, direction);
+  const volEval = evaluateVolume(ind15m.volRatio, context);
+  return volEval.description;
+}
+
+/**
+ * Format MACD momentum with dead zone awareness
+ */
+function formatMACDValue(direction: 'long' | 'short', ind15m: Indicators): string {
+  const macdEval = evaluateMACDMomentum(direction, ind15m.histogram, ind15m.macd);
+  return macdEval.description;
+}
+
+/**
+ * Format BTC alignment value
+ */
+function formatBTCValue(
+  direction: 'long' | 'short',
+  btcTrend: string,
+  btcChange: number,
+  setupQuality: 'strong' | 'moderate' | 'weak'
+): string {
+  const btcEval = evaluateBTCAlignment(
+    direction,
+    btcTrend as 'bull' | 'bear' | 'neut',
+    btcChange,
+    setupQuality
+  );
+  return btcEval.description;
+}
+
+/**
  * Convert checks to checklist items with values
  */
 export function formatChecklist(
@@ -450,40 +1013,46 @@ export function formatChecklist(
   const flowAnalysis = micro ? analyzeFlow(direction, micro) : null;
   const liqAnalysis = liq ? analyzeLiquidation(direction, liq) : null;
 
+  // Format 4H trend with EMA info
+  const trend4hValue = formatEMAInfo(ind4h);
+
   const checklist: TradingRecommendation['checklist'] = {
     trend4h: {
       pass: checks.trend4h,
-      value: ind4h.bias + (ind4h.trendStrength === 'strong' ? ' ★' : checks.trend4h ? ' ✓' : ''),
+      value: trend4hValue + (ind4h.trendStrength === 'strong' ? ' ★' : ''),
     },
     setup1h: {
       pass: checks.setup1h,
-      value: ind1h.bias + (checks.setup1h ? ' ✓' : ''),
+      value: format1hSetupValue(direction, ind1h),
     },
     entry15m: {
       pass: checks.entry15m,
-      value: `RSI ${ind15m.rsi.toFixed(0)} (need ${direction === 'long' ? '20-45' : '55-80'})`,
+      value: formatEntry15mValue(direction, ind15m),
     },
     volume: {
       pass: checks.volume,
-      value: `${ind15m.volRatio.toFixed(2)}x`,
+      value: formatVolumeValue(direction, ind15m, ind1h),
     },
     btcAlign: {
       pass: checks.btcAlign,
-      value: `${btcTrend} ${btcChange.toFixed(1)}%`,
+      value: formatBTCValue(
+        direction,
+        btcTrend,
+        btcChange,
+        (direction === 'long' ? evaluate1hLongSetup(ind1h) : evaluate1hShortSetup(ind1h)).quality
+      ),
     },
     macdMomentum: {
       pass: checks.macdMomentum,
-      value: ind15m.histogram !== undefined
-        ? `Hist ${ind15m.histogram > 0 ? '+' : ''}${ind15m.histogram.toFixed(5)}`
-        : 'N/A',
+      value: formatMACDValue(direction, ind15m),
     },
   };
 
-  // Add daily trend if available
+  // Add daily trend if available with EMA info
   if (ind1d && checks.trend1d !== undefined) {
     checklist.trend1d = {
       pass: checks.trend1d,
-      value: ind1d.bias + (ind1d.trendStrength === 'strong' ? ' ★' : checks.trend1d ? ' ✓' : ''),
+      value: formatEMAInfo(ind1d) + (ind1d.trendStrength === 'strong' ? ' ★' : ''),
     };
   }
 
@@ -498,9 +1067,14 @@ export function formatChecklist(
   }
 
   // Add liquidation bias to checklist when liquidation data available
+  // LOGIC: short_squeeze = bullish (favors LONG), long_squeeze = bearish (favors SHORT)
   if (liqAnalysis) {
-    const biasStr = liqAnalysis.bias === 'short_squeeze' ? '↑ Short sq.' :
-                    liqAnalysis.bias === 'long_squeeze' ? '↓ Long sq.' : '— Neutral';
+    // Show direction-aware label
+    const biasStr = liqAnalysis.bias === 'short_squeeze'
+      ? (direction === 'long' ? '↑ Short sq.' : '↑ Short sq. ⚠️')  // Bullish - good for long, bad for short
+      : liqAnalysis.bias === 'long_squeeze'
+      ? (direction === 'short' ? '↓ Long sq.' : '↓ Long sq. ⚠️')   // Bearish - good for short, bad for long
+      : '— Neutral';
     const fundingStr = liqAnalysis.fundingRate !== null
       ? ` FR: ${(liqAnalysis.fundingRate * 100).toFixed(3)}%`
       : '';
@@ -525,7 +1099,12 @@ interface SignalWeight {
 
 /**
  * Calculate weighted strength score for a direction (0-100)
- * Considers both binary pass/fail AND how strongly the condition is met
+ * NOW uses proper EMA-based trend analysis instead of mean-reversion signals
+ *
+ * Professional trading logic:
+ * - TREND is determined by price vs EMAs and EMA alignment (NOT RSI/BB)
+ * - RSI/BB are for ENTRY TIMING only
+ * - EMA slopes show momentum
  */
 export function calculateDirectionStrength(
   direction: 'long' | 'short',
@@ -543,54 +1122,112 @@ export function calculateDirectionStrength(
   const reasons: string[] = [];
   const warnings: string[] = [];
 
-  // 1. Daily trend (weight: 20) - Primary filter
+  // === 1. DAILY TREND (weight: 22) - Primary filter using EMA-based trend ===
   if (ind1d) {
-    let dailyValue = 0.5; // neutral
+    let dailyValue = 0.5;
+
+    // Use the new EMA-based trend, not the old mean-reversion bias
+    const dailyTrend = ind1d.trend; // Now properly determined by EMAs
+    const dailyScore = ind1d.trendScore; // -100 to +100
+
     if (direction === 'long') {
-      if (ind1d.bias === 'bullish') dailyValue = 1.0;
-      else if (ind1d.bias === 'neutral') dailyValue = 0.6;
-      else dailyValue = 0.2; // bearish - warning but not zero
+      if (dailyTrend === 'bullish') {
+        // Scale based on trend strength
+        dailyValue = 0.7 + (dailyScore / 100) * 0.3; // 0.7 to 1.0
+      } else if (dailyTrend === 'neutral') {
+        dailyValue = 0.5;
+      } else {
+        // Bearish - serious warning for longs
+        dailyValue = 0.15 + ((100 + dailyScore) / 200) * 0.2; // 0.15 to 0.35
+      }
     } else {
-      if (ind1d.bias === 'bearish') dailyValue = 1.0;
-      else if (ind1d.bias === 'neutral') dailyValue = 0.6;
-      else dailyValue = 0.2; // bullish
+      if (dailyTrend === 'bearish') {
+        dailyValue = 0.7 + (Math.abs(dailyScore) / 100) * 0.3;
+      } else if (dailyTrend === 'neutral') {
+        dailyValue = 0.5;
+      } else {
+        dailyValue = 0.15 + ((100 - dailyScore) / 200) * 0.2;
+      }
     }
-    // Boost for strong trend
-    if (ind1d.trendStrength === 'strong' && dailyValue >= 0.6) dailyValue = Math.min(1, dailyValue + 0.1);
-    signals.push({ name: '1D Trend', weight: 20, value: dailyValue });
-    if (dailyValue >= 0.8) reasons.push(`Daily ${ind1d.bias}${ind1d.trendStrength === 'strong' ? ' (strong)' : ''}`);
-    if (dailyValue < 0.4) warnings.push(`⚠️ Counter-trend: Daily is ${ind1d.bias}`);
+
+    // Bonus for perfect EMA alignment
+    if (ind1d.emaAlignment === (direction === 'long' ? 'bullish' : 'bearish')) {
+      dailyValue = Math.min(1, dailyValue + 0.1);
+    }
+
+    signals.push({ name: '1D Trend', weight: 22, value: dailyValue });
+
+    if (dailyValue >= 0.75) {
+      reasons.push(`Daily ${dailyTrend} (${dailyScore > 0 ? '+' : ''}${dailyScore})`);
+    }
+    if (dailyValue < 0.35) {
+      warnings.push(`⚠️ COUNTER-TREND: Daily is ${dailyTrend} (score ${dailyScore})`);
+    }
   }
 
-  // 2. 4H trend (weight: 18) - Main trend
+  // === 2. 4H TREND (weight: 20) - Main trend using EMA structure ===
   let htfValue = 0.5;
-  if (direction === 'long') {
-    if (ind4h.bias === 'bullish') htfValue = 1.0;
-    else if (ind4h.bias === 'neutral') htfValue = 0.5;
-    else htfValue = 0.2;
-  } else {
-    if (ind4h.bias === 'bearish') htfValue = 1.0;
-    else if (ind4h.bias === 'neutral') htfValue = 0.5;
-    else htfValue = 0.2;
-  }
-  if (ind4h.trendStrength === 'strong' && htfValue >= 0.5) htfValue = Math.min(1, htfValue + 0.15);
-  signals.push({ name: '4H Trend', weight: 18, value: htfValue });
-  if (htfValue >= 0.8) reasons.push(`4H ${ind4h.bias}${ind4h.trendStrength === 'strong' ? ' (strong)' : ''}`);
-  if (htfValue < 0.4) warnings.push(`⚠️ 4H opposes: ${ind4h.bias}`);
+  const htfTrend = ind4h.trend;
+  const htfScore = ind4h.trendScore;
 
-  // 3. 1H setup (weight: 15) - Setup confirmation
-  let setupValue = 0.5;
   if (direction === 'long') {
-    if (ind1h.bias === 'bullish') setupValue = 1.0;
-    else if (ind1h.bias === 'neutral') setupValue = 0.5;
-    else setupValue = 0.3;
+    if (htfTrend === 'bullish') {
+      htfValue = 0.7 + (htfScore / 100) * 0.3;
+    } else if (htfTrend === 'neutral') {
+      htfValue = 0.45;
+    } else {
+      // 4H bearish - strong warning
+      htfValue = 0.1 + ((100 + htfScore) / 200) * 0.25;
+    }
   } else {
-    if (ind1h.bias === 'bearish') setupValue = 1.0;
-    else if (ind1h.bias === 'neutral') setupValue = 0.5;
-    else setupValue = 0.3;
+    if (htfTrend === 'bearish') {
+      htfValue = 0.7 + (Math.abs(htfScore) / 100) * 0.3;
+    } else if (htfTrend === 'neutral') {
+      htfValue = 0.45;
+    } else {
+      htfValue = 0.1 + ((100 - htfScore) / 200) * 0.25;
+    }
   }
+
+  // EMA alignment bonus
+  if (ind4h.emaAlignment === (direction === 'long' ? 'bullish' : 'bearish')) {
+    htfValue = Math.min(1, htfValue + 0.1);
+  }
+
+  // EMA slope momentum bonus/penalty
+  const slopeAligned = direction === 'long'
+    ? ind4h.ema20Slope > 0.05
+    : ind4h.ema20Slope < -0.05;
+  if (slopeAligned) {
+    htfValue = Math.min(1, htfValue + 0.05);
+  }
+
+  signals.push({ name: '4H Trend', weight: 20, value: htfValue });
+
+  if (htfValue >= 0.75) {
+    const alignStr = ind4h.emaAlignment === (direction === 'long' ? 'bullish' : 'bearish') ? ' ✓EMA' : '';
+    reasons.push(`4H ${htfTrend}${alignStr}`);
+  }
+  if (htfValue < 0.35) {
+    warnings.push(`⚠️ 4H opposes: ${htfTrend} (${htfScore})`);
+  }
+
+  // === 3. 1H SETUP (weight: 15) - Setup confirmation ===
+  let setupValue = 0.5;
+  const setupTrend = ind1h.trend;
+
+  if (direction === 'long') {
+    if (setupTrend === 'bullish') setupValue = 0.9;
+    else if (setupTrend === 'neutral') setupValue = 0.5;
+    else setupValue = 0.25;
+  } else {
+    if (setupTrend === 'bearish') setupValue = 0.9;
+    else if (setupTrend === 'neutral') setupValue = 0.5;
+    else setupValue = 0.25;
+  }
+
   signals.push({ name: '1H Setup', weight: 15, value: setupValue });
-  if (setupValue >= 0.8) reasons.push(`1H confirms ${ind1h.bias}`);
+  if (setupValue >= 0.8) reasons.push(`1H confirms ${setupTrend}`);
 
   // 4. 15m RSI entry (weight: 15) - Entry timing
   let rsiValue = 0;
@@ -742,6 +1379,88 @@ export function detectMomentum(
 }
 
 /**
+ * Apply knife gate to trading action
+ * Returns modified action, warnings, size multiplier, and flip suggestion
+ */
+export function applyKnifeGate(
+  action: 'LONG' | 'SHORT' | 'WAIT' | 'SPIKE ↑' | 'SPIKE ↓',
+  knife: KnifeAnalysis | null
+): {
+  gatedAction: 'LONG' | 'SHORT' | 'WAIT' | 'SPIKE ↑' | 'SPIKE ↓';
+  warnings: string[];
+  sizeMultiplier: number;
+  flipSuggestion: boolean;
+} {
+  if (!knife || !knife.isKnife) {
+    return { gatedAction: action, warnings: [], sizeMultiplier: 1.0, flipSuggestion: false };
+  }
+
+  // Determine if this is a counter-trend action
+  const isCounterTrend =
+    (action === 'LONG' && knife.direction === 'falling') ||
+    (action === 'SHORT' && knife.direction === 'rising') ||
+    (action === 'SPIKE ↑' && knife.direction === 'falling') ||
+    (action === 'SPIKE ↓' && knife.direction === 'rising');
+
+  if (!isCounterTrend) {
+    // With-trend during capitulation = late entry warning, reduced size
+    if (knife.phase === 'capitulation') {
+      return {
+        gatedAction: action,
+        warnings: ['Late trend entry - reduced size'],
+        sizeMultiplier: 0.5,
+        flipSuggestion: false,
+      };
+    }
+    return { gatedAction: action, warnings: [], sizeMultiplier: 1.0, flipSuggestion: false };
+  }
+
+  // Counter-trend gating by phase
+  switch (knife.phase) {
+    case 'impulse':
+    case 'capitulation':
+      return {
+        gatedAction: 'WAIT',
+        warnings: [`🔪 ${knife.direction} knife: ${knife.phase} - BLOCKED`],
+        sizeMultiplier: 0,
+        flipSuggestion: true,
+      };
+
+    case 'stabilizing':
+      if (!knife.signals.reclaimed && !knife.signals.microStructureShift) {
+        return {
+          gatedAction: 'WAIT',
+          warnings: ['🔪 Stabilizing, no confirmation yet'],
+          sizeMultiplier: 0,
+          flipSuggestion: false,
+        };
+      }
+      // Early confirmation - reduced size
+      return {
+        gatedAction: action,
+        warnings: ['🔪 Early confirmation, reduced size'],
+        sizeMultiplier: 0.4,
+        flipSuggestion: false,
+      };
+
+    case 'confirming':
+      const mult = knife.signals.retestQuality === 'good' ? 0.8 : 0.5;
+      return {
+        gatedAction: action,
+        warnings: mult < 0.8 ? ['🔪 Awaiting quality retest'] : [],
+        sizeMultiplier: mult,
+        flipSuggestion: false,
+      };
+
+    case 'safe':
+      return { gatedAction: action, warnings: [], sizeMultiplier: 1.0, flipSuggestion: false };
+
+    default:
+      return { gatedAction: action, warnings: [], sizeMultiplier: 1.0, flipSuggestion: false };
+  }
+}
+
+/**
  * Generate trading recommendation
  */
 export function generateRecommendation(
@@ -754,7 +1473,9 @@ export function generateRecommendation(
   micro?: MicrostructureInput | null,
   liq?: LiquidationInput | null,
   tf1d?: TimeframeData | null,
-  currentPrice?: number
+  currentPrice?: number,
+  exchange?: string,
+  pair?: string
 ): TradingRecommendation | null {
   const ind4h = tf4h.indicators;
   const ind1h = tf1h.indicators;
@@ -804,7 +1525,7 @@ export function generateRecommendation(
   // Build DirectionRecommendation for LONG
   const longRec: DirectionRecommendation = {
     strength: longStrengthResult.strength,
-    confidence: Math.min(95, Math.max(5, longStrengthResult.strength + longFlowAnalysis.adjustments.total + longLiqAnalysis.adjustments.total)),
+    confidence: Math.round(Math.min(95, Math.max(5, longStrengthResult.strength + longFlowAnalysis.adjustments.total + longLiqAnalysis.adjustments.total))),
     grade: getGradeFromStrength(longStrengthResult.strength),
     reasons: longStrengthResult.reasons,
     warnings: [...longStrengthResult.warnings],
@@ -816,7 +1537,7 @@ export function generateRecommendation(
   // Build DirectionRecommendation for SHORT
   const shortRec: DirectionRecommendation = {
     strength: shortStrengthResult.strength,
-    confidence: Math.min(95, Math.max(5, shortStrengthResult.strength + shortFlowAnalysis.adjustments.total + shortLiqAnalysis.adjustments.total)),
+    confidence: Math.round(Math.min(95, Math.max(5, shortStrengthResult.strength + shortFlowAnalysis.adjustments.total + shortLiqAnalysis.adjustments.total))),
     grade: getGradeFromStrength(shortStrengthResult.strength),
     reasons: shortStrengthResult.reasons,
     warnings: [...shortStrengthResult.warnings],
@@ -890,8 +1611,53 @@ export function generateRecommendation(
     }
   }
 
+  // Knife detection and gating
+  let knifeAnalysis: KnifeAnalysis | null = null;
+  let knifeSizeMultiplier = 1.0;
+  let knifeFlipSuggestion = false;
+
+  if (KNIFE_GATING_ENABLED && tf15m.ohlc && tf5m.ohlc && tf1h.ohlc && tf4h.ohlc) {
+    knifeAnalysis = detectKnife(
+      tf15m.ohlc,
+      tf5m.ohlc,
+      tf1h.ohlc,
+      tf4h.ohlc,
+      exchange || 'kraken',
+      pair || 'XRPEUR'
+    );
+
+    if (knifeAnalysis.isKnife) {
+      const knifeGateResult = applyKnifeGate(action, knifeAnalysis);
+      action = knifeGateResult.gatedAction;
+      knifeSizeMultiplier = knifeGateResult.sizeMultiplier;
+      knifeFlipSuggestion = knifeGateResult.flipSuggestion;
+
+      // Add knife warnings to appropriate direction
+      if (knifeAnalysis.direction === 'falling') {
+        longRec.warnings.push(...knifeGateResult.warnings);
+      } else {
+        shortRec.warnings.push(...knifeGateResult.warnings);
+      }
+
+      // Update reason if action was blocked
+      if (knifeGateResult.gatedAction === 'WAIT' && action !== 'WAIT') {
+        reason = `🔪 ${knifeAnalysis.direction} knife (${knifeAnalysis.phase}): ${knifeAnalysis.reasons.join('. ')}`;
+      }
+    }
+  }
+
   // Collect all warnings
   const allWarnings: string[] = [];
+  if (knifeAnalysis?.isKnife) {
+    allWarnings.push(`🔪 ${knifeAnalysis.direction} knife: ${knifeAnalysis.phase}`);
+    if (knifeAnalysis.waitFor.length > 0) {
+      allWarnings.push(`Wait for: ${knifeAnalysis.waitFor.join(', ')}`);
+    }
+    if (knifeFlipSuggestion) {
+      const flipDir = knifeAnalysis.direction === 'falling' ? 'SHORT' : 'LONG';
+      allWarnings.push(`💡 Consider ${flipDir} instead (trend-follow)`);
+    }
+  }
   if (momentum) {
     allWarnings.push(`🎯 Momentum ${momentum.direction}: ${momentum.reason}`);
   }
@@ -920,13 +1686,13 @@ export function generateRecommendation(
     }
   }
 
-  // Cap confidence
-  confidence = Math.min(Math.max(confidence, 5), 95);
+  // Cap confidence and round to integer
+  confidence = Math.round(Math.min(Math.max(confidence, 5), 95));
 
   return {
     action,
     confidence,
-    baseConfidence,
+    baseConfidence: Math.round(baseConfidence),
     reason,
     longScore: longPassedFull,
     shortScore: shortPassedFull,
@@ -953,6 +1719,20 @@ export function generateRecommendation(
       nearestTarget: liqAnalysis.nearestTarget,
       aligned: liqAnalysis.aligned,
       adjustments: liqAnalysis.adjustments,
+    } : undefined,
+    knifeStatus: knifeAnalysis?.isKnife ? {
+      isKnife: true,
+      direction: knifeAnalysis.direction,
+      phase: knifeAnalysis.phase,
+      brokenLevel: knifeAnalysis.brokenLevel,
+      knifeScore: knifeAnalysis.knifeScore,
+      reversalReadiness: knifeAnalysis.reversalReadiness,
+      gateAction: knifeAnalysis.gateAction,
+      sizeMultiplier: knifeSizeMultiplier,
+      flipSuggestion: knifeFlipSuggestion,
+      signals: knifeAnalysis.signals,
+      waitFor: knifeAnalysis.waitFor,
+      reasons: knifeAnalysis.reasons,
     } : undefined,
   };
 }

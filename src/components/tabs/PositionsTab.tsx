@@ -145,17 +145,18 @@ export function PositionsTab({ testMode, currentPrice, onPositionChange }: Posit
 
       const ind = data.indicators;
       return {
-        bias: ind.signal || 'neutral',
+        bias: ind.bias || 'neutral',
         rsi: ind.rsi || 50,
-        macd: ind.macd?.value || 0,
-        macdSignal: ind.macd?.signal || 0,
-        bbPosition: ind.bollinger?.position || 50,
-        bbUpper: ind.bollinger?.upper || 0,
-        bbLower: ind.bollinger?.lower || 0,
+        macd: ind.macd || 0,
+        macdSignal: ind.macdSignal || 0,
+        bbPosition: (ind.bbPos || 0.5) * 100,
+        bbUpper: ind.bbUpper || 0,
+        bbLower: ind.bbLower || 0,
         atr: ind.atr || 0,
         atrPercent: currentPrice > 0 ? ((ind.atr || 0) / currentPrice) * 100 : 0,
-        volumeRatio: ind.volumeRatio || 1,
+        volumeRatio: ind.volRatio || 1,
         score: ind.score || 0,
+        trendStrength: ind.trendStrength || 'weak',
       };
     };
 
@@ -178,6 +179,7 @@ export function PositionsTab({ testMode, currentPrice, onPositionChange }: Posit
         '15m': buildTimeframeSnapshot(15),
         '1h': buildTimeframeSnapshot(60),
         '4h': buildTimeframeSnapshot(240),
+        '1d': buildTimeframeSnapshot(1440),
       },
       recommendation: null,
       fearGreed: fearGreed || undefined,
@@ -424,10 +426,13 @@ export function PositionsTab({ testMode, currentPrice, onPositionChange }: Posit
             health={health || {
               riskLevel: 'low',
               liquidationDistance: 100,
+              liquidationStatus: 'safe' as const,
               marginLevel: 1000,
+              marginStatus: 'healthy' as const,
               hoursOpen,
-              isOverdue: hoursOpen > 72,
-              healthScore: 90,
+              timeStatus: hoursOpen > 72 ? 'overdue' as const : null,
+              estimatedRolloverFee: 0,
+              riskFactors: [],
             }}
             marketSnapshot={marketSnapshot}
           />

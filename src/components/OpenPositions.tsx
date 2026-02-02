@@ -27,9 +27,11 @@ interface Position {
 interface OpenPositionsProps {
   currentPrice: number;
   onClose?: () => void;
+  defaultCollapsed?: boolean;
 }
 
-export function OpenPositions({ currentPrice, onClose }: OpenPositionsProps) {
+export function OpenPositions({ currentPrice, onClose, defaultCollapsed = false }: OpenPositionsProps) {
+  const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
   const [analyzingPosition, setAnalyzingPosition] = useState<Position | null>(null);
   const {
     openPositions: positions,
@@ -110,17 +112,18 @@ export function OpenPositions({ currentPrice, onClose }: OpenPositionsProps) {
 
       const ind = data.indicators;
       return {
-        bias: ind.signal || 'neutral',
+        bias: ind.bias || 'neutral',
         rsi: ind.rsi || 50,
-        macd: ind.macd?.value || 0,
-        macdSignal: ind.macd?.signal || 0,
-        bbPosition: ind.bollinger?.position || 50,
-        bbUpper: ind.bollinger?.upper || 0,
-        bbLower: ind.bollinger?.lower || 0,
+        macd: ind.macd || 0,
+        macdSignal: ind.macdSignal || 0,
+        bbPosition: (ind.bbPos || 0.5) * 100,
+        bbUpper: ind.bbUpper || 0,
+        bbLower: ind.bbLower || 0,
         atr: ind.atr || 0,
         atrPercent: currentPrice > 0 ? ((ind.atr || 0) / currentPrice) * 100 : 0,
-        volumeRatio: ind.volumeRatio || 1,
+        volumeRatio: ind.volRatio || 1,
         score: ind.score || 0,
+        trendStrength: ind.trendStrength || 'weak',
       };
     };
 
@@ -143,6 +146,7 @@ export function OpenPositions({ currentPrice, onClose }: OpenPositionsProps) {
         '15m': buildTimeframeSnapshot(15),
         '1h': buildTimeframeSnapshot(60),
         '4h': buildTimeframeSnapshot(240),
+        '1d': buildTimeframeSnapshot(1440),
       },
       recommendation: null,
       fearGreed: fearGreed || undefined,
@@ -193,8 +197,12 @@ export function OpenPositions({ currentPrice, onClose }: OpenPositionsProps) {
   }
 
   return (
-    <div className="card p-4 border-2 border-blue-500/60 bg-blue-500/10">
-      <div className="flex items-center justify-between mb-3">
+    <div className="card border-2 border-blue-500/60 bg-blue-500/10">
+      {/* Header - Clickable for collapse */}
+      <div
+        className={`flex items-center justify-between p-4 cursor-pointer hover:bg-white/5 transition-colors ${!isCollapsed ? 'border-b border-white/10' : ''}`}
+        onClick={() => setIsCollapsed(!isCollapsed)}
+      >
         <h3 className="text-xs uppercase tracking-wider flex items-center gap-2">
           <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
           <span className="px-2 py-0.5 rounded bg-red-500/30 text-red-300 text-xs font-bold">LIVE</span>
@@ -209,9 +217,18 @@ export function OpenPositions({ currentPrice, onClose }: OpenPositionsProps) {
             }
             position="right"
           />
+          {/* Collapse indicator */}
+          <svg
+            className={`w-4 h-4 text-tertiary transition-transform ${isCollapsed ? '' : 'rotate-180'}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
         </h3>
         <button
-          onClick={handleRefresh}
+          onClick={(e) => { e.stopPropagation(); handleRefresh(); }}
           className="text-xs text-secondary hover:text-primary transition-colors"
           title="Refresh positions"
         >
@@ -219,7 +236,10 @@ export function OpenPositions({ currentPrice, onClose }: OpenPositionsProps) {
         </button>
       </div>
 
-      {loading && (
+      {/* Collapsible Content */}
+      {!isCollapsed && (
+        <div className="p-4 pt-3">
+          {loading && (
         <div className="text-center py-4 text-secondary">
           Loading positions...
         </div>
@@ -253,6 +273,8 @@ export function OpenPositions({ currentPrice, onClose }: OpenPositionsProps) {
 
           {/* Summary */}
           <PositionsSummary positions={positionCardData} />
+        </div>
+      )}
         </div>
       )}
 

@@ -318,6 +318,18 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
       fearGreed: fearGreed || undefined,
       openPosition: openPositionData,
       tradingSession,
+      knifeStatus: recommendation?.knifeStatus ? {
+        isKnife: recommendation.knifeStatus.isKnife,
+        direction: recommendation.knifeStatus.direction,
+        phase: recommendation.knifeStatus.phase,
+        brokenLevel: recommendation.knifeStatus.brokenLevel,
+        knifeScore: recommendation.knifeStatus.knifeScore,
+        reversalReadiness: recommendation.knifeStatus.reversalReadiness,
+        gateAction: recommendation.knifeStatus.gateAction,
+        sizeMultiplier: recommendation.knifeStatus.sizeMultiplier,
+        flipSuggestion: recommendation.knifeStatus.flipSuggestion,
+        waitFor: recommendation.knifeStatus.waitFor,
+      } : undefined,
     };
   }, [price, openPrice, high24h, low24h, volume24h, btcTrend, btcChange, tfData, recommendation, microData, liqData, testMode, simulatedPositions, openPositions, fearGreed]);
 

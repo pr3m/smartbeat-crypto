@@ -45,6 +45,12 @@ export function useKrakenWebSocket(
   const maxReconnectAttempts = 5;
   const subscriptionsRef = useRef<Set<string>>(new Set());
 
+  // Throttle state updates to prevent excessive re-renders
+  const lastTickerUpdateRef = useRef(0);
+  const pendingTickerUpdatesRef = useRef<Record<string, TickerData>>({});
+  const tickerThrottleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const TICKER_THROTTLE_MS = 100; // Max 10 updates per second
+
   // Store pairs and intervals in refs to avoid dependency issues
   const pairsRef = useRef(pairs);
   const intervalsRef = useRef(ohlcIntervals);
@@ -185,7 +191,7 @@ export function useKrakenWebSocket(
               });
             }
 
-            // Handle trade updates for real-time price
+            // Handle trade updates for real-time price - throttled to prevent excessive re-renders
             if (channelName === 'trade' && Array.isArray(payload)) {
               // Trade format: [[price, volume, time, side, orderType, misc], ...]
               const lastTrade = payload[payload.length - 1];
@@ -193,16 +199,52 @@ export function useKrakenWebSocket(
                 const tradePrice = parseFloat(lastTrade[0]);
                 const normalizedPair = pair.replace('/', '');
 
-                setTickers((prev) => {
-                  const existing = prev[normalizedPair];
-                  if (existing) {
-                    return {
-                      ...prev,
-                      [normalizedPair]: { ...existing, price: tradePrice },
-                    };
-                  }
-                  return prev;
-                });
+                // Store pending update
+                pendingTickerUpdatesRef.current[normalizedPair] = {
+                  ...pendingTickerUpdatesRef.current[normalizedPair],
+                  price: tradePrice,
+                };
+
+                // Throttle state updates
+                const now = Date.now();
+                const timeSinceLastUpdate = now - lastTickerUpdateRef.current;
+
+                if (timeSinceLastUpdate >= TICKER_THROTTLE_MS) {
+                  // Enough time passed, apply pending updates immediately
+                  lastTickerUpdateRef.current = now;
+                  const updates = { ...pendingTickerUpdatesRef.current };
+                  pendingTickerUpdatesRef.current = {};
+
+                  setTickers((prev) => {
+                    const next = { ...prev };
+                    for (const [pairKey, priceUpdate] of Object.entries(updates)) {
+                      if (next[pairKey]) {
+                        next[pairKey] = { ...next[pairKey], ...priceUpdate };
+                      }
+                    }
+                    return next;
+                  });
+                } else if (!tickerThrottleTimeoutRef.current) {
+                  // Schedule a throttled update
+                  tickerThrottleTimeoutRef.current = setTimeout(() => {
+                    tickerThrottleTimeoutRef.current = null;
+                    lastTickerUpdateRef.current = Date.now();
+                    const updates = { ...pendingTickerUpdatesRef.current };
+                    pendingTickerUpdatesRef.current = {};
+
+                    if (Object.keys(updates).length > 0) {
+                      setTickers((prev) => {
+                        const next = { ...prev };
+                        for (const [pairKey, priceUpdate] of Object.entries(updates)) {
+                          if (next[pairKey]) {
+                            next[pairKey] = { ...next[pairKey], ...priceUpdate };
+                          }
+                        }
+                        return next;
+                      });
+                    }
+                  }, TICKER_THROTTLE_MS - timeSinceLastUpdate);
+                }
               }
             }
           }
@@ -244,6 +286,10 @@ export function useKrakenWebSocket(
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
+    }
+    if (tickerThrottleTimeoutRef.current) {
+      clearTimeout(tickerThrottleTimeoutRef.current);
+      tickerThrottleTimeoutRef.current = null;
     }
     if (wsRef.current) {
       wsRef.current.close();

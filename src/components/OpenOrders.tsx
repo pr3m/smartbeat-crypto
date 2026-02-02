@@ -22,6 +22,7 @@ type OpenOrder = OpenOrderData;
 interface OpenOrdersProps {
   testMode: boolean;
   onEditOrder?: (order: OpenOrder) => void;
+  defaultCollapsed?: boolean;
 }
 
 interface ConfirmCancelState {
@@ -31,7 +32,8 @@ interface ConfirmCancelState {
   cancelAll: boolean;
 }
 
-export function OpenOrders({ testMode, onEditOrder }: OpenOrdersProps) {
+export function OpenOrders({ testMode, onEditOrder, defaultCollapsed = false }: OpenOrdersProps) {
+  const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [cancellingAll, setCancellingAll] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState<ConfirmCancelState>({
@@ -201,9 +203,12 @@ export function OpenOrders({ testMode, onEditOrder }: OpenOrdersProps) {
   };
 
   return (
-    <div className={`card p-4 border-2 ${testMode ? 'border-orange-500/40 bg-orange-500/5' : 'border-blue-500/40 bg-blue-500/5'}`}>
-      {/* Header */}
-      <div className="flex items-center justify-between mb-3">
+    <div className={`card border-2 ${testMode ? 'border-orange-500/40 bg-orange-500/5' : 'border-blue-500/40 bg-blue-500/5'}`}>
+      {/* Header - Clickable for collapse */}
+      <div
+        className={`flex items-center justify-between p-4 cursor-pointer hover:bg-white/5 transition-colors ${!isCollapsed ? 'border-b border-white/10' : ''}`}
+        onClick={() => setIsCollapsed(!isCollapsed)}
+      >
         <h3 className="text-xs uppercase tracking-wider flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${testMode ? 'bg-orange-500' : 'bg-red-500'} animate-pulse`} />
           <span className={`px-2 py-0.5 rounded text-xs font-bold ${testMode ? 'bg-orange-500/30 text-orange-300' : 'bg-red-500/30 text-red-300'}`}>
@@ -213,15 +218,24 @@ export function OpenOrders({ testMode, onEditOrder }: OpenOrdersProps) {
           <span className="px-2 py-0.5 rounded bg-tertiary text-secondary text-xs">
             {orders.length}
           </span>
+          {/* Collapse indicator */}
+          <svg
+            className={`w-4 h-4 text-tertiary transition-transform ${isCollapsed ? '' : 'rotate-180'}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
         </h3>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => refreshOpenOrders(true)}
             className="text-xs text-secondary hover:text-primary transition-colors"
           >
             ↻ Refresh
           </button>
-          {orders.length > 0 && (
+          {orders.length > 0 && !isCollapsed && (
             <Tooltip content="Cancel all open orders" position="left">
               <button
                 onClick={showCancelAllConfirm}
@@ -234,6 +248,10 @@ export function OpenOrders({ testMode, onEditOrder }: OpenOrdersProps) {
           )}
         </div>
       </div>
+
+      {/* Collapsible Content */}
+      {!isCollapsed && (
+        <div className="p-4 pt-3">
 
       {/* Loading */}
       {loading && (
@@ -372,6 +390,9 @@ export function OpenOrders({ testMode, onEditOrder }: OpenOrdersProps) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
         </div>
       )}
 

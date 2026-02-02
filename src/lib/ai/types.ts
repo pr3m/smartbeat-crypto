@@ -119,6 +119,19 @@ export interface MarketSnapshot {
   openPosition?: OpenPositionData;
   // Trading session context
   tradingSession?: TradingSessionData;
+  // Knife detection status (falling/rising knife protection)
+  knifeStatus?: {
+    isKnife: boolean;
+    direction: 'falling' | 'rising' | null;
+    phase: 'none' | 'impulse' | 'capitulation' | 'stabilizing' | 'confirming' | 'safe';
+    brokenLevel: number | null;
+    knifeScore: number;        // 0-100: impulse/capitulation strength
+    reversalReadiness: number; // 0-100: stabilization progress
+    gateAction: 'block' | 'warn' | 'allow';
+    sizeMultiplier: number;
+    flipSuggestion: boolean;
+    waitFor: string[];
+  };
 }
 
 export interface TimeframeSnapshot {

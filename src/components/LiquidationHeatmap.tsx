@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Tooltip, HelpIcon } from '@/components/Tooltip';
 import type { OHLCData } from '@/lib/kraken/types';
 import {
@@ -9,6 +9,19 @@ import {
   type LiquidationZone,
 } from '@/lib/trading/liquidation';
 import type { LiquidationApiResponse } from '@/app/api/liquidation/route';
+
+// Shallow comparison for LiquidationAnalysis to prevent unnecessary parent updates
+function isAnalysisEqual(a: LiquidationAnalysis | null, b: LiquidationAnalysis | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.bias === b.bias &&
+    a.biasStrength === b.biasStrength &&
+    a.nearestShortLiquidation === b.nearestShortLiquidation &&
+    a.nearestLongLiquidation === b.nearestLongLiquidation &&
+    a.fundingRate === b.fundingRate
+  );
+}
 
 interface LiquidationHeatmapProps {
   candles: OHLCData[];
@@ -63,9 +76,15 @@ export function LiquidationHeatmap({ candles, currentPrice, onAnalysisChange, de
     );
   }, [candles, currentPrice, krakenData?.xrp.openInterest, krakenData?.xrp.fundingRate]);
 
-  // Notify parent
+  // Track previous analysis to prevent unnecessary parent updates
+  const prevAnalysisRef = useRef<LiquidationAnalysis | null>(null);
+
+  // Notify parent only when analysis meaningfully changes
   useEffect(() => {
-    onAnalysisChange?.(analysis);
+    if (!isAnalysisEqual(analysis, prevAnalysisRef.current)) {
+      prevAnalysisRef.current = analysis;
+      onAnalysisChange?.(analysis);
+    }
   }, [analysis, onAnalysisChange]);
 
   const handleToggle = useCallback(() => {

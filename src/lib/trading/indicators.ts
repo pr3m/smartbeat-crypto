@@ -205,8 +205,140 @@ export function calculateVolumeRatio(volumes: number[], period = 20): number {
 }
 
 /**
+ * Calculate EMA slope (rate of change over lookback period)
+ * Returns percentage change per candle
+ */
+export function calculateEMASlope(emaValues: number[], lookback = 5): number {
+  if (emaValues.length < lookback + 1) return 0;
+
+  const recent = emaValues.slice(-lookback - 1);
+  const oldValue = recent[0];
+  const newValue = recent[recent.length - 1];
+
+  if (oldValue === 0) return 0;
+  return ((newValue - oldValue) / oldValue) * 100 / lookback; // % change per candle
+}
+
+/**
+ * Determine EMA alignment (stacking order)
+ * Bullish: Price > EMA20 > EMA50 > EMA200 (golden alignment)
+ * Bearish: Price < EMA20 < EMA50 < EMA200 (death alignment)
+ * Mixed: Any other configuration
+ */
+export function determineEMAAlignment(
+  price: number,
+  ema20: number,
+  ema50: number,
+  ema200: number
+): 'bullish' | 'bearish' | 'mixed' {
+  // Perfect bullish alignment
+  if (price > ema20 && ema20 > ema50 && ema50 > ema200) {
+    return 'bullish';
+  }
+  // Perfect bearish alignment
+  if (price < ema20 && ema20 < ema50 && ema50 < ema200) {
+    return 'bearish';
+  }
+  return 'mixed';
+}
+
+/**
+ * Professional Trend Analysis
+ * Determines trend based on price structure relative to EMAs
+ * This is the CORRECT way to determine trend direction
+ *
+ * Key principles:
+ * 1. Price position relative to EMAs shows current trend state
+ * 2. EMA alignment shows trend strength and maturity
+ * 3. EMA slopes show momentum
+ * 4. RSI/BB are for ENTRY TIMING, not trend determination
+ */
+export function analyzeTrend(
+  currentPrice: number,
+  ema20: number,
+  ema50: number,
+  ema200: number,
+  ema20Slope: number,
+  ema50Slope: number
+): { trend: 'bullish' | 'bearish' | 'neutral'; trendScore: number; reasons: string[] } {
+  let score = 0;
+  const reasons: string[] = [];
+
+  // === PRICE POSITION VS EMAs (Most Important - 60 points max) ===
+
+  // Price vs EMA20 (short-term trend) - 20 points
+  if (currentPrice > ema20) {
+    score += 20;
+    reasons.push('Price > EMA20');
+  } else if (currentPrice < ema20) {
+    score -= 20;
+    reasons.push('Price < EMA20');
+  }
+
+  // Price vs EMA50 (medium-term trend) - 20 points
+  if (currentPrice > ema50) {
+    score += 20;
+    reasons.push('Price > EMA50');
+  } else if (currentPrice < ema50) {
+    score -= 20;
+    reasons.push('Price < EMA50');
+  }
+
+  // Price vs EMA200 (long-term trend) - 20 points
+  if (currentPrice > ema200) {
+    score += 20;
+    reasons.push('Price > EMA200');
+  } else if (currentPrice < ema200) {
+    score -= 20;
+    reasons.push('Price < EMA200');
+  }
+
+  // === EMA ALIGNMENT (Trend structure) - 25 points max ===
+  const alignment = determineEMAAlignment(currentPrice, ema20, ema50, ema200);
+  if (alignment === 'bullish') {
+    score += 25;
+    reasons.push('Bullish EMA stack');
+  } else if (alignment === 'bearish') {
+    score -= 25;
+    reasons.push('Bearish EMA stack');
+  }
+
+  // === EMA SLOPES (Momentum) - 15 points max ===
+  // EMA20 slope (faster, more sensitive)
+  if (ema20Slope > 0.1) {
+    score += 8;
+    reasons.push('EMA20 rising');
+  } else if (ema20Slope < -0.1) {
+    score -= 8;
+    reasons.push('EMA20 falling');
+  }
+
+  // EMA50 slope (slower, more significant)
+  if (ema50Slope > 0.05) {
+    score += 7;
+    reasons.push('EMA50 rising');
+  } else if (ema50Slope < -0.05) {
+    score -= 7;
+    reasons.push('EMA50 falling');
+  }
+
+  // Clamp score to -100 to +100
+  score = Math.max(-100, Math.min(100, score));
+
+  // Determine trend direction
+  // Need at least 25 points conviction (price above/below at least one major EMA + some structure)
+  let trend: 'bullish' | 'bearish' | 'neutral' = 'neutral';
+  if (score >= 25) trend = 'bullish';
+  else if (score <= -25) trend = 'bearish';
+
+  return { trend, trendScore: score, reasons };
+}
+
+/**
  * Calculate all indicators for OHLC data
  * Requires minimum 50 candles for accurate calculations
+ *
+ * IMPORTANT: Now separates TREND (from EMAs) from ENTRY SIGNALS (RSI/BB)
  */
 export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
   if (!ohlc || ohlc.length < 50) {
@@ -214,48 +346,79 @@ export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
     return null;
   }
 
-  // Use all available data (up to 720 candles for accuracy)
+  // Use all available data (up to 720 candles for EMA200 accuracy)
   const data = ohlc.slice(-720);
   const closes = data.map(x => x.close);
   const highs = data.map(x => x.high);
   const lows = data.map(x => x.low);
   const volumes = data.map(x => x.volume);
+  const currentPrice = closes[closes.length - 1];
 
-  // Calculate indicators
+  // === ENTRY TIMING INDICATORS (for timing entries within a trend) ===
   const rsi = calculateRSI(closes);
   const { macd, signal: macdSignal, histogram } = calculateMACD(closes);
   const { position: bbPos, upper: bbUpper, lower: bbLower } = calculateBollingerBands(closes);
   const atr = calculateATR(highs, lows, closes);
   const volRatio = calculateVolumeRatio(volumes);
 
-  // Calculate bias score for MTF analysis
-  // Thresholds calibrated for typical crypto market conditions
-  let score = 0;
+  // === TREND ANALYSIS (EMA-based - the CORRECT way) ===
+  const ema20Values = ema(closes, 20);
+  const ema50Values = ema(closes, 50);
+  const ema200Values = ema(closes, 200);
 
-  // RSI contribution (oversold = bullish opportunity, overbought = bearish)
-  if (rsi < 35) score += 2;        // Oversold - strong buy signal
-  else if (rsi < 45) score += 1;   // Below neutral - mild bullish
-  else if (rsi > 65) score -= 2;   // Overbought - strong sell signal
-  else if (rsi > 55) score -= 1;   // Above neutral - mild bearish
+  const ema20Val = ema20Values[ema20Values.length - 1] || currentPrice;
+  const ema50Val = ema50Values[ema50Values.length - 1] || currentPrice;
+  const ema200Val = ema200Values[ema200Values.length - 1] || currentPrice;
 
-  // MACD contribution (trend momentum)
-  if (macd > 0) score += 1;        // Bullish momentum
-  else if (macd < 0) score -= 1;   // Bearish momentum
+  // Calculate EMA slopes (momentum indicators)
+  const ema20Slope = calculateEMASlope(ema20Values, 5);
+  const ema50Slope = calculateEMASlope(ema50Values, 10);
 
-  // Bollinger Band position (mean reversion signal)
-  if (bbPos < 0.3) score += 1;     // Near lower band - bullish
-  else if (bbPos > 0.7) score -= 1; // Near upper band - bearish
+  // Calculate price distance from EMAs (%)
+  const priceVsEma20 = ((currentPrice - ema20Val) / ema20Val) * 100;
+  const priceVsEma50 = ((currentPrice - ema50Val) / ema50Val) * 100;
+  const priceVsEma200 = ((currentPrice - ema200Val) / ema200Val) * 100;
 
-  // Determine overall bias
-  let bias: 'bullish' | 'bearish' | 'neutral' = 'neutral';
-  if (score >= 2) bias = 'bullish';
-  else if (score <= -2) bias = 'bearish';
+  // Determine EMA alignment
+  const emaAlignment = determineEMAAlignment(currentPrice, ema20Val, ema50Val, ema200Val);
 
-  // Calculate trend strength from absolute score
-  const absScore = Math.abs(score);
+  // Analyze trend properly using EMA structure
+  const trendAnalysis = analyzeTrend(
+    currentPrice,
+    ema20Val,
+    ema50Val,
+    ema200Val,
+    ema20Slope,
+    ema50Slope
+  );
+
+  // === LEGACY SCORE (for entry conditions, not trend) ===
+  // This score is now ONLY used for entry timing, not trend direction
+  let entryScore = 0;
+
+  // RSI contribution (for entry timing within trend)
+  if (rsi < 35) entryScore += 2;        // Oversold - good long entry
+  else if (rsi < 45) entryScore += 1;
+  else if (rsi > 65) entryScore -= 2;   // Overbought - good short entry
+  else if (rsi > 55) entryScore -= 1;
+
+  // MACD momentum
+  if (macd > 0) entryScore += 1;
+  else if (macd < 0) entryScore -= 1;
+
+  // BB position
+  if (bbPos < 0.3) entryScore += 1;
+  else if (bbPos > 0.7) entryScore -= 1;
+
+  // === BIAS is now based on TREND, not entry signals ===
+  // This is the key fix - bias reflects actual trend direction
+  const bias = trendAnalysis.trend;
+
+  // Trend strength from trendScore
+  const absTrendScore = Math.abs(trendAnalysis.trendScore);
   const trendStrength: 'strong' | 'moderate' | 'weak' =
-    absScore >= 3 ? 'strong' :
-    absScore >= 2 ? 'moderate' : 'weak';
+    absTrendScore >= 60 ? 'strong' :
+    absTrendScore >= 35 ? 'moderate' : 'weak';
 
   return {
     rsi,
@@ -267,9 +430,21 @@ export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
     bbLower,
     atr,
     volRatio,
-    score,
-    bias,
+    score: entryScore, // Legacy score for entry timing
+    bias,              // NOW based on EMA trend, not RSI/BB
     trendStrength,
+    // New professional trend fields
+    ema20: ema20Val,
+    ema50: ema50Val,
+    ema200: ema200Val,
+    priceVsEma20,
+    priceVsEma50,
+    priceVsEma200,
+    emaAlignment,
+    ema20Slope,
+    ema50Slope,
+    trend: trendAnalysis.trend,
+    trendScore: trendAnalysis.trendScore,
   };
 }
 

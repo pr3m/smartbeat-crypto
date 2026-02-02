@@ -101,7 +101,7 @@ export interface ChartContext {
 /**
  * Identify swing highs and lows in price data
  */
-function findSwingPoints(ohlc: OHLCData[], lookback: number = 3): SwingPoint[] {
+export function findSwingPoints(ohlc: OHLCData[], lookback: number = 3): SwingPoint[] {
   const swings: SwingPoint[] = [];
 
   for (let i = lookback; i < ohlc.length - lookback; i++) {

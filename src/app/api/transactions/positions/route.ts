@@ -384,22 +384,22 @@ function groupIntoPositions(transactions: Transaction[]): GroupedPosition[] {
     }
 
     // Handle any remaining open position (using relative tolerance)
-    const remainingEntryVolume = currentPosition?.entryTrades.reduce((sum, t) => sum + Math.abs(t.amount), 0) || 0;
-    const hasOpenVolume = currentPosition && (
-      currentPosition.openVolume > 0 &&
-      (remainingEntryVolume === 0 || Math.abs(currentPosition.openVolume / remainingEntryVolume) >= 1e-8)
-    );
-    if (hasOpenVolume) {
-      positions.push(createGroupedPosition(
-        pair,
-        currentPosition.direction,
-        currentPosition.entryTrades,
-        currentPosition.exitTrades,
-        rollovers,
-        settlements,
-        currentPosition.exitTrades.length > 0 ? 'PARTIAL' : 'OPEN',
-        null // No positionTxId for fallback grouping
-      ));
+    if (currentPosition) {
+      const remainingEntryVolume = currentPosition.entryTrades.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+      const hasOpenVolume = currentPosition.openVolume > 0 &&
+        (remainingEntryVolume === 0 || Math.abs(currentPosition.openVolume / remainingEntryVolume) >= 1e-8);
+      if (hasOpenVolume) {
+        positions.push(createGroupedPosition(
+          pair,
+          currentPosition.direction,
+          currentPosition.entryTrades,
+          currentPosition.exitTrades,
+          rollovers,
+          settlements,
+          currentPosition.exitTrades.length > 0 ? 'PARTIAL' : 'OPEN',
+          null // No positionTxId for fallback grouping
+        ));
+      }
     }
   }
 

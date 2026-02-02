@@ -250,14 +250,17 @@ export async function analyzeMarket(
       for (const block of rawResponse.content) {
         if (typeof block === 'string') {
           textParts.push(block);
-        } else if (block.type === 'text' && block.text) {
-          textParts.push(block.text);
-        } else if (block.type === 'reasoning' && block.summary) {
-          // Reasoning summary from GPT-5.2 / o1 / o3 models
-          reasoningParts.push(block.summary);
-        } else if (block.type === 'output_text' && block.text) {
-          // Alternative format for output text
-          textParts.push(block.text);
+        } else if (typeof block === 'object' && block !== null) {
+          const b = block as { type?: string; text?: string; summary?: string };
+          if (b.type === 'text' && b.text) {
+            textParts.push(b.text);
+          } else if (b.type === 'reasoning' && b.summary) {
+            // Reasoning summary from GPT-5.2 / o1 / o3 models
+            reasoningParts.push(b.summary);
+          } else if (b.type === 'output_text' && b.text) {
+            // Alternative format for output text
+            textParts.push(b.text);
+          }
         }
       }
 
@@ -279,7 +282,7 @@ export async function analyzeMarket(
     // Fallback: try StringOutputParser
     const parser = new StringOutputParser();
     try {
-      analysis = await parser.parse(rawResponse);
+      analysis = await parser.parse(rawResponse as unknown as string);
     } catch {
       // If StringOutputParser fails, stringify the response
       analysis = typeof rawResponse === 'object'

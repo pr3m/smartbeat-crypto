@@ -97,6 +97,7 @@ export interface DraftOrder {
   invalidation: string | null;
   positionSizePct: number | null;
   status: string;
+  testMode: boolean;
   submittedOrderId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -223,6 +224,11 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
   const initialMountRef = useRef(true);
   const hadInitialPriceRef = useRef(false);
 
+  // Throttle ticker updates to prevent excessive re-renders (100ms minimum between updates)
+  const lastTickerUpdateRef = useRef(0);
+  const pendingTickerRef = useRef<typeof tickers | null>(null);
+  const tickerThrottleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   useEffect(() => {
     const handleVisibility = () => setIsVisible(document.visibilityState === 'visible');
     handleVisibility();
@@ -242,8 +248,9 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     }
   }, []);
 
-  useEffect(() => {
-    const xrpTicker = tickers['XRPEUR'];
+  // Process ticker updates with throttling to prevent excessive re-renders
+  const processTickerUpdate = useCallback((tickerData: typeof tickers) => {
+    const xrpTicker = tickerData['XRPEUR'];
     if (xrpTicker) {
       setPrice(xrpTicker.price || 0);
       if (xrpTicker.open > 0) setOpenPrice(xrpTicker.open);
@@ -254,14 +261,53 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
       if (xrpTicker.ask) setBestAsk(xrpTicker.ask);
     }
 
-    const btcTicker = tickers['XBTEUR'];
+    const btcTicker = tickerData['XBTEUR'];
     if (btcTicker && btcTicker.open > 0) {
       const change = ((btcTicker.price - btcTicker.open) / btcTicker.open) * 100;
       setBtcChange(change);
       const { trend } = calculateBTCTrend(change);
       setBtcTrend(trend);
     }
-  }, [tickers]);
+  }, []);
+
+  // Throttled ticker update effect - limits updates to max 10 per second
+  useEffect(() => {
+    const THROTTLE_MS = 100; // 100ms between updates = max 10 updates/sec
+    const now = Date.now();
+    const timeSinceLastUpdate = now - lastTickerUpdateRef.current;
+
+    if (timeSinceLastUpdate >= THROTTLE_MS) {
+      // Enough time has passed, update immediately
+      lastTickerUpdateRef.current = now;
+      processTickerUpdate(tickers);
+    } else {
+      // Store pending update for later
+      pendingTickerRef.current = tickers;
+
+      // Only schedule if we don't already have a pending timeout
+      if (!tickerThrottleTimeoutRef.current) {
+        tickerThrottleTimeoutRef.current = setTimeout(() => {
+          tickerThrottleTimeoutRef.current = null;
+          if (pendingTickerRef.current) {
+            lastTickerUpdateRef.current = Date.now();
+            processTickerUpdate(pendingTickerRef.current);
+            pendingTickerRef.current = null;
+          }
+        }, THROTTLE_MS - timeSinceLastUpdate);
+      }
+    }
+    // Note: No cleanup needed - timeout is self-clearing and uses ref for latest data
+  }, [tickers, processTickerUpdate]);
+
+  // Cleanup timeout on unmount only
+  useEffect(() => {
+    return () => {
+      if (tickerThrottleTimeoutRef.current) {
+        clearTimeout(tickerThrottleTimeoutRef.current);
+        tickerThrottleTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     priceRef.current = price;

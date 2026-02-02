@@ -340,29 +340,39 @@ export function analyzeLiquidations(
 
 /**
  * Format liquidation analysis for display
+ *
+ * TERMINOLOGY EXPLANATION:
+ * - "Short Squeeze" = shorts positioned above get liquidated if price rises
+ *   → Their forced BUY orders add fuel to upward move → BULLISH for longs
+ * - "Long Squeeze" = longs positioned below get liquidated if price drops
+ *   → Their forced SELL orders add fuel to downward move → BEARISH for longs
  */
 export function formatLiquidationBias(analysis: LiquidationAnalysis): {
   label: string;
   description: string;
   color: string;
+  tradingImplication: string;
 } {
   if (analysis.bias === 'short_squeeze') {
     return {
       label: 'Short Squeeze Potential',
       description: `More shorts stacked above (${(analysis.biasStrength * 100).toFixed(0)}% confidence). Price magnet pulls UP.`,
       color: 'green',
+      tradingImplication: 'BULLISH - Favors LONG positions. Shorts above will be forced to buy if price rises.',
     };
   } else if (analysis.bias === 'long_squeeze') {
     return {
       label: 'Long Squeeze Potential',
       description: `More longs stacked below (${(analysis.biasStrength * 100).toFixed(0)}% confidence). Price magnet pulls DOWN.`,
       color: 'red',
+      tradingImplication: 'BEARISH - Favors SHORT positions. Longs below will be forced to sell if price drops.',
     };
   }
   return {
     label: 'Neutral',
     description: 'Balanced liquidation levels on both sides.',
     color: 'gray',
+    tradingImplication: 'No directional bias from liquidation structure.',
   };
 }
 

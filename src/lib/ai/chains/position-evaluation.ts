@@ -271,10 +271,13 @@ export async function evaluatePosition(
       for (const block of rawResponse.content) {
         if (typeof block === 'string') {
           textParts.push(block);
-        } else if (block.type === 'text' && block.text) {
-          textParts.push(block.text);
-        } else if (block.type === 'output_text' && block.text) {
-          textParts.push(block.text);
+        } else if (typeof block === 'object' && block !== null) {
+          const b = block as { type?: string; text?: string };
+          if (b.type === 'text' && b.text) {
+            textParts.push(b.text);
+          } else if (b.type === 'output_text' && b.text) {
+            textParts.push(b.text);
+          }
         }
         // Skip reasoning blocks - we only want the actual output
       }

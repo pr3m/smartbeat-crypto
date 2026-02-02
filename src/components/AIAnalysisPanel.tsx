@@ -166,12 +166,12 @@ export function AIAnalysisPanel({ analysis, onClose, onCopyInput, onCopyAnalysis
 
   // Safely get analysis text - handle non-string responses from GPT-5.2
   const analysisText = (() => {
-    const raw = analysis?.analysis;
+    const raw: unknown = analysis?.analysis;
     if (!raw) return '';
     if (typeof raw === 'string') return raw;
     if (Array.isArray(raw)) {
       // GPT-5 content blocks format
-      return raw.map((block: unknown) => {
+      return (raw as unknown[]).map((block: unknown) => {
         if (typeof block === 'string') return block;
         if (block && typeof block === 'object' && 'text' in block) return (block as { text: string }).text;
         return '';

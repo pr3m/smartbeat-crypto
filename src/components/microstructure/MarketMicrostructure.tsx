@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useKrakenWebSocketV2 } from '@/hooks/useKrakenWebSocketV2';
 import { OrderBookDepth } from './OrderBookDepth';
 import { TradeFlow } from './TradeFlow';
@@ -9,6 +9,19 @@ import { SpreadMonitor } from './SpreadMonitor';
 import { LargeOrderAlert } from './LargeOrderAlert';
 import { Tooltip, HelpIcon } from '@/components/Tooltip';
 import type { MicrostructureInput } from '@/lib/kraken/types';
+
+// Shallow comparison for MicrostructureInput to prevent unnecessary parent updates
+function isMicrostructureEqual(a: MicrostructureInput | null, b: MicrostructureInput | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  // Compare key fields that affect recommendations (with tolerance for floating point)
+  const imbalanceEqual = Math.abs(a.imbalance - b.imbalance) < 0.01;
+  const cvdEqual = Math.abs(a.cvd - b.cvd) < 100; // CVD can fluctuate a lot
+  const spreadEqual = Math.abs(a.spreadPercent - b.spreadPercent) < 0.001;
+  const largeBuysEqual = a.recentLargeBuys === b.recentLargeBuys;
+  const largeSellsEqual = a.recentLargeSells === b.recentLargeSells;
+  return imbalanceEqual && cvdEqual && spreadEqual && largeBuysEqual && largeSellsEqual;
+}
 
 interface MarketMicrostructureProps {
   pair?: string;
@@ -29,9 +42,15 @@ export function MarketMicrostructure({ pair = 'XRP/EUR', onDataChange }: MarketM
     return null;
   }, [aggregated.history.length, aggregated.summary]);
 
-  // Notify parent of data changes only when aggregated data updates (once per minute)
+  // Track previous input to prevent unnecessary parent updates
+  const prevInputRef = useRef<MicrostructureInput | null>(null);
+
+  // Notify parent of data changes only when data meaningfully changes
   useEffect(() => {
-    onDataChange?.(recommendationInput);
+    if (!isMicrostructureEqual(recommendationInput, prevInputRef.current)) {
+      prevInputRef.current = recommendationInput;
+      onDataChange?.(recommendationInput);
+    }
   }, [recommendationInput, onDataChange]);
 
   const handleToggle = useCallback(() => {
