@@ -69,6 +69,7 @@ interface ChatRequest {
   conversationId?: string | null;
   message: string;
   context: 'general' | 'trading' | 'tax' | 'transactions';
+  tradingMode?: 'paper' | 'live';
 }
 
 export async function POST(request: NextRequest) {
@@ -92,7 +93,7 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'Invalid request body' }, { status: 400 });
   }
 
-  const { conversationId, message, context } = body;
+  const { conversationId, message, context, tradingMode = 'paper' } = body;
 
   if (!message?.trim()) {
     return Response.json({ error: 'Message is required' }, { status: 400 });
@@ -156,7 +157,7 @@ export async function POST(request: NextRequest) {
       });
 
       // Build context string
-      const contextInfo = buildContextInfo(context);
+      const contextInfo = buildContextInfo(context, tradingMode);
 
       // Build messages for OpenAI
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -419,19 +420,32 @@ export async function POST(request: NextRequest) {
   });
 }
 
-function buildContextInfo(context: string): string {
+function buildContextInfo(context: string, tradingMode: 'paper' | 'live' = 'paper'): string {
   const now = new Date();
   const year = now.getFullYear();
+  const isPaper = tradingMode === 'paper';
+  const modeLabel = isPaper ? 'Paper Trading (Test Mode)' : 'Live Trading (Real Money)';
+  const positionType = isPaper ? 'simulated' : 'kraken';
+  const balanceType = isPaper ? 'simulated' : 'kraken';
 
   switch (context) {
     case 'trading':
       return `User is viewing the Trading dashboard for XRP/EUR Martingale swing trading.
 
+**TRADING MODE: ${modeLabel}**
+- The user is currently in **${modeLabel}** mode
+- When fetching positions, use \`get_positions\` with type="${positionType}" (NOT "all")
+- When fetching balance, use \`get_balance\` with type="${balanceType}"
+- When analyzing positions, use \`analyze_position\` with type="${positionType}"
+- ${isPaper ? 'Positions and balance are simulated/paper trades stored locally' : 'Positions and balance are REAL on Kraken exchange'}
+
 **IMPORTANT: You must fetch live data for trading questions!**
 - Call \`get_market_data\` to get current XRP/EUR price and indicators
 - Call \`get_current_setup\` to see which entry conditions are passing
-- Call \`get_positions\` to check open positions
+- Call \`get_positions\` with type="${positionType}" to check open positions
+- Call \`get_balance\` with type="${balanceType}" to check available margin
 - Do NOT ask the user for price data - fetch it yourself using tools
+- ALWAYS check positions and balance proactively when discussing trades
 
 **When answering trading questions:**
 - Always analyze BOTH long AND short setups with strength grades
@@ -454,6 +468,6 @@ function buildContextInfo(context: string): string {
       return `User is viewing the Transactions section. They may ask about past trades, deposits, withdrawals, or specific transaction details.`;
 
     default:
-      return `General context. User may ask about any aspect of the trading platform, tax calculations, or their transaction history. For trading questions, use tools to fetch live market data.`;
+      return `General context. User may ask about any aspect of the trading platform, tax calculations, or their transaction history. For trading questions, use tools to fetch live market data. Trading mode: ${modeLabel}. Use type="${positionType}" for positions and type="${balanceType}" for balance.`;
   }
 }

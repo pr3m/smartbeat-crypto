@@ -53,6 +53,9 @@ interface ChatState {
   // Context (current view)
   currentContext: 'general' | 'trading' | 'tax' | 'transactions';
 
+  // Trading mode (paper vs live)
+  tradingMode: 'paper' | 'live';
+
   // Actions
   openChat: () => void;
   closeChat: () => void;
@@ -76,6 +79,7 @@ interface ChatState {
   setCurrentToolCall: (toolName: string | null) => void;
 
   setContext: (context: 'general' | 'trading' | 'tax' | 'transactions') => void;
+  setTradingMode: (mode: 'paper' | 'live') => void;
 
   // Agent alerts
   agentAlerts: AgentAlert[];
@@ -110,6 +114,7 @@ export const useChatStore = create<ChatState>((set) => ({
   isStreaming: false,
   currentToolCall: null,
   currentContext: 'general',
+  tradingMode: 'paper',
   agentAlerts: [],
 
   // Actions
@@ -189,6 +194,7 @@ export const useChatStore = create<ChatState>((set) => ({
   setCurrentToolCall: (toolName) => set({ currentToolCall: toolName }),
 
   setContext: (context) => set({ currentContext: context }),
+  setTradingMode: (mode) => set({ tradingMode: mode }),
 
   // Agent alerts
   addAgentAlert: (alert) =>

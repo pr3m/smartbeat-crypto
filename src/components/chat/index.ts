@@ -10,3 +10,4 @@ export { ChatInput } from './ChatInput';
 export { ChatHistory } from './ChatHistory';
 export { MarkdownRenderer } from './MarkdownRenderer';
 export { InlineChat } from './InlineChat';
+export { ChatContextSync } from './ChatContextSync';

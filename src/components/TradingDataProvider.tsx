@@ -785,6 +785,19 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     return () => clearInterval(interval);
   }, [enabled, refreshOhlc]);
 
+  // Background OHLC refresh: runs every 3 minutes when tab is hidden
+  // so notifications can still fire from updated signal data
+  const BACKGROUND_REFRESH_MS = 3 * 60 * 1000;
+  useEffect(() => {
+    if (!enabled) return;
+    const interval = setInterval(() => {
+      if (document.hidden) {
+        refreshOhlc(true);
+      }
+    }, BACKGROUND_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [enabled, refreshOhlc]);
+
   useEffect(() => {
     const interval = setInterval(() => {
       const last = lastOhlcFetchRef.current;

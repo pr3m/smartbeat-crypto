@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, memo } from 'react';
 import { useToast } from '@/components/Toast';
 import { AIAnalysisPanel } from '@/components/AIAnalysisPanel';
 import { InlineChat } from '@/components/chat';
@@ -31,6 +31,121 @@ interface ReportsTabProps {
 }
 
 type ActionFilter = 'all' | 'LONG' | 'SHORT' | 'WAIT';
+
+// Pure functions - defined outside component so they're stable references
+function buildReportContext(report: AIReport): string {
+  let context = `AI Analysis Report Context:
+- Pair: ${report.pair}
+- Action: ${report.action}
+- Model: ${report.model}
+- Analyzed at: ${new Date(report.createdAt).toLocaleString()}
+- Price at Analysis: €${report.priceAtAnalysis?.toFixed(4) || 'N/A'}`;
+
+  if (report.conviction) {
+    context += `\n- Conviction: ${report.conviction}`;
+  }
+  if (report.confidence !== null) {
+    context += `\n- Confidence: ${report.confidence}%`;
+  }
+  if (report.entryLow && report.entryHigh) {
+    context += `\n- Entry Zone: €${report.entryLow.toFixed(4)} - €${report.entryHigh.toFixed(4)}`;
+  }
+  if (report.stopLoss) {
+    context += `\n- Stop Loss: €${report.stopLoss.toFixed(4)}`;
+  }
+  if (report.targets && report.targets.length > 0) {
+    const targetsStr = report.targets
+      .map((t, i) => `T${i + 1}: €${(t.price || t.level)?.toFixed(4)}`)
+      .join(', ');
+    context += `\n- Targets: ${targetsStr}`;
+  }
+  if (report.riskReward) {
+    context += `\n- Risk/Reward: ${report.riskReward.toFixed(2)}`;
+  }
+
+  context += `\n\nAnalysis Summary:\n${report.analysis}`;
+
+  return context;
+}
+
+function reportToAnalysisResponse(report: AIReport): AIAnalysisResponse {
+  const tradeData: AITradeData | null = report.action ? {
+    action: report.action as 'LONG' | 'SHORT' | 'WAIT',
+    conviction: (report.conviction as 'high' | 'medium' | 'low') || 'medium',
+    positionSizePct: null,
+    timeHorizon: 'intraday' as const,
+    entry: report.entryLow && report.entryHigh ? { low: report.entryLow, high: report.entryHigh } : null,
+    stopLoss: report.stopLoss,
+    targets: report.targets,
+    riskReward: report.riskReward,
+    confidence: report.confidence || 50,
+  } : null;
+
+  return {
+    analysis: report.analysis,
+    tradeData,
+    model: report.model,
+    timestamp: report.createdAt,
+    inputData: report.inputData,
+    tokens: report.tokens || { input: 0, output: 0, total: 0 },
+  };
+}
+
+/**
+ * Memoized expanded report content - prevents rerender cascades.
+ * This component only rerenders when the report itself changes.
+ */
+const ExpandedReportContent = memo(function ExpandedReportContent({
+  report,
+  onCollapse,
+  testMode,
+}: {
+  report: AIReport;
+  onCollapse: () => void;
+  testMode: boolean;
+}) {
+  const { addToast } = useToast();
+
+  const analysis = useMemo(() => reportToAnalysisResponse(report), [report]);
+  const contextMessage = useMemo(() => buildReportContext(report), [report]);
+
+  const handleClose = useCallback(() => {
+    onCollapse();
+  }, [onCollapse]);
+
+  const handleCopyInput = useCallback(() => {
+    navigator.clipboard.writeText(report.inputData);
+    addToast({ title: 'Copied', message: 'Input data copied', type: 'success', duration: 2000 });
+  }, [report.inputData, addToast]);
+
+  const handleCopyAnalysis = useCallback(() => {
+    navigator.clipboard.writeText(report.analysis);
+    addToast({ title: 'Copied', message: 'Analysis copied', type: 'success', duration: 2000 });
+  }, [report.analysis, addToast]);
+
+  return (
+    <div className="border-t border-primary">
+      <AIAnalysisPanel
+        analysis={analysis}
+        onClose={handleClose}
+        onCopyInput={handleCopyInput}
+        onCopyAnalysis={handleCopyAnalysis}
+        embedded
+        testMode={testMode}
+      />
+      {/* Inline Chat for Follow-up Questions */}
+      <div className="px-4 pb-4">
+        <InlineChat
+          contextMessage={contextMessage}
+          context="trading"
+          title="Ask About This Analysis"
+          placeholder="Ask a follow-up question about this report..."
+          maxHeight="200px"
+        />
+      </div>
+    </div>
+  );
+});
 
 export function ReportsTab({ onReportsCountChange, testMode = true }: ReportsTabProps) {
   const { addToast } = useToast();
@@ -133,65 +248,9 @@ export function ReportsTab({ onReportsCountChange, testMode = true }: ReportsTab
   const totalPages = Math.ceil(total / LIMIT);
   const currentPage = Math.floor(offset / LIMIT) + 1;
 
-  // Build context message for inline chat based on a report
-  const buildReportContext = (report: AIReport): string => {
-    let context = `AI Analysis Report Context:
-- Pair: ${report.pair}
-- Action: ${report.action}
-- Model: ${report.model}
-- Analyzed at: ${new Date(report.createdAt).toLocaleString()}
-- Price at Analysis: €${report.priceAtAnalysis?.toFixed(4) || 'N/A'}`;
-
-    if (report.conviction) {
-      context += `\n- Conviction: ${report.conviction}`;
-    }
-    if (report.confidence !== null) {
-      context += `\n- Confidence: ${report.confidence}%`;
-    }
-    if (report.entryLow && report.entryHigh) {
-      context += `\n- Entry Zone: €${report.entryLow.toFixed(4)} - €${report.entryHigh.toFixed(4)}`;
-    }
-    if (report.stopLoss) {
-      context += `\n- Stop Loss: €${report.stopLoss.toFixed(4)}`;
-    }
-    if (report.targets && report.targets.length > 0) {
-      const targetsStr = report.targets
-        .map((t, i) => `T${i + 1}: €${(t.price || t.level)?.toFixed(4)}`)
-        .join(', ');
-      context += `\n- Targets: ${targetsStr}`;
-    }
-    if (report.riskReward) {
-      context += `\n- Risk/Reward: ${report.riskReward.toFixed(2)}`;
-    }
-
-    context += `\n\nAnalysis Summary:\n${report.analysis}`;
-
-    return context;
-  };
-
-  // Convert report to AIAnalysisResponse format for the panel
-  const reportToAnalysisResponse = (report: AIReport): AIAnalysisResponse => {
-    const tradeData: AITradeData | null = report.action ? {
-      action: report.action as 'LONG' | 'SHORT' | 'WAIT',
-      conviction: (report.conviction as 'high' | 'medium' | 'low') || 'medium',
-      positionSizePct: null,
-      timeHorizon: 'intraday' as const,
-      entry: report.entryLow && report.entryHigh ? { low: report.entryLow, high: report.entryHigh } : null,
-      stopLoss: report.stopLoss,
-      targets: report.targets,
-      riskReward: report.riskReward,
-      confidence: report.confidence || 50,
-    } : null;
-
-    return {
-      analysis: report.analysis,
-      tradeData,
-      model: report.model,
-      timestamp: report.createdAt,
-      inputData: report.inputData,
-      tokens: report.tokens || { input: 0, output: 0, total: 0 },
-    };
-  };
+  const handleCollapse = useCallback(() => {
+    setExpandedId(null);
+  }, []);
 
   if (loading && reports.length === 0) {
     return (
@@ -339,32 +398,11 @@ export function ReportsTab({ onReportsCountChange, testMode = true }: ReportsTab
 
                 {/* Expanded Analysis Panel */}
                 {isExpanded && (
-                  <div className="border-t border-primary">
-                    <AIAnalysisPanel
-                      analysis={reportToAnalysisResponse(report)}
-                      onClose={() => setExpandedId(null)}
-                      onCopyInput={() => {
-                        navigator.clipboard.writeText(report.inputData);
-                        addToast({ title: 'Copied', message: 'Input data copied', type: 'success', duration: 2000 });
-                      }}
-                      onCopyAnalysis={() => {
-                        navigator.clipboard.writeText(report.analysis);
-                        addToast({ title: 'Copied', message: 'Analysis copied', type: 'success', duration: 2000 });
-                      }}
-                      embedded
-                      testMode={testMode}
-                    />
-                    {/* Inline Chat for Follow-up Questions */}
-                    <div className="px-4 pb-4">
-                      <InlineChat
-                        contextMessage={buildReportContext(report)}
-                        context="trading"
-                        title="Ask About This Analysis"
-                        placeholder="Ask a follow-up question about this report..."
-                        maxHeight="200px"
-                      />
-                    </div>
-                  </div>
+                  <ExpandedReportContent
+                    report={report}
+                    onCollapse={handleCollapse}
+                    testMode={testMode}
+                  />
                 )}
               </div>
             );

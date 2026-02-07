@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, memo } from 'react';
 import type { AIAnalysisResponse } from '@/lib/ai/types';
 import { useToast } from './Toast';
 import { useTradingData } from './TradingDataProvider';
@@ -108,11 +108,11 @@ function parseAnalysisSections(text: string): ParsedSection[] {
 }
 
 /**
- * Format content with better styling - returns JSX
+ * Format content with better styling - returns JSX.
+ * Memoized to avoid reprocessing HTML on parent rerenders.
  */
-function FormattedContent({ content }: { content: string }) {
-  // Process the content into formatted HTML
-  const processedHtml = content
+const FormattedContent = memo(function FormattedContent({ content }: { content: string }) {
+  const processedHtml = useMemo(() => content
     // Bold text
     .replace(/\*\*(.+?)\*\*/g, '<strong class="text-primary font-semibold">$1</strong>')
     // Inline code
@@ -127,7 +127,8 @@ function FormattedContent({ content }: { content: string }) {
     // Convert bullet points
     .replace(/^[•\-\*·]\s*/gm, '• ')
     // Line breaks
-    .replace(/\n/g, '<br/>');
+    .replace(/\n/g, '<br/>'),
+  [content]);
 
   return (
     <div
@@ -135,7 +136,7 @@ function FormattedContent({ content }: { content: string }) {
       dangerouslySetInnerHTML={{ __html: processedHtml }}
     />
   );
-}
+});
 
 /**
  * Get section icon and color
@@ -859,7 +860,7 @@ export function AIAnalysisPanel({ analysis, onClose, onCopyInput, onCopyAnalysis
             const style = getSectionStyle(section.type);
             return (
               <div
-                key={i}
+                key={`${section.type}-${section.title}-${i}`}
                 className={`rounded-lg border ${style.borderColor} ${style.bgColor} overflow-hidden`}
               >
                 <div className={`px-3 py-2 ${style.headerBg} border-b border-primary/20 flex items-center gap-2`}>

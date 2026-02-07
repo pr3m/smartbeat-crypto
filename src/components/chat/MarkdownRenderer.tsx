@@ -1,7 +1,7 @@
 /**
  * Markdown Renderer
  * Lightweight markdown rendering for chat messages
- * Supports: bold, italic, code, links, lists, headers
+ * Supports: bold, italic, code, links, lists, headers, blockquotes, hr
  */
 
 'use client';
@@ -27,36 +27,116 @@ export function MarkdownRenderer({ content, className = '' }: MarkdownRendererPr
 }
 
 /**
- * Parse markdown to HTML
+ * Parse markdown to HTML.
+ * Uses a block-level approach: split into blocks first, then apply inline formatting.
  */
 function parseMarkdown(text: string): string {
   if (!text) return '';
 
-  let html = text;
+  // Normalize line endings
+  let input = text.replace(/\r\n/g, '\n');
 
-  // Escape HTML to prevent XSS
-  html = escapeHtml(html);
+  // Split into blocks by double newlines (but preserve list continuity)
+  // First, collapse blank lines between consecutive list items so they stay grouped
+  input = input.replace(/^([ \t]*[-*] .+)\n\n+(?=[ \t]*[-*] )/gm, '$1\n');
+  input = input.replace(/^([ \t]*\d+\. .+)\n\n+(?=[ \t]*\d+\. )/gm, '$1\n');
 
-  // Code blocks (```code```) - must be done before inline code
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-    return `<pre class="code-block"><code class="language-${lang}">${code.trim()}</code></pre>`;
-  });
+  // Split into blocks by double newlines
+  const blocks = input.split(/\n{2,}/);
+  const htmlBlocks: string[] = [];
 
-  // Inline code (`code`)
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+
+    // Code block
+    if (trimmed.startsWith('```')) {
+      const match = trimmed.match(/^```(\w*)\n?([\s\S]*?)```$/);
+      if (match) {
+        const code = escapeHtml(match[2].trim());
+        htmlBlocks.push(`<pre class="code-block"><code class="language-${match[1]}">${code}</code></pre>`);
+      } else {
+        htmlBlocks.push(`<p class="md-p">${formatInline(trimmed)}</p>`);
+      }
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^(---|\*\*\*|___)$/.test(trimmed)) {
+      htmlBlocks.push('<hr class="md-hr" />');
+      continue;
+    }
+
+    // Header
+    const headerMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (headerMatch) {
+      const level = headerMatch[1].length + 1; // h2, h3, h4, h5
+      const tag = `h${Math.min(level, 5)}`;
+      htmlBlocks.push(`<${tag} class="md-${tag}">${formatInline(headerMatch[2])}</${tag}>`);
+      continue;
+    }
+
+    // Unordered list block (lines starting with - or *)
+    if (/^[\t ]*[-*] /m.test(trimmed)) {
+      const items = trimmed.split('\n');
+      let listHtml = '<ul class="md-ul">';
+      for (const item of items) {
+        const liMatch = item.match(/^[\t ]*[-*] (.+)$/);
+        if (liMatch) {
+          listHtml += `<li class="md-li">${formatInline(liMatch[1])}</li>`;
+        }
+      }
+      listHtml += '</ul>';
+      htmlBlocks.push(listHtml);
+      continue;
+    }
+
+    // Ordered list block (lines starting with 1. 2. etc)
+    if (/^[\t ]*\d+\. /m.test(trimmed)) {
+      const items = trimmed.split('\n');
+      let listHtml = '<ol class="md-ol">';
+      for (const item of items) {
+        const liMatch = item.match(/^[\t ]*\d+\. (.+)$/);
+        if (liMatch) {
+          listHtml += `<li class="md-oli">${formatInline(liMatch[1])}</li>`;
+        }
+      }
+      listHtml += '</ol>';
+      htmlBlocks.push(listHtml);
+      continue;
+    }
+
+    // Blockquote
+    if (trimmed.startsWith('> ') || trimmed.startsWith('>')) {
+      const lines = trimmed.split('\n').map(l => l.replace(/^>\s?/, ''));
+      htmlBlocks.push(`<blockquote class="md-quote">${formatInline(lines.join('<br/>'))}</blockquote>`);
+      continue;
+    }
+
+    // Regular paragraph - convert single newlines to <br/>
+    const lines = trimmed.split('\n').map(l => formatInline(l)).join('<br/>');
+    htmlBlocks.push(`<p class="md-p">${lines}</p>`);
+  }
+
+  return htmlBlocks.join('');
+}
+
+/**
+ * Apply inline formatting (bold, italic, code, links, etc.)
+ */
+function formatInline(text: string): string {
+  let html = escapeHtml(text);
+
+  // Inline code (`code`) - do first to protect contents
   html = html.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-
-  // Headers (## Header)
-  html = html.replace(/^### (.+)$/gm, '<h4 class="md-h4">$1</h4>');
-  html = html.replace(/^## (.+)$/gm, '<h3 class="md-h3">$1</h3>');
-  html = html.replace(/^# (.+)$/gm, '<h2 class="md-h2">$1</h2>');
 
   // Bold (**text** or __text__)
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>');
 
-  // Italic (*text* or _text_)
+  // Italic (*text* or _text_) - be careful not to match inside words with underscores
   html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  html = html.replace(/_([^_]+)_/g, '<em>$1</em>');
+  html = html.replace(/(?<!\w)_([^_]+)_(?!\w)/g, '<em>$1</em>');
 
   // Strikethrough (~~text~~)
   html = html.replace(/~~([^~]+)~~/g, '<del>$1</del>');
@@ -66,39 +146,6 @@ function parseMarkdown(text: string): string {
     /\[([^\]]+)\]\(([^)]+)\)/g,
     '<a href="$2" target="_blank" rel="noopener noreferrer" class="md-link">$1</a>'
   );
-
-  // Unordered lists (- item or * item)
-  html = html.replace(/^[\-\*] (.+)$/gm, '<li class="md-li">$1</li>');
-  // Wrap consecutive <li> in <ul>
-  html = html.replace(/((?:<li class="md-li">.*<\/li>\n?)+)/g, '<ul class="md-ul">$1</ul>');
-
-  // Ordered lists (1. item)
-  html = html.replace(/^\d+\. (.+)$/gm, '<li class="md-oli">$1</li>');
-  // Wrap consecutive ordered <li> in <ol>
-  html = html.replace(/((?:<li class="md-oli">.*<\/li>\n?)+)/g, '<ol class="md-ol">$1</ol>');
-
-  // Horizontal rule (--- or ***)
-  html = html.replace(/^(---|\*\*\*)$/gm, '<hr class="md-hr" />');
-
-  // Blockquotes (> text)
-  html = html.replace(/^> (.+)$/gm, '<blockquote class="md-quote">$1</blockquote>');
-  // Merge consecutive blockquotes
-  html = html.replace(/<\/blockquote>\n<blockquote class="md-quote">/g, '<br/>');
-
-  // Line breaks - convert double newlines to paragraphs
-  html = html.replace(/\n\n+/g, '</p><p class="md-p">');
-  // Single newlines to <br>
-  html = html.replace(/\n/g, '<br/>');
-
-  // Wrap in paragraph if not starting with block element
-  if (!html.startsWith('<')) {
-    html = `<p class="md-p">${html}</p>`;
-  }
-
-  // Clean up empty paragraphs
-  html = html.replace(/<p class="md-p"><\/p>/g, '');
-  html = html.replace(/<p class="md-p">(<(?:ul|ol|h[2-4]|pre|blockquote|hr))/g, '$1');
-  html = html.replace(/(<\/(?:ul|ol|h[2-4]|pre|blockquote)>)<\/p>/g, '$1');
 
   return html;
 }

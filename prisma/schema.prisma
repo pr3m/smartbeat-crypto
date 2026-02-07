@@ -384,6 +384,24 @@ model AIMarketAnalysis {
 }
 
 // ============================================
+// Notification History
+// ============================================
+
+model Notification {
+  id        String   @id @default(cuid())
+  title     String
+  body      String
+  type      String   // signal, grade, setup, volume, rsi, pnl, dca
+  tag       String   // Unique tag from browser notification (e.g., "signal-change", "pnl-pos123-5")
+  priority  String   @default("medium") // high, medium, low
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([read, createdAt])
+  @@index([createdAt])
+}
+
+// ============================================
 // AI Chat Assistant Models
 // ============================================
 

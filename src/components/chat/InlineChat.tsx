@@ -6,6 +6,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useChatStore } from '@/stores/chatStore';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface Message {
@@ -41,6 +42,7 @@ export function InlineChat({
   const [currentToolCall, setCurrentToolCall] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [isExpanded, setIsExpanded] = useState(false);
+  const tradingMode = useChatStore((s) => s.tradingMode);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -89,6 +91,7 @@ export function InlineChat({
           conversationId,
           message: messageToSend,
           context,
+          tradingMode,
         }),
         signal: abortControllerRef.current.signal,
       });
@@ -204,7 +207,7 @@ export function InlineChat({
       });
       abortControllerRef.current = null;
     }
-  }, [messages.length, contextMessage, conversationId, context, isStreaming]);
+  }, [messages.length, contextMessage, conversationId, context, tradingMode, isStreaming]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

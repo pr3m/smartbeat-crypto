@@ -229,27 +229,91 @@ async function getPositions(args: Record<string, unknown>): Promise<ToolResult> 
     }));
   }
 
-  // Kraken positions (from database - might be stale)
+  // Kraken positions - fetch LIVE from Kraken API (not from stale database)
   if (type === 'all' || type === 'kraken') {
-    const krakenPositions = await prisma.position.findMany({
-      where: includeHistory ? {} : { isOpen: true },
-      orderBy: { openedAt: 'desc' },
-      take: 20,
-    });
+    try {
+      const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`);
+      if (res.ok) {
+        const data = await res.json();
+        // Kraken returns an object keyed by position ID
+        if (data && typeof data === 'object' && !data.error) {
+          const positions = Object.entries(data).map(([id, pos]: [string, unknown]) => {
+            const p = pos as Record<string, unknown>;
+            const cost = parseFloat(String(p.cost ?? 0));
+            const margin = parseFloat(String(p.margin ?? 0));
+            const rawLeverage = p.leverage ? parseFloat(String(p.leverage)) : NaN;
+            const leverage = Number.isFinite(rawLeverage)
+              ? rawLeverage
+              : margin > 0
+                ? Math.round(cost / margin)
+                : 1;
+            const rawTime = p.time ? parseFloat(String(p.time)) : NaN;
+            const openTime = Number.isFinite(rawTime) ? rawTime * 1000 : Date.now();
 
-    results.krakenPositions = krakenPositions.map(p => ({
-      id: p.id,
-      pair: p.pair,
-      side: p.side,
-      volume: p.volume,
-      entryPrice: p.entryPrice,
-      leverage: p.leverage,
-      margin: p.margin,
-      isOpen: p.isOpen,
-      unrealizedPnl: p.unrealizedPnl,
-      openedAt: p.openedAt.toISOString(),
-      closedAt: p.closedAt?.toISOString(),
-    }));
+            return {
+              id,
+              pair: String(p.pair ?? ''),
+              type: (p.type as 'buy' | 'sell') ?? 'buy',
+              cost,
+              fee: parseFloat(String(p.fee ?? 0)),
+              volume: parseFloat(String(p.vol ?? 0)),
+              margin,
+              value: parseFloat(String(p.value ?? 0)),
+              net: parseFloat(String(p.net ?? 0)),
+              leverage,
+              openTime,
+              rollovertm: p.rollovertm ? parseFloat(String(p.rollovertm)) * 1000 : 0,
+              actualRolloverCost: 0,
+            };
+          });
+          results.krakenPositions = positions;
+        } else {
+          results.krakenPositions = [];
+        }
+      } else {
+        // Fall back to database if API fails
+        const krakenPositions = await prisma.position.findMany({
+          where: includeHistory ? {} : { isOpen: true },
+          orderBy: { openedAt: 'desc' },
+          take: 20,
+        });
+        results.krakenPositions = krakenPositions.map(p => ({
+          id: p.id,
+          pair: p.pair,
+          side: p.side,
+          volume: p.volume,
+          entryPrice: p.entryPrice,
+          leverage: p.leverage,
+          margin: p.margin,
+          isOpen: p.isOpen,
+          unrealizedPnl: p.unrealizedPnl,
+          openedAt: p.openedAt.toISOString(),
+          closedAt: p.closedAt?.toISOString(),
+        }));
+        results.krakenPositionsNote = 'Fetched from database (API unavailable)';
+      }
+    } catch {
+      // Fall back to database on error
+      const krakenPositions = await prisma.position.findMany({
+        where: includeHistory ? {} : { isOpen: true },
+        orderBy: { openedAt: 'desc' },
+        take: 20,
+      });
+      results.krakenPositions = krakenPositions.map(p => ({
+        id: p.id,
+        pair: p.pair,
+        side: p.side,
+        volume: p.volume,
+        entryPrice: p.entryPrice,
+        leverage: p.leverage,
+        margin: p.margin,
+        isOpen: p.isOpen,
+        unrealizedPnl: p.unrealizedPnl,
+        openedAt: p.openedAt.toISOString(),
+        closedAt: p.closedAt?.toISOString(),
+      }));
+      results.krakenPositionsNote = 'Fetched from database (API error)';
+    }
   }
 
   return { success: true, data: results };
@@ -1347,39 +1411,100 @@ async function analyzePosition(args: Record<string, unknown>): Promise<ToolResul
       };
     }
 
-    // Kraken positions
-    if (positionId) {
-      position = await prisma.position.findUnique({
-        where: { id: String(positionId) },
-      });
-    } else {
-      position = await prisma.position.findFirst({
-        where: { isOpen: true },
-        orderBy: { openedAt: 'desc' },
-      });
-    }
+    // Kraken positions - fetch live from API
+    try {
+      const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`);
+      if (!res.ok) {
+        return { success: false, error: 'Failed to fetch Kraken positions' };
+      }
 
-    if (!position) {
-      return { success: false, error: 'No Kraken position found' };
-    }
+      const data = await res.json();
+      if (!data || typeof data !== 'object' || data.error) {
+        return { success: false, error: 'No Kraken positions found' };
+      }
 
-    return {
-      success: true,
-      data: {
-        position: {
-          id: position.id,
-          pair: position.pair,
-          side: position.side,
-          volume: position.volume,
-          entryPrice: position.entryPrice,
-          leverage: position.leverage,
-          margin: position.margin,
-          unrealizedPnl: position.unrealizedPnl,
-          openedAt: position.openedAt.toISOString(),
+      const entries = Object.entries(data);
+      if (entries.length === 0) {
+        return { success: false, error: 'No open Kraken positions found' };
+      }
+
+      // Find the specific position or use first
+      let posEntry: [string, unknown];
+      if (positionId) {
+        const found = entries.find(([id]) => id === String(positionId));
+        if (!found) {
+          return { success: false, error: `Kraken position ${positionId} not found` };
+        }
+        posEntry = found;
+      } else {
+        posEntry = entries[0];
+      }
+
+      const [posId, posData] = posEntry;
+      const p = posData as Record<string, unknown>;
+
+      // Get current price for P&L calculation
+      const pair = String(p.pair || 'XRPEUR');
+      const ticker = await fetchTicker(pair);
+      const currentPrice = parseFloat(String(ticker.price || (ticker as any).c?.[0])) || 0;
+
+      const vol = Number(p.vol) || 0;
+      const cost = Number(p.cost) || 0;
+      const entryPrice = vol > 0 ? cost / vol : 0;
+      const fee = Number(p.fee) || 0;
+      const net = Number(p.net) || 0;
+      const side = String(p.type || 'buy');
+      const direction = side === 'buy' ? 1 : -1;
+      const priceDiff = (currentPrice - entryPrice) * direction;
+      const unrealizedPnl = priceDiff * vol - fee;
+      const pnlPercent = entryPrice > 0 ? (priceDiff / entryPrice) * 100 : 0;
+
+      // Get current setup for context
+      const setupResult = await getCurrentSetup({ detailed: false });
+      const currentSetup = setupResult.success ? setupResult.data : null;
+
+      return {
+        success: true,
+        data: {
+          position: {
+            id: posId,
+            pair,
+            side: side === 'buy' ? 'LONG' : 'SHORT',
+            volume: vol,
+            entryPrice: entryPrice.toFixed(5),
+            cost: cost.toFixed(2),
+            fee: fee.toFixed(2),
+            leverage: p.leverage,
+            margin: p.margin,
+            openedAt: p.time ? new Date(Number(p.time) * 1000).toISOString() : null,
+          },
+          currentPrice: currentPrice.toFixed(5),
+          pnl: {
+            unrealized: unrealizedPnl.toFixed(2),
+            net: net,
+            percent: pnlPercent.toFixed(2) + '%',
+            status: unrealizedPnl >= 0 ? 'PROFIT' : 'LOSS',
+          },
+          marketContext: currentSetup ? {
+            currentSetupAction: (currentSetup as any).action,
+            setupConfidence: (currentSetup as any).confidence,
+            alignedWithPosition: (side === 'buy' && (currentSetup as any).action === 'LONG') ||
+                                 (side === 'sell' && (currentSetup as any).action === 'SHORT'),
+          } : null,
+          suggestion: unrealizedPnl > 0 && pnlPercent > 5
+            ? 'Consider taking partial profits'
+            : unrealizedPnl < 0 && pnlPercent < -3
+              ? 'Review stop loss - position moving against you'
+              : 'Monitor position - within normal range',
+          totalKrakenPositions: entries.length,
         },
-        note: 'For detailed Kraken position analysis, use kraken_api tool with "positions" endpoint',
-      },
-    };
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: `Failed to fetch Kraken positions: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
   } catch (error) {
     return {
       success: false,

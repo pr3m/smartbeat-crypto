@@ -3,8 +3,9 @@ import Link from 'next/link';
 import { ConnectionStatus } from '@/components/ConnectionStatus';
 import { SyncStatusIndicator } from '@/components/SyncStatusIndicator';
 import { Providers } from '@/components/Providers';
-import { ChatFAB, ChatPanel } from '@/components/chat';
+import { ChatFAB, ChatPanel, ChatContextSync } from '@/components/chat';
 import { Logo } from '@/components/Logo';
+import { NotificationBell } from '@/components/NotificationBell';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -51,6 +52,7 @@ function Navigation() {
           <div className="flex items-center gap-4">
             <SyncStatusIndicator />
             <ConnectionStatus />
+            <NotificationBell />
             <Link
               href="/settings"
               className="p-2 text-secondary hover:text-primary hover:bg-tertiary rounded-lg transition-colors"
@@ -94,6 +96,7 @@ export default function RootLayout({
         <Providers>
           <Navigation />
           <main>{children}</main>
+          <ChatContextSync />
           <ChatFAB />
           <ChatPanel />
         </Providers>

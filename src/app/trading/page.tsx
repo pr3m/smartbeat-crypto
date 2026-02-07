@@ -8,8 +8,9 @@ import type { TradingRecommendation, MicrostructureInput, LiquidationInput, Indi
 import type { MarketSnapshot, AIAnalysisResponse, OpenPositionData } from '@/lib/ai/types';
 import { buildChartContext, formatChartContextForAI } from '@/lib/trading/chart-context';
 import { TradingDataProvider, useTradingData, TRADING_TIMEFRAMES, TRADING_REFRESH_INTERVAL_SEC } from '@/components/TradingDataProvider';
+import { useChatStore } from '@/stores/chatStore';
 import { useToast } from '@/components/Toast';
-import { requestNotificationPermission, sendBrowserNotification } from '@/components/Toast';
+import { requestNotificationPermission } from '@/components/Toast';
 import { Tooltip, HelpIcon } from '@/components/Tooltip';
 import { TradeExecutionPanel, type EditingOrderData, type EditingDraftData } from '@/components/TradeExecutionPanel';
 import { type OpenOrderData } from '@/components/OpenOrders';
@@ -30,13 +31,30 @@ import { FearGreedGauge } from '@/components/FearGreedGauge';
 import type { LiquidationAnalysis } from '@/lib/trading/liquidation';
 import { getLiquidationInput } from '@/lib/trading/liquidation';
 import { LiquidationHeatmap } from '@/components/LiquidationHeatmap';
+import { useTradeNotifications } from '@/hooks/useTradeNotifications';
 
 export default function TradingPage() {
   const [testMode, setTestMode] = useState(true);
 
+  // Sync from localStorage after hydration to avoid mismatch
+  useEffect(() => {
+    const stored = localStorage.getItem('smartbeat:tradingMode');
+    if (stored !== null) {
+      setTestMode(stored === 'paper');
+    }
+  }, []);
+
+  const handleSetTestMode: Dispatch<SetStateAction<boolean>> = useCallback((value) => {
+    setTestMode((prev) => {
+      const next = typeof value === 'function' ? value(prev) : value;
+      localStorage.setItem('smartbeat:tradingMode', next ? 'paper' : 'live');
+      return next;
+    });
+  }, []);
+
   return (
     <TradingDataProvider testMode={testMode}>
-      <TradingPageContent testMode={testMode} setTestMode={setTestMode} />
+      <TradingPageContent testMode={testMode} setTestMode={handleSetTestMode} />
     </TradingDataProvider>
   );
 }
@@ -76,10 +94,16 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     openOrders,
     draftOrders,
   } = useTradingData();
+  const setTradingMode = useChatStore((s) => s.setTradingMode);
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [displayTf, setDisplayTf] = useState<number>(15);
   const [recommendation, setRecommendation] = useState<TradingRecommendation | null>(null);
   const lastRecommendationRef = useRef<string | null>(null);
+
+  // Sync trading mode to chat store so AI knows paper vs live
+  useEffect(() => {
+    setTradingMode(testMode ? 'paper' : 'live');
+  }, [testMode, setTradingMode]);
 
   // Tab state
   const [activeTab, setActiveTab] = useState<TradingTab>('setup');
@@ -401,26 +425,17 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
 
     // Check for new signal (only if action changes and is not WAIT)
     if (rec && rec.action !== 'WAIT' && rec.action !== lastRecommendationRef.current) {
-      // Toast notification
+      // Toast notification (browser notifications handled by useTradeNotifications hook)
       addToast({
         title: `🎯 Signal: ${rec.action}`,
         message: rec.reason,
         type: 'signal',
         duration: 15000,
       });
-
-      // Browser notification
-      if (notificationsEnabled) {
-        sendBrowserNotification(
-          `Trading Signal: ${rec.action}`,
-          rec.reason,
-          { tag: 'trading-signal', renotify: true }
-        );
-      }
     }
 
     lastRecommendationRef.current = rec?.action || null;
-  }, [tfData, btcTrend, btcChange, microData, liqData, notificationsEnabled, addToast]);
+  }, [tfData, btcTrend, btcChange, microData, liqData, addToast, price]);
 
   // Request notification permission on mount
   useEffect(() => {
@@ -428,6 +443,17 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
       setNotificationsEnabled(granted);
     });
   }, []);
+
+  // Background trade notifications (signals, P&L, DCA, RSI, volume)
+  useTradeNotifications({
+    recommendation,
+    tfData,
+    price,
+    simulatedPositions,
+    openPositions,
+    testMode,
+    notificationsEnabled,
+  });
 
   // Fetch reports count on mount
   useEffect(() => {

@@ -20,6 +20,7 @@ export function ChatPanel() {
     currentConversationId,
     setCurrentConversation,
     currentContext,
+    tradingMode,
     isStreaming,
     setStreaming,
     addMessage,
@@ -62,6 +63,7 @@ export function ChatPanel() {
             conversationId: currentConversationId,
             message: content,
             context: currentContext,
+            tradingMode,
           }),
           signal: abortControllerRef.current.signal,
         });
@@ -166,6 +168,7 @@ export function ChatPanel() {
     [
       currentConversationId,
       currentContext,
+      tradingMode,
       addMessage,
       appendToLastMessage,
       setStreaming,
