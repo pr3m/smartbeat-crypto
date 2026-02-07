@@ -377,18 +377,80 @@ export function formatLiquidationBias(analysis: LiquidationAnalysis): {
 }
 
 /**
- * Get liquidation input for recommendation engine
+ * Get liquidation input for recommendation engine.
+ * Computes zone-aware metrics from the full LiquidationAnalysis.
  */
-export interface LiquidationInput {
-  bias: 'long_squeeze' | 'short_squeeze' | 'neutral';
-  biasStrength: number;
-  nearestUpside: number | null; // Nearest short liq (price target going up)
-  nearestDownside: number | null; // Nearest long liq (price target going down)
-  fundingRate: number | null;
-  openInterest: number | null;
-}
+import type { LiquidationInput } from '@/lib/kraken/types';
+import type { LiquidationStrategyConfig } from './v2-types';
 
-export function getLiquidationInput(analysis: LiquidationAnalysis): LiquidationInput {
+/** Default liquidation config (used when no strategy provided) */
+const DEFAULT_LIQ_CONFIG: LiquidationStrategyConfig = {
+  magnetProximityPct: 2.0,
+  magnetMinStrength: 0.3,
+  wallProximityPct: 5.0,
+  wallMinDensity: 0.5,
+  wallMinStrength: 0.6,
+  densityNormFactor: 20,
+  strongAsymmetryThreshold: 1.5,
+  directionWeight: 6,
+  scoring: {
+    magnetAligned: 15, magnetOpposing: -10,
+    wallSupport: 8, wallBlock: -8,
+    asymmetryAligned: 10, asymmetryOpposing: -5,
+    fundingConfirm: 5, proximityBonus: 5,
+  },
+};
+
+export function getLiquidationInput(
+  analysis: LiquidationAnalysis,
+  config?: LiquidationStrategyConfig
+): LiquidationInput {
+  const cfg = config ?? DEFAULT_LIQ_CONFIG;
+  const { currentPrice, shortLiquidationZones, longLiquidationZones } = analysis;
+
+  // --- Distance to nearest clusters ---
+  const nearestUpsideDistPct = analysis.nearestShortLiquidation !== null
+    ? ((analysis.nearestShortLiquidation - currentPrice) / currentPrice) * 100
+    : null;
+  const nearestDownsideDistPct = analysis.nearestLongLiquidation !== null
+    ? ((currentPrice - analysis.nearestLongLiquidation) / currentPrice) * 100
+    : null;
+
+  // --- Strongest zone strength & density on each side ---
+  const strongestUpsideStrength = analysis.strongestShortZone?.totalStrength ?? 0;
+  const strongestDownsideStrength = analysis.strongestLongZone?.totalStrength ?? 0;
+
+  const strongestUpsideDensity = analysis.strongestShortZone
+    ? Math.min(1, analysis.strongestShortZone.levels.length / cfg.densityNormFactor)
+    : 0;
+  const strongestDownsideDensity = analysis.strongestLongZone
+    ? Math.min(1, analysis.strongestLongZone.levels.length / cfg.densityNormFactor)
+    : 0;
+
+  // --- Asymmetry ratio ---
+  // >1 = more upside fuel (short liq above), <1 = more downside fuel
+  const totalUp = analysis.totalShortLiqStrength || 0.001;
+  const totalDown = analysis.totalLongLiqStrength || 0.001;
+  const asymmetryRatio = totalUp / totalDown;
+
+  // --- Magnet booleans ---
+  const upsideMagnet = nearestUpsideDistPct !== null
+    && nearestUpsideDistPct <= cfg.magnetProximityPct
+    && strongestUpsideStrength >= cfg.magnetMinStrength;
+  const downsideMagnet = nearestDownsideDistPct !== null
+    && nearestDownsideDistPct <= cfg.magnetProximityPct
+    && strongestDownsideStrength >= cfg.magnetMinStrength;
+
+  // --- Wall booleans ---
+  const upsideWall = nearestUpsideDistPct !== null
+    && nearestUpsideDistPct <= cfg.wallProximityPct
+    && strongestUpsideDensity >= cfg.wallMinDensity
+    && strongestUpsideStrength >= cfg.wallMinStrength;
+  const downsideWall = nearestDownsideDistPct !== null
+    && nearestDownsideDistPct <= cfg.wallProximityPct
+    && strongestDownsideDensity >= cfg.wallMinDensity
+    && strongestDownsideStrength >= cfg.wallMinStrength;
+
   return {
     bias: analysis.bias,
     biasStrength: analysis.biasStrength,
@@ -396,5 +458,20 @@ export function getLiquidationInput(analysis: LiquidationAnalysis): LiquidationI
     nearestDownside: analysis.nearestLongLiquidation,
     fundingRate: analysis.fundingRate ?? null,
     openInterest: analysis.openInterest ?? null,
+    // Zone-aware metrics
+    currentPrice,
+    nearestUpsideDistPct,
+    nearestDownsideDistPct,
+    strongestUpsideStrength,
+    strongestDownsideStrength,
+    strongestUpsideDensity,
+    strongestDownsideDensity,
+    asymmetryRatio,
+    upsideClusterCount: shortLiquidationZones.length,
+    downsideClusterCount: longLiquidationZones.length,
+    upsideMagnet,
+    downsideMagnet,
+    upsideWall,
+    downsideWall,
   };
 }

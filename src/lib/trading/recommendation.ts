@@ -14,6 +14,13 @@ import type {
   LiquidationInput,
   OHLCData,
 } from '@/lib/kraken/types';
+import type {
+  TradingStrategy,
+  SignalEvaluationConfig,
+  SpikeDetectionConfig,
+  LiquidationStrategyConfig,
+} from './v2-types';
+import { DEFAULT_STRATEGY } from './v2-types';
 import { detectKnife, KNIFE_GATING_ENABLED, type KnifeAnalysis } from './knife-detection';
 
 export interface TimeframeWeights {
@@ -25,11 +32,11 @@ export interface TimeframeWeights {
 }
 
 export const DEFAULT_WEIGHTS: TimeframeWeights = {
-  '1d': 35, // Primary trend filter (NEW)
-  '4h': 30, // Trend determination (reduced from 40)
-  '1h': 20, // Setup confirmation (reduced from 30)
-  '15m': 10, // Entry timing (reduced from 20)
-  '5m': 5,  // Spike detection (reduced from 10)
+  '1d': 10,  // Macro trend filter
+  '4h': 18,  // Trend context
+  '1h': 40,  // Primary decision timeframe (trader trusts this most)
+  '15m': 24, // Entry timing
+  '5m': 8,   // Candlestick patterns only
 };
 
 export interface LongChecks {
@@ -236,62 +243,169 @@ export function analyzeFlow(
 }
 
 /**
- * Analyze liquidation data for a direction
+ * Zone-aware liquidation analysis result
  */
-export function analyzeLiquidation(
-  direction: 'long' | 'short',
-  liq: LiquidationInput | null
-): {
+export interface LiquidationAnalysisResult {
   aligned: boolean;
   bias: 'long_squeeze' | 'short_squeeze' | 'neutral';
   biasStrength: number;
   fundingRate: number | null;
   nearestTarget: number | null;
+  magnetEffect: 'aligned' | 'opposing' | 'none';
+  wallEffect: 'supporting' | 'blocking' | 'none';
+  asymmetry: 'strong_aligned' | 'mild_aligned' | 'neutral' | 'opposing';
+  description: string;
   adjustments: {
-    liqAligned: number;
+    magnetEffect: number;
+    wallEffect: number;
+    asymmetry: number;
     fundingConfirm: number;
+    proximityBonus: number;
     total: number;
   };
-} {
+}
+
+/** Default scoring when no strategy config provided */
+const DEFAULT_LIQ_SCORING = {
+  magnetAligned: 15, magnetOpposing: -10,
+  wallSupport: 8, wallBlock: -8,
+  asymmetryAligned: 10, asymmetryOpposing: -5,
+  fundingConfirm: 5, proximityBonus: 5,
+};
+const DEFAULT_STRONG_ASYMMETRY = 1.5;
+
+/**
+ * Analyze liquidation data for a direction with zone awareness
+ */
+export function analyzeLiquidation(
+  direction: 'long' | 'short',
+  liq: LiquidationInput | null,
+  liqConfig?: LiquidationStrategyConfig
+): LiquidationAnalysisResult {
   if (!liq) {
     return {
-      aligned: true, // Pass by default when no data
+      aligned: true,
       bias: 'neutral',
       biasStrength: 0,
       fundingRate: null,
       nearestTarget: null,
-      adjustments: { liqAligned: 0, fundingConfirm: 0, total: 0 },
+      magnetEffect: 'none',
+      wallEffect: 'none',
+      asymmetry: 'neutral',
+      description: 'No data',
+      adjustments: { magnetEffect: 0, wallEffect: 0, asymmetry: 0, fundingConfirm: 0, proximityBonus: 0, total: 0 },
     };
   }
 
-  // Determine alignment
-  // For LONG: short_squeeze is aligned (shorts will be liquidated above = upward fuel)
-  // For SHORT: long_squeeze is aligned (longs will be liquidated below = downward fuel)
+  const scoring = liqConfig?.scoring ?? DEFAULT_LIQ_SCORING;
+  const strongAsymThreshold = liqConfig?.strongAsymmetryThreshold ?? DEFAULT_STRONG_ASYMMETRY;
+
+  // Basic alignment (unchanged logic)
   const aligned =
     (direction === 'long' && liq.bias === 'short_squeeze') ||
     (direction === 'short' && liq.bias === 'long_squeeze') ||
     liq.bias === 'neutral';
 
-  const nearestTarget =
-    direction === 'long' ? liq.nearestUpside : liq.nearestDownside;
+  const nearestTarget = direction === 'long' ? liq.nearestUpside : liq.nearestDownside;
 
-  // Calculate adjustments
-  const adjustments = {
-    // Liquidation structure supports direction
-    liqAligned: aligned && liq.biasStrength > 0.3 ? 10 : 0,
-    // Funding rate confirms direction
-    // For LONG: negative funding is bullish (shorts are crowded, paying longs)
-    // For SHORT: positive funding is bearish (longs are crowded, paying shorts)
-    fundingConfirm:
-      liq.fundingRate !== null
-        ? (direction === 'long' && liq.fundingRate < -0.0001) ||
-          (direction === 'short' && liq.fundingRate > 0.0001)
-          ? 5
-          : 0
-        : 0,
-    total: 0,
-  };
-  adjustments.total = adjustments.liqAligned + adjustments.fundingConfirm;
+  // --- Magnet effect ---
+  // LONG: upside magnet = aligned (cluster pulls price up), downside magnet = opposing
+  // SHORT: downside magnet = aligned, upside magnet = opposing
+  let magnetEffect: 'aligned' | 'opposing' | 'none' = 'none';
+  if (direction === 'long') {
+    if (liq.upsideMagnet) magnetEffect = 'aligned';
+    else if (liq.downsideMagnet) magnetEffect = 'opposing';
+  } else {
+    if (liq.downsideMagnet) magnetEffect = 'aligned';
+    else if (liq.upsideMagnet) magnetEffect = 'opposing';
+  }
+
+  // --- Wall effect ---
+  // LONG: upside wall = supporting (cascade fuel in direction), downside wall = blocking
+  // SHORT: downside wall = supporting, upside wall = blocking
+  let wallEffect: 'supporting' | 'blocking' | 'none' = 'none';
+  if (direction === 'long') {
+    if (liq.upsideWall) wallEffect = 'supporting';
+    else if (liq.downsideWall) wallEffect = 'blocking';
+  } else {
+    if (liq.downsideWall) wallEffect = 'supporting';
+    else if (liq.upsideWall) wallEffect = 'blocking';
+  }
+
+  // --- Asymmetry ---
+  // For LONG: asymmetryRatio > 1 means more upside fuel = aligned
+  // For SHORT: asymmetryRatio < 1 means more downside fuel = aligned
+  let asymmetry: 'strong_aligned' | 'mild_aligned' | 'neutral' | 'opposing' = 'neutral';
+  if (direction === 'long') {
+    if (liq.asymmetryRatio >= strongAsymThreshold) asymmetry = 'strong_aligned';
+    else if (liq.asymmetryRatio > 1.1) asymmetry = 'mild_aligned';
+    else if (liq.asymmetryRatio < 1 / strongAsymThreshold) asymmetry = 'opposing';
+  } else {
+    if (liq.asymmetryRatio <= 1 / strongAsymThreshold) asymmetry = 'strong_aligned';
+    else if (liq.asymmetryRatio < 0.9) asymmetry = 'mild_aligned';
+    else if (liq.asymmetryRatio > strongAsymThreshold) asymmetry = 'opposing';
+  }
+
+  // --- Adjustments ---
+  const magnetAdj = magnetEffect === 'aligned' ? scoring.magnetAligned
+    : magnetEffect === 'opposing' ? scoring.magnetOpposing : 0;
+
+  const wallAdj = wallEffect === 'supporting' ? scoring.wallSupport
+    : wallEffect === 'blocking' ? scoring.wallBlock : 0;
+
+  const asymAdj = asymmetry === 'strong_aligned' ? scoring.asymmetryAligned
+    : asymmetry === 'mild_aligned' ? Math.round(scoring.asymmetryAligned * 0.5)
+    : asymmetry === 'opposing' ? scoring.asymmetryOpposing : 0;
+
+  // Funding rate confirms direction
+  const fundingAdj =
+    liq.fundingRate !== null
+      ? (direction === 'long' && liq.fundingRate < -0.0001) ||
+        (direction === 'short' && liq.fundingRate > 0.0001)
+        ? scoring.fundingConfirm
+        : 0
+      : 0;
+
+  // Proximity bonus: nearest cluster in direction is close
+  const nearDistPct = direction === 'long' ? liq.nearestUpsideDistPct : liq.nearestDownsideDistPct;
+  const proximityAdj = nearDistPct !== null && nearDistPct <= 2.0 ? scoring.proximityBonus : 0;
+
+  const total = magnetAdj + wallAdj + asymAdj + fundingAdj + proximityAdj;
+
+  // --- Description string ---
+  const parts: string[] = [];
+
+  if (magnetEffect === 'aligned') {
+    parts.push(`Magnet ${direction === 'long' ? '↑' : '↓'}`);
+  } else if (magnetEffect === 'opposing') {
+    parts.push(`Magnet ${direction === 'long' ? '↓' : '↑'} \u26A0`);
+  }
+
+  if (wallEffect === 'supporting') {
+    parts.push('Wall+fuel');
+  } else if (wallEffect === 'blocking') {
+    parts.push('Wall blocks \u26A0');
+  }
+
+  if (asymmetry === 'strong_aligned' || asymmetry === 'mild_aligned') {
+    parts.push('Fuel lopsided');
+  } else if (asymmetry === 'opposing') {
+    parts.push('Fuel against');
+  } else {
+    parts.push('Balanced');
+  }
+
+  // Distance info
+  if (nearDistPct !== null) {
+    parts.push(`${nearDistPct.toFixed(1)}% away`);
+  }
+
+  // Funding rate
+  if (liq.fundingRate !== null) {
+    parts.push(`FR ${(liq.fundingRate * 100).toFixed(3)}%`);
+  }
+
+  const description = parts.join(' | ') || 'No data';
 
   return {
     aligned,
@@ -299,7 +413,18 @@ export function analyzeLiquidation(
     biasStrength: liq.biasStrength,
     fundingRate: liq.fundingRate,
     nearestTarget,
-    adjustments,
+    magnetEffect,
+    wallEffect,
+    asymmetry,
+    description,
+    adjustments: {
+      magnetEffect: magnetAdj,
+      wallEffect: wallAdj,
+      asymmetry: asymAdj,
+      fundingConfirm: fundingAdj,
+      proximityBonus: proximityAdj,
+      total,
+    },
   };
 }
 
@@ -892,13 +1017,16 @@ export function getMissingConditions(
 /**
  * Check for 5m spike conditions
  */
-export function detectSpike(ind5m: Indicators): {
+export function detectSpike(
+  ind5m: Indicators,
+  spikeConfig: SpikeDetectionConfig = DEFAULT_STRATEGY.spike
+): {
   isSpike: boolean;
   direction: 'long' | 'short' | null;
 } {
-  const hasVolumeSpike = ind5m.volRatio > 2;
-  const isOversold = ind5m.rsi < 25;
-  const isOverbought = ind5m.rsi > 75;
+  const hasVolumeSpike = ind5m.volRatio > spikeConfig.volumeRatioThreshold;
+  const isOversold = ind5m.rsi < spikeConfig.oversoldRSI;
+  const isOverbought = ind5m.rsi > spikeConfig.overboughtRSI;
 
   if (hasVolumeSpike && isOversold) {
     return { isSpike: true, direction: 'long' };
@@ -1008,10 +1136,11 @@ export function formatChecklist(
   btcChange: number,
   micro?: MicrostructureInput | null,
   liq?: LiquidationInput | null,
-  ind1d?: Indicators | null
+  ind1d?: Indicators | null,
+  liqConfig?: LiquidationStrategyConfig
 ): TradingRecommendation['checklist'] {
   const flowAnalysis = micro ? analyzeFlow(direction, micro) : null;
-  const liqAnalysis = liq ? analyzeLiquidation(direction, liq) : null;
+  const liqAnalysis = liq ? analyzeLiquidation(direction, liq, liqConfig) : null;
 
   // Format 4H trend with EMA info
   const trend4hValue = formatEMAInfo(ind4h);
@@ -1067,20 +1196,11 @@ export function formatChecklist(
   }
 
   // Add liquidation bias to checklist when liquidation data available
-  // LOGIC: short_squeeze = bullish (favors LONG), long_squeeze = bearish (favors SHORT)
+  // Uses zone-aware description from analyzeLiquidation()
   if (liqAnalysis) {
-    // Show direction-aware label
-    const biasStr = liqAnalysis.bias === 'short_squeeze'
-      ? (direction === 'long' ? '↑ Short sq.' : '↑ Short sq. ⚠️')  // Bullish - good for long, bad for short
-      : liqAnalysis.bias === 'long_squeeze'
-      ? (direction === 'short' ? '↓ Long sq.' : '↓ Long sq. ⚠️')   // Bearish - good for short, bad for long
-      : '— Neutral';
-    const fundingStr = liqAnalysis.fundingRate !== null
-      ? ` FR: ${(liqAnalysis.fundingRate * 100).toFixed(3)}%`
-      : '';
     checklist.liqBias = {
       pass: checks.liqBias ?? true,
-      value: `${biasStr}${fundingStr}`,
+      value: liqAnalysis.description,
     };
   }
 
@@ -1116,13 +1236,15 @@ export function calculateDirectionStrength(
   ind1d: Indicators | null,
   btcTrend: 'bull' | 'bear' | 'neut',
   micro: MicrostructureInput | null,
-  liq: LiquidationInput | null
+  liq: LiquidationInput | null,
+  signalConfig: SignalEvaluationConfig = DEFAULT_STRATEGY.signals
 ): { strength: number; signals: SignalWeight[]; reasons: string[]; warnings: string[] } {
   const signals: SignalWeight[] = [];
   const reasons: string[] = [];
   const warnings: string[] = [];
+  const w = signalConfig.directionWeights;
 
-  // === 1. DAILY TREND (weight: 22) - Primary filter using EMA-based trend ===
+  // === 1. DAILY TREND (weight: 8) - Trend filter (reduced - trader trusts lower TFs) ===
   if (ind1d) {
     let dailyValue = 0.5;
 
@@ -1155,7 +1277,7 @@ export function calculateDirectionStrength(
       dailyValue = Math.min(1, dailyValue + 0.1);
     }
 
-    signals.push({ name: '1D Trend', weight: 22, value: dailyValue });
+    signals.push({ name: '1D Trend', weight: w['1dTrend'], value: dailyValue });
 
     if (dailyValue >= 0.75) {
       reasons.push(`Daily ${dailyTrend} (${dailyScore > 0 ? '+' : ''}${dailyScore})`);
@@ -1165,7 +1287,7 @@ export function calculateDirectionStrength(
     }
   }
 
-  // === 2. 4H TREND (weight: 20) - Main trend using EMA structure ===
+  // === 2. 4H TREND (weight: 15) - Trend context ===
   let htfValue = 0.5;
   const htfTrend = ind4h.trend;
   const htfScore = ind4h.trendScore;
@@ -1202,7 +1324,7 @@ export function calculateDirectionStrength(
     htfValue = Math.min(1, htfValue + 0.05);
   }
 
-  signals.push({ name: '4H Trend', weight: 20, value: htfValue });
+  signals.push({ name: '4H Trend', weight: w['4hTrend'], value: htfValue });
 
   if (htfValue >= 0.75) {
     const alignStr = ind4h.emaAlignment === (direction === 'long' ? 'bullish' : 'bearish') ? ' ✓EMA' : '';
@@ -1212,7 +1334,7 @@ export function calculateDirectionStrength(
     warnings.push(`⚠️ 4H opposes: ${htfTrend} (${htfScore})`);
   }
 
-  // === 3. 1H SETUP (weight: 15) - Setup confirmation ===
+  // === 3. 1H SETUP (weight: 35) - Setup confirmation (trader's primary TF) ===
   let setupValue = 0.5;
   const setupTrend = ind1h.trend;
 
@@ -1226,37 +1348,38 @@ export function calculateDirectionStrength(
     else setupValue = 0.25;
   }
 
-  signals.push({ name: '1H Setup', weight: 15, value: setupValue });
+  signals.push({ name: '1H Setup', weight: w['1hSetup'], value: setupValue });
   if (setupValue >= 0.8) reasons.push(`1H confirms ${setupTrend}`);
 
-  // 4. 15m RSI entry (weight: 15) - Entry timing
-  let rsiValue = 0;
-  if (direction === 'long') {
-    // Ideal: RSI 25-40, acceptable: 20-50
-    if (ind15m.rsi >= 20 && ind15m.rsi <= 35) rsiValue = 1.0;
-    else if (ind15m.rsi > 35 && ind15m.rsi <= 45) rsiValue = 0.7;
-    else if (ind15m.rsi > 45 && ind15m.rsi <= 50) rsiValue = 0.4;
-    else if (ind15m.rsi < 20) rsiValue = 0.8; // Very oversold - slightly reduced (may be dumping)
-    else rsiValue = 0.2;
-  } else {
-    // Ideal: RSI 60-75, acceptable: 50-80
-    if (ind15m.rsi >= 65 && ind15m.rsi <= 80) rsiValue = 1.0;
-    else if (ind15m.rsi >= 55 && ind15m.rsi < 65) rsiValue = 0.7;
-    else if (ind15m.rsi >= 50 && ind15m.rsi < 55) rsiValue = 0.4;
-    else if (ind15m.rsi > 80) rsiValue = 0.8; // Very overbought
-    else rsiValue = 0.2;
-  }
-  signals.push({ name: '15m RSI', weight: 15, value: rsiValue });
-  if (rsiValue >= 0.8) reasons.push(`RSI ${ind15m.rsi.toFixed(0)} ${direction === 'long' ? 'oversold' : 'overbought'}`);
+  // 4. 15m ENTRY (weight: 20) - Multi-signal entry timing (RSI + BB + MACD + EMA20)
+  // Uses evaluate15mLongEntry/ShortEntry instead of raw RSI for stable, confluent signals
+  const entry15m = direction === 'long'
+    ? evaluate15mLongEntry(ind15m)
+    : evaluate15mShortEntry(ind15m);
 
-  // 5. Volume (weight: 12) - Confirmation
-  let volValue = 0.3;
-  if (ind15m.volRatio >= 2.0) volValue = 1.0;
-  else if (ind15m.volRatio >= 1.5) volValue = 0.8;
-  else if (ind15m.volRatio >= 1.3) volValue = 0.6;
-  else if (ind15m.volRatio >= 1.0) volValue = 0.4;
-  signals.push({ name: 'Volume', weight: 12, value: volValue });
-  if (volValue >= 0.8) reasons.push(`Volume ${ind15m.volRatio.toFixed(1)}x`);
+  // Normalize multi-signal score (max ~7.5) to 0-1 range
+  const maxEntryScore = 7.5;
+  let entryValue = Math.min(1, entry15m.score / maxEntryScore);
+
+  // Cap score for entries that don't meet the confluence threshold (score < 3)
+  if (!entry15m.pass) {
+    entryValue = Math.min(entryValue, 0.35);
+  }
+
+  signals.push({ name: '15m Entry', weight: w['15mEntry'], value: entryValue });
+  if (entryValue >= 0.6) reasons.push(`15m entry: ${entry15m.signals.slice(0, 2).join(', ')}`);
+
+  // 5. Volume (weight: 6) - Context-aware confirmation
+  const volContext = determineEntryContext(ind15m, ind1h, direction);
+  const volEval = evaluateVolume(ind15m.volRatio, volContext);
+  let volValue = 0.5;
+  if (volEval.pass) {
+    volValue = volEval.quality === 'strong' ? 0.9 : volEval.quality === 'moderate' ? 0.65 : 0.5;
+  } else {
+    volValue = 0.25;
+  }
+  signals.push({ name: 'Volume', weight: w.volume, value: volValue });
+  if (volValue >= 0.8) reasons.push(`Volume ${volEval.description}`);
 
   // 6. BTC alignment (weight: 8) - Correlation
   let btcValue = 0.5;
@@ -1269,22 +1392,23 @@ export function calculateDirectionStrength(
     else if (btcTrend === 'neut') btcValue = 0.6;
     else btcValue = 0.3;
   }
-  signals.push({ name: 'BTC Align', weight: 8, value: btcValue });
+  signals.push({ name: 'BTC Align', weight: w.btcAlign, value: btcValue });
   if (btcValue >= 0.8) reasons.push(`BTC ${btcTrend}`);
   if (btcValue < 0.4) warnings.push(`⚠️ BTC opposing: ${btcTrend}`);
 
-  // 7. MACD momentum (weight: 8) - Momentum confirmation
+  // 7. MACD momentum (weight: 6) - Dead-zone-aware evaluation
+  const macdEval = evaluateMACDMomentum(direction, ind15m.histogram, ind15m.macd);
   let macdValue = 0.5;
-  const hist = ind15m.histogram ?? 0;
-  if (direction === 'long') {
-    if (hist > 0) macdValue = Math.min(1, 0.6 + Math.abs(hist) * 1000);
-    else macdValue = Math.max(0.1, 0.4 - Math.abs(hist) * 500);
+  if (macdEval.pass) {
+    macdValue = macdEval.strength === 'strong' ? 0.95
+      : macdEval.strength === 'moderate' ? 0.75 : 0.6;
+  } else if (macdEval.strength === 'neutral') {
+    macdValue = 0.45; // Dead zone - slightly below neutral
   } else {
-    if (hist < 0) macdValue = Math.min(1, 0.6 + Math.abs(hist) * 1000);
-    else macdValue = Math.max(0.1, 0.4 - Math.abs(hist) * 500);
+    macdValue = 0.2; // Opposing momentum
   }
-  signals.push({ name: 'MACD Mom', weight: 8, value: macdValue });
-  if (macdValue >= 0.7) reasons.push(`MACD histogram ${hist > 0 ? '+' : ''}${hist.toFixed(5)}`);
+  signals.push({ name: 'MACD Mom', weight: w.macdMom, value: macdValue });
+  if (macdValue >= 0.7) reasons.push(`MACD ${macdEval.description}`);
 
   // 8. Flow/Microstructure (weight: 4) - When available
   if (micro) {
@@ -1293,7 +1417,7 @@ export function calculateDirectionStrength(
     if (flowAnalysis.status === 'aligned') flowValue = 0.9;
     else if (flowAnalysis.status === 'neutral') flowValue = 0.5;
     else flowValue = 0.2;
-    signals.push({ name: 'Flow', weight: 4, value: flowValue });
+    signals.push({ name: 'Flow', weight: w.flow, value: flowValue });
     if (flowValue >= 0.8) reasons.push(`Flow aligned (${flowAnalysis.cvdTrend} CVD)`);
     if (flowValue < 0.3) warnings.push(`⚠️ Flow opposing`);
     if (flowAnalysis.hasDivergence) {
@@ -1303,6 +1427,61 @@ export function calculateDirectionStrength(
       }
     }
   }
+
+  // 9. Liquidation zones (weight: liq, default 6) - When available
+  if (liq && liq.currentPrice > 0) {
+    const liqAnalysis = analyzeLiquidation(direction, liq);
+    let liqValue = 0.5; // Neutral baseline
+
+    // Magnet effect: strong directional pull
+    if (liqAnalysis.magnetEffect === 'aligned') liqValue += 0.25;
+    else if (liqAnalysis.magnetEffect === 'opposing') liqValue -= 0.2;
+
+    // Wall effect: cascade fuel or blockade
+    if (liqAnalysis.wallEffect === 'supporting') liqValue += 0.15;
+    else if (liqAnalysis.wallEffect === 'blocking') liqValue -= 0.15;
+
+    // Asymmetry: fuel balance
+    if (liqAnalysis.asymmetry === 'strong_aligned') liqValue += 0.15;
+    else if (liqAnalysis.asymmetry === 'mild_aligned') liqValue += 0.08;
+    else if (liqAnalysis.asymmetry === 'opposing') liqValue -= 0.1;
+
+    liqValue = Math.max(0, Math.min(1, liqValue));
+
+    signals.push({ name: 'Liq Zones', weight: w.liq ?? 6, value: liqValue });
+    if (liqValue >= 0.75) reasons.push(`Liq zones aligned (${liqAnalysis.magnetEffect !== 'none' ? 'magnet' : 'fuel'})`);
+    if (liqValue < 0.35) warnings.push(`⚠️ Liq zones opposing`);
+  }
+
+  // 10. Candlestick patterns (weight: 8) - 5m and 15m structural patterns
+  const candlePatterns5m = ind5m.candlestickPatterns || [];
+  const candlePatterns15m = ind15m.candlestickPatterns || [];
+  const targetDir = direction === 'long' ? 'bullish' : 'bearish';
+  let candleValue = 0.5; // Neutral baseline
+  let candleReason = '';
+
+  // 15m patterns weighted 2x vs 5m (more significant timeframe)
+  for (const p of candlePatterns15m) {
+    if (p.direction === targetDir) {
+      candleValue += p.strength * 0.3;
+      if (!candleReason) candleReason = p.name.replace(/_/g, ' ');
+    } else if (p.direction !== 'neutral') {
+      candleValue -= p.strength * 0.2;
+    }
+  }
+  for (const p of candlePatterns5m) {
+    if (p.direction === targetDir) {
+      candleValue += p.strength * 0.15;
+      if (!candleReason) candleReason = p.name.replace(/_/g, ' ');
+    } else if (p.direction !== 'neutral') {
+      candleValue -= p.strength * 0.1;
+    }
+  }
+  candleValue = Math.max(0, Math.min(1, candleValue));
+
+  signals.push({ name: 'Candles', weight: w.candlestick ?? 8, value: candleValue });
+  if (candleValue >= 0.7 && candleReason) reasons.push(`Candle: ${candleReason}`);
+  if (candleValue < 0.3) warnings.push(`⚠️ Opposing candlestick pattern`);
 
   // Calculate weighted strength
   let totalWeight = 0;
@@ -1319,11 +1498,14 @@ export function calculateDirectionStrength(
 /**
  * Get letter grade from strength score
  */
-export function getGradeFromStrength(strength: number): 'A' | 'B' | 'C' | 'D' | 'F' {
-  if (strength >= 80) return 'A';
-  if (strength >= 65) return 'B';
-  if (strength >= 50) return 'C';
-  if (strength >= 35) return 'D';
+export function getGradeFromStrength(
+  strength: number,
+  thresholds: SignalEvaluationConfig['gradeThresholds'] = DEFAULT_STRATEGY.signals.gradeThresholds
+): 'A' | 'B' | 'C' | 'D' | 'F' {
+  if (strength >= thresholds.A) return 'A';
+  if (strength >= thresholds.B) return 'B';
+  if (strength >= thresholds.C) return 'C';
+  if (strength >= thresholds.D) return 'D';
   return 'F';
 }
 
@@ -1475,8 +1657,12 @@ export function generateRecommendation(
   tf1d?: TimeframeData | null,
   currentPrice?: number,
   exchange?: string,
-  pair?: string
+  pair?: string,
+  strategy?: TradingStrategy
 ): TradingRecommendation | null {
+  const strat = strategy ?? DEFAULT_STRATEGY;
+  const signalConfig = strat.signals;
+  const spikeConfig = strat.spike;
   const ind4h = tf4h.indicators;
   const ind1h = tf1h.indicators;
   const ind15m = tf15m.indicators;
@@ -1492,8 +1678,8 @@ export function generateRecommendation(
   const shortChecks = evaluateShortConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d);
 
   // Calculate weighted strength scores for BOTH directions
-  const longStrengthResult = calculateDirectionStrength('long', longChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null);
-  const shortStrengthResult = calculateDirectionStrength('short', shortChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null);
+  const longStrengthResult = calculateDirectionStrength('long', longChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig);
+  const shortStrengthResult = calculateDirectionStrength('short', shortChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig);
 
   // Base score (6-7 conditions depending on daily availability, excluding flowConfirm and liqBias)
   const longPassed = countPassed(longChecks, false);
@@ -1509,8 +1695,9 @@ export function generateRecommendation(
   if (liq) totalItems++;
 
   // Format checklists for BOTH directions
-  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d);
-  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d);
+  const liqConfig = strat.liquidation;
+  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig);
+  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig);
 
   // Determine which setup is stronger (based on weighted strength)
   const bestSetup = longStrengthResult.strength >= shortStrengthResult.strength ? 'long' : 'short';
@@ -1519,14 +1706,14 @@ export function generateRecommendation(
   // Flow analysis for both directions
   const longFlowAnalysis = analyzeFlow('long', micro || null);
   const shortFlowAnalysis = analyzeFlow('short', micro || null);
-  const longLiqAnalysis = analyzeLiquidation('long', liq || null);
-  const shortLiqAnalysis = analyzeLiquidation('short', liq || null);
+  const longLiqAnalysis = analyzeLiquidation('long', liq || null, liqConfig);
+  const shortLiqAnalysis = analyzeLiquidation('short', liq || null, liqConfig);
 
   // Build DirectionRecommendation for LONG
   const longRec: DirectionRecommendation = {
     strength: longStrengthResult.strength,
     confidence: Math.round(Math.min(95, Math.max(5, longStrengthResult.strength + longFlowAnalysis.adjustments.total + longLiqAnalysis.adjustments.total))),
-    grade: getGradeFromStrength(longStrengthResult.strength),
+    grade: getGradeFromStrength(longStrengthResult.strength, signalConfig.gradeThresholds),
     reasons: longStrengthResult.reasons,
     warnings: [...longStrengthResult.warnings],
     checklist: longChecklist,
@@ -1538,7 +1725,7 @@ export function generateRecommendation(
   const shortRec: DirectionRecommendation = {
     strength: shortStrengthResult.strength,
     confidence: Math.round(Math.min(95, Math.max(5, shortStrengthResult.strength + shortFlowAnalysis.adjustments.total + shortLiqAnalysis.adjustments.total))),
-    grade: getGradeFromStrength(shortStrengthResult.strength),
+    grade: getGradeFromStrength(shortStrengthResult.strength, signalConfig.gradeThresholds),
     reasons: shortStrengthResult.reasons,
     warnings: [...shortStrengthResult.warnings],
     checklist: shortChecklist,
@@ -1564,52 +1751,36 @@ export function generateRecommendation(
   let reason = '';
   let baseConfidence = 0;
 
-  // Use strength-based thresholds instead of binary pass/fail
-  if (longStrengthResult.strength >= 70 && longStrengthResult.strength > shortStrengthResult.strength + 15) {
+  // Use strength-based thresholds from strategy config
+  const { actionThreshold, directionLeadThreshold, sitOnHandsThreshold } = signalConfig;
+  const fullConfidenceThreshold = strat.positionSizing.fullEntryConfidence;
+
+  if (longStrengthResult.strength >= actionThreshold && longStrengthResult.strength > shortStrengthResult.strength + directionLeadThreshold) {
     action = 'LONG';
-    reason = `LONG Grade ${longRec.grade} (${longStrengthResult.strength}%): ${longStrengthResult.reasons.slice(0, 3).join(', ')}.`;
+    const confidenceNote = longStrengthResult.strength < fullConfidenceThreshold ? ` (below ${fullConfidenceThreshold}% confidence threshold)` : '';
+    reason = `LONG Grade ${longRec.grade} (${longStrengthResult.strength}%): ${longStrengthResult.reasons.slice(0, 3).join(', ')}.${confidenceNote}`;
     baseConfidence = longStrengthResult.strength;
-  } else if (shortStrengthResult.strength >= 70 && shortStrengthResult.strength > longStrengthResult.strength + 15) {
+  } else if (shortStrengthResult.strength >= actionThreshold && shortStrengthResult.strength > longStrengthResult.strength + directionLeadThreshold) {
     action = 'SHORT';
-    reason = `SHORT Grade ${shortRec.grade} (${shortStrengthResult.strength}%): ${shortStrengthResult.reasons.slice(0, 3).join(', ')}.`;
+    const confidenceNote = shortStrengthResult.strength < fullConfidenceThreshold ? ` (below ${fullConfidenceThreshold}% confidence threshold)` : '';
+    reason = `SHORT Grade ${shortRec.grade} (${shortStrengthResult.strength}%): ${shortStrengthResult.reasons.slice(0, 3).join(', ')}.${confidenceNote}`;
     baseConfidence = shortStrengthResult.strength;
-  } else if (Math.max(longStrengthResult.strength, shortStrengthResult.strength) >= 55) {
+  } else if (Math.max(longStrengthResult.strength, shortStrengthResult.strength) >= sitOnHandsThreshold) {
+    // Between sitOnHands and action threshold: forming but not actionable
     action = 'WAIT';
     const strongerDir = longStrengthResult.strength >= shortStrengthResult.strength ? 'LONG' : 'SHORT';
     const strongerStrength = Math.max(longStrengthResult.strength, shortStrengthResult.strength);
-    reason = `${strongerDir} forming (${strongerStrength}%). Both: LONG ${longRec.grade} vs SHORT ${shortRec.grade}. Wait for stronger signal.`;
+    reason = `SIT ON HANDS. ${strongerDir} forming (${strongerStrength}%). LONG ${longRec.grade} vs SHORT ${shortRec.grade}. Not yet actionable.`;
     baseConfidence = strongerStrength * 0.7;
   } else {
     action = 'WAIT';
-    reason = `Weak setups. LONG ${longRec.grade} (${longStrengthResult.strength}%), SHORT ${shortRec.grade} (${shortStrengthResult.strength}%). Wait for better entry.`;
+    reason = `SIT ON HANDS. Weak setups. LONG ${longRec.grade} (${longStrengthResult.strength}%), SHORT ${shortRec.grade} (${shortStrengthResult.strength}%). No edge.`;
     baseConfidence = 20;
   }
 
-  // Check for 5m spike - for Martingale, allow spikes even against weak HTF
-  const spike = detectSpike(ind5m);
-  if (spike.isSpike && action === 'WAIT') {
-    // For Martingale, spikes are opportunities even against trend (with warnings)
-    const htfAllowsLongSpike = ind4h.bias !== 'bearish' && (ind1d ? ind1d.bias !== 'bearish' : true);
-    const htfAllowsShortSpike = ind4h.bias !== 'bullish' && (ind1d ? ind1d.bias !== 'bullish' : true);
-
-    if (spike.direction === 'long') {
-      action = 'SPIKE ↑';
-      reason = `⚡ SPIKE opportunity: RSI ${ind5m.rsi.toFixed(0)}, Vol ${ind5m.volRatio.toFixed(1)}x.`;
-      baseConfidence = htfAllowsLongSpike ? 60 : 45;
-      if (!htfAllowsLongSpike) {
-        reason += ' ⚠️ Counter-trend - tight stops!';
-        longRec.warnings.push('Counter-trend spike - use tight stops');
-      }
-    } else {
-      action = 'SPIKE ↓';
-      reason = `⚡ SPIKE opportunity: RSI ${ind5m.rsi.toFixed(0)}, Vol ${ind5m.volRatio.toFixed(1)}x.`;
-      baseConfidence = htfAllowsShortSpike ? 60 : 45;
-      if (!htfAllowsShortSpike) {
-        reason += ' ⚠️ Counter-trend - tight stops!';
-        shortRec.warnings.push('Counter-trend spike - use tight stops');
-      }
-    }
-  }
+  // Check for 5m spike — informational only, no longer overrides action
+  // Spikes on 5m are too short-lived to drive trade decisions; they appear as warnings instead
+  const spike = detectSpike(ind5m, spikeConfig);
 
   // Knife detection and gating
   let knifeAnalysis: KnifeAnalysis | null = null;
@@ -1657,6 +1828,10 @@ export function generateRecommendation(
       const flipDir = knifeAnalysis.direction === 'falling' ? 'SHORT' : 'LONG';
       allWarnings.push(`💡 Consider ${flipDir} instead (trend-follow)`);
     }
+  }
+  if (spike.isSpike) {
+    const spikeDir = spike.direction === 'long' ? '↑' : '↓';
+    allWarnings.push(`⚡ 5m spike ${spikeDir}: RSI ${ind5m.rsi.toFixed(0)}, Vol ${ind5m.volRatio.toFixed(1)}x`);
   }
   if (momentum) {
     allWarnings.push(`🎯 Momentum ${momentum.direction}: ${momentum.reason}`);
@@ -1718,6 +1893,10 @@ export function generateRecommendation(
       fundingRate: liqAnalysis.fundingRate,
       nearestTarget: liqAnalysis.nearestTarget,
       aligned: liqAnalysis.aligned,
+      magnetEffect: liqAnalysis.magnetEffect,
+      wallEffect: liqAnalysis.wallEffect,
+      asymmetry: liqAnalysis.asymmetry,
+      description: liqAnalysis.description,
       adjustments: liqAnalysis.adjustments,
     } : undefined,
     knifeStatus: knifeAnalysis?.isKnife ? {
@@ -1738,38 +1917,54 @@ export function generateRecommendation(
 }
 
 /**
- * Calculate position sizing
+ * Calculate position sizing (v2)
+ *
+ * v2 changes:
+ * - No stop loss (trader accepts liquidation risk)
+ * - No fixed take-profit (exit signals handle this)
+ * - DCA levels are dynamic (triggered by momentum exhaustion, not fixed %)
+ * - Shows estimated liquidation price based on margin/leverage
  */
 export function calculatePosition(
   capital: number,
-  targetProfit: number,
-  leverage = 10,
-  currentPrice: number
+  currentPrice: number,
+  direction: 'long' | 'short' = 'long',
+  strategy: TradingStrategy = DEFAULT_STRATEGY
 ): {
   positionSize: number;
-  moveNeeded: number;
-  takeProfit: number;
-  stopLoss: number;
-  dcaLevels: { level: string; trigger: string; amount: number; price: number }[];
+  marginUsed: number;
+  estimatedLiquidation: number;
+  liquidationDistancePercent: number;
+  dcaCapacity: { dcasRemaining: number; marginPerDCA: number; maxTotalMargin: number };
 } {
+  const { leverage, maxTotalMarginPercent, dcaMarginPercent, maxDCACount } = strategy.positionSizing;
   const positionSize = capital * leverage;
-  const moveNeeded = (targetProfit / positionSize) * 100;
-  const takeProfit = currentPrice * (1 + moveNeeded / 100);
-  const stopLoss = currentPrice * 0.92; // -8% hard stop
+  const marginUsed = capital;
 
-  // DCA levels
-  const dcaLevels = [
-    { level: 'Entry', trigger: 'Signal', amount: capital * 0.2, price: currentPrice },
-    { level: 'DCA 1', trigger: '-3%', amount: capital * 0.15, price: currentPrice * 0.97 },
-    { level: 'DCA 2', trigger: '-5%', amount: capital * 0.25, price: currentPrice * 0.95 },
-    { level: 'STOP', trigger: '-8%', amount: 0, price: currentPrice * 0.92 },
-  ];
+  // Estimated liquidation based on leverage from strategy
+  // Kraken's maintenance margin is roughly 40% of initial margin
+  // Liquidation occurs when equity falls below maintenance margin
+  const liquidationMove = (1 / leverage) * 0.8;
+  const estimatedLiquidation = direction === 'long'
+    ? currentPrice * (1 - liquidationMove)
+    : currentPrice * (1 + liquidationMove);
+  const liquidationDistancePercent = liquidationMove * 100;
+
+  // DCA capacity from strategy config
+  const currentMarginPercent = (capital / (capital / 0.2)) * 100; // Approximate
+  const remainingMarginPercent = maxTotalMarginPercent - Math.min(currentMarginPercent, maxTotalMarginPercent);
+  const dcasRemaining = Math.min(maxDCACount, Math.floor(remainingMarginPercent / dcaMarginPercent));
+  const marginPerDCA = capital * (dcaMarginPercent / 100);
 
   return {
     positionSize,
-    moveNeeded,
-    takeProfit,
-    stopLoss,
-    dcaLevels,
+    marginUsed,
+    estimatedLiquidation,
+    liquidationDistancePercent,
+    dcaCapacity: {
+      dcasRemaining,
+      marginPerDCA,
+      maxTotalMargin: capital * (maxTotalMarginPercent / 100),
+    },
   };
 }

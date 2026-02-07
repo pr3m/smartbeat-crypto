@@ -1,0 +1,174 @@
+{
+  "meta": {
+    "name": "AGGRESSIVE_SWING_10X",
+    "description": "Aggressive 10x swing strategy with momentum exhaustion DCA. No stops, 48h timebox, max 3 DCAs.",
+    "version": "2.0.0",
+    "pair": "XRP/EUR",
+    "author": "SmartBeat Trader"
+  },
+
+  "timeframeWeights": {
+    "1d": 10,
+    "4h": 18,
+    "1h": 40,
+    "15m": 24,
+    "5m": 8
+  },
+
+  "signals": {
+    "actionThreshold": 68,
+    "directionLeadThreshold": 15,
+    "sitOnHandsThreshold": 50,
+
+    "directionWeights": {
+      "1dTrend": 10,
+      "4hTrend": 18,
+      "1hSetup": 40,
+      "15mEntry": 20,
+      "volume": 6,
+      "btcAlign": 8,
+      "macdMom": 6,
+      "flow": 4,
+      "liq": 6,
+      "candlestick": 8
+    },
+
+    "gradeThresholds": {
+      "A": 80,
+      "B": 65,
+      "C": 50,
+      "D": 35
+    }
+  },
+
+  "spike": {
+    "volumeRatioThreshold": 2.5,
+    "oversoldRSI": 20,
+    "overboughtRSI": 80
+  },
+
+  "positionSizing": {
+    "leverage": 10,
+    "fullEntryMarginPercent": 20,
+    "cautiousEntryMarginPercent": 10,
+    "minEntryConfidence": 65,
+    "fullEntryConfidence": 80,
+    "maxDCACount": 3,
+    "dcaMarginPercent": 15,
+    "maxTotalMarginPercent": 80,
+    "minFreeMarginPercent": 20
+  },
+
+  "dca": {
+    "minDrawdownForDCA": 3,
+    "minTimeBetweenDCAsMs": 7200000,
+    "minExhaustionConfidence": 60,
+    "dcaSizeScaleFactor": 1.0,
+    "allowDCAAfterMidpoint": true,
+
+    "exhaustionThresholds": {
+      "rsiOversold": 30,
+      "rsiOverbought": 70,
+
+      "volumeDecline5m": 0.8,
+      "volumeFading5m": 0.6,
+      "volumeDecline15m": 1.0,
+
+      "macdNearZero": 0.0005,
+      "macdSignalProximity": 0.0002,
+
+      "bbMiddleLow": 0.25,
+      "bbMiddleHigh": 0.75,
+
+      "priceStabilizingLookback": 8,
+      "priceStabilizingMinMatches": 4,
+
+      "minHoursBetweenByLevel": {
+        "1": 1,
+        "2": 2,
+        "3": 4
+      }
+    }
+  },
+
+  "exit": {
+    "exitPressureThreshold": 60,
+    "minConditionFlips": 3,
+    "allowPartialExits": true,
+    "minProfitForExit": 50
+  },
+
+  "antiGreed": {
+    "enabled": true,
+    "drawdownThresholdPercent": 50,
+    "minPnLToActivate": 50,
+    "minHWMToTrack": 100
+  },
+
+  "timebox": {
+    "maxHours": 48,
+    "escalationStartHours": 24,
+    "pressureCurve": "step",
+    "steps": [
+      { "hours": 0, "pressure": 0, "label": "Fresh entry" },
+      { "hours": 12, "pressure": 10, "label": "Monitoring" },
+      { "hours": 24, "pressure": 25, "label": "Midpoint - reassess" },
+      { "hours": 36, "pressure": 50, "label": "Late stage - look for exit" },
+      { "hours": 42, "pressure": 75, "label": "Closing soon - exit on any bounce" },
+      { "hours": 48, "pressure": 100, "label": "Timebox expired - exit now" }
+    ]
+  },
+
+  "liquidation": {
+    "magnetProximityPct": 2.0,
+    "magnetMinStrength": 0.3,
+    "wallProximityPct": 5.0,
+    "wallMinDensity": 0.5,
+    "wallMinStrength": 0.6,
+    "densityNormFactor": 20,
+    "strongAsymmetryThreshold": 1.5,
+    "directionWeight": 6,
+    "scoring": {
+      "magnetAligned": 15,
+      "magnetOpposing": -10,
+      "wallSupport": 8,
+      "wallBlock": -8,
+      "asymmetryAligned": 10,
+      "asymmetryOpposing": -5,
+      "fundingConfirm": 5,
+      "proximityBonus": 5
+    }
+  },
+
+  "risk": {
+    "useStopLoss": false,
+    "useFixedTP": false,
+    "acceptLiquidation": true
+  },
+
+  "aiInstructions": {
+    "personality": "Direct, data-driven, no hand-holding. Speak like a trading desk analyst. Use numbers, not feelings. If the data says exit, say exit. If the setup is garbage, say so.",
+    "corePhilosophy": [
+      "NO stop losses ever - the 48h timebox IS the risk management",
+      "NO fixed take-profit levels - exits are condition-based via exit pressure system",
+      "Accept liquidation as a possible outcome - this is by design with 10x leverage",
+      "DCA is triggered by momentum exhaustion signals, NOT fixed percentage drops",
+      "Maximum 3 DCA entries, each requiring 3+ of 5 exhaustion signals",
+      "Strategy NEVER exits at a loss - hold or get liquidated",
+      "Timeframe weights: 1D=10%, 4H=18%, 1H=40%, 15m=24%, 5m=8% - trust 1H most, 15m for entry timing, 5m for candlestick patterns only",
+      "Entry requires 68+ action threshold with 15+ direction lead"
+    ],
+    "dcaGuidance": "DCA is NOT about price dropping X%. It's about momentum exhaustion. The 5 signals are: (1) RSI divergence/extreme on 15m, (2) Volume drying up on 5m/15m, (3) MACD histogram contracting toward zero, (4) BB position returning to middle (volatility calming), (5) Price stabilizing (higher lows for long DCA, lower highs for short DCA). Need 3+ signals active + minimum drawdown of 3% + minimum time between DCAs.",
+    "exitGuidance": "Exits use a pressure-based system with threshold of 60. Seven pressure sources: timebox (step function over 48h), trend reversal (HTF flip), momentum exhaustion (favorable momentum dying), anti-greed (50% drawdown from HWM when HWM > 100 EUR), condition deterioration (3+ entry conditions flipped), knife detection (sharp move against position), manual override. Exit is NEVER recommended when P&L is negative.",
+    "responseRules": [
+      "Always reference actual strategy parameters, never guess thresholds",
+      "When asked about DCA, call get_v2_engine_state to check momentum exhaustion signals",
+      "When asked about exit, call get_v2_engine_state to check exit pressure breakdown",
+      "Never suggest stop losses, trailing stops, or fixed take-profit levels",
+      "Never suggest exiting at a loss - the strategy accepts liquidation over realized losses",
+      "Reference timebox status when discussing position timing",
+      "Use strategy grades: A(80+), B(65-79), C(50-64), D(35-49), F(<35)",
+      "Format EUR amounts as €X,XXX.XX"
+    ]
+  }
+}

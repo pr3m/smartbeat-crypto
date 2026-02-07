@@ -346,6 +346,42 @@ export const assistantTools: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'get_strategy_config',
+      description:
+        'Get the current trading strategy configuration. Returns weights, thresholds, DCA rules, exit rules, timebox, risk settings, and position sizing rules. Use this to answer questions about the trading strategy.',
+      parameters: {
+        type: 'object',
+        properties: {
+          section: {
+            type: 'string',
+            enum: ['all', 'meta', 'weights', 'signals', 'positionSizing', 'dca', 'exit', 'timebox', 'antiGreed', 'risk'],
+            description: 'Specific section to return (default: all)',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_v2_engine_state',
+      description:
+        'Get the v2 trading engine state for the current position. Returns DCA signal (momentum exhaustion analysis with 5 signals), exit signal (pressure breakdown from 7 sources), timebox status (hours elapsed/remaining, current step, pressure), anti-greed status (HWM, drawdown), and position sizing recommendation. Use this when the user asks about DCA, exit, or position management.',
+      parameters: {
+        type: 'object',
+        properties: {
+          type: {
+            type: 'string',
+            enum: ['simulated', 'kraken'],
+            description: 'Position type to analyze (default: simulated)',
+          },
+        },
+      },
+    },
+  },
 ];
 
 export type ToolName =
@@ -362,4 +398,6 @@ export type ToolName =
   | 'generate_ai_report'
   | 'get_reports'
   | 'get_current_setup'
-  | 'analyze_position';
+  | 'analyze_position'
+  | 'get_strategy_config'
+  | 'get_v2_engine_state';

@@ -41,9 +41,12 @@ export interface SimulatedBalanceData {
   marginUsed: number;
   freeMargin: number;
   marginLevel: number | null;
+  unrealizedPnl: number;
   totalRealizedPnl: number;
   totalFeesPaid: number;
   openPositionsCount: number;
+  liquidated?: boolean;
+  liquidationMessage?: string;
 }
 
 export interface SimulatedPosition {
@@ -420,7 +423,12 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     setTradeBalanceError(null);
 
     try {
-      const res = await fetch('/api/simulated/balance');
+      // Pass current price so balance API can compute unrealized P&L and check liquidation
+      const currentPrice = priceRef.current || 0;
+      const url = currentPrice > 0
+        ? `/api/simulated/balance?currentPrice=${currentPrice}`
+        : '/api/simulated/balance';
+      const res = await fetch(url);
       const data = await res.json();
 
       if (!res.ok || data.success === false) {
@@ -435,7 +443,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
         eb: data.eurBalance.toString(),
         tb: data.eurBalance.toString(),
         m: data.marginUsed.toString(),
-        n: '0',
+        n: (data.unrealizedPnl ?? 0).toString(),
         c: '0',
         v: '0',
         e: data.equity.toString(),
@@ -443,6 +451,12 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
         ml: data.marginLevel?.toString(),
       });
       setSimulatedBalanceError(null);
+
+      // If liquidation occurred, refresh positions too
+      if (data.liquidated) {
+        // Clear positions directly since they were force-closed
+        setSimulatedPositions([]);
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to connect to server';
       setSimulatedBalanceError(errorMsg);
@@ -889,6 +903,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
   }, [enabled, refreshDraftOrders, testMode]);
 
   // Check and fill limit orders when price changes (test mode only)
+  // Also runs when positions are open (for liquidation checks via balance API)
   useEffect(() => {
     if (!testMode || !enabled || !price || price <= 0) return;
 
@@ -897,25 +912,36 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     if (now - lastOrderFillCheck < 2000) return;
     setLastOrderFillCheck(now);
 
-    // Only check if there are open orders
-    if (openOrders.length === 0) return;
+    // Check if there are open orders OR open positions (positions need liquidation monitoring)
+    const hasOpenOrders = openOrders.length > 0;
+    const hasOpenPositions = simulatedPositions.length > 0 || (simulatedBalance?.openPositionsCount ?? 0) > 0;
+    if (!hasOpenOrders && !hasOpenPositions) return;
 
     const checkAndFillOrders = async () => {
       try {
-        const res = await fetch('/api/simulated/orders/fill', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ currentPrice: price }),
-        });
+        // Only call fill endpoint if there are open orders
+        if (hasOpenOrders) {
+          const res = await fetch('/api/simulated/orders/fill', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ currentPrice: price }),
+          });
 
-        if (res.ok) {
-          const data = await res.json();
-          if (data.filled > 0) {
-            // Refresh everything when orders fill
-            refreshOpenOrders(true);
-            refreshSimulatedPositions(true);
-            refreshSimulatedBalance(true);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.filled > 0) {
+              refreshOpenOrders(true);
+              refreshSimulatedPositions(true);
+              refreshSimulatedBalance(true);
+              return; // Balance refresh will handle liquidation check
+            }
           }
+        }
+
+        // If positions are open, refresh balance to trigger liquidation check
+        // (balance API now checks margin level and auto-liquidates if < 80%)
+        if (hasOpenPositions) {
+          refreshSimulatedBalance(true);
         }
       } catch (err) {
         console.error('Error checking limit orders:', err);
@@ -923,7 +949,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     };
 
     checkAndFillOrders();
-  }, [price, testMode, enabled, openOrders.length, lastOrderFillCheck, refreshOpenOrders, refreshSimulatedPositions, refreshSimulatedBalance]);
+  }, [price, testMode, enabled, openOrders.length, simulatedPositions.length, simulatedBalance?.openPositionsCount, lastOrderFillCheck, refreshOpenOrders, refreshSimulatedPositions, refreshSimulatedBalance]);
 
   const hasOpenSimulatedPosition = useMemo(() => {
     if (simulatedBalance?.openPositionsCount !== undefined) {

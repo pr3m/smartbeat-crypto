@@ -6,6 +6,7 @@
 import { ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate } from '@langchain/core/prompts';
 import { getOpenAIClient } from '../client';
 import { loadPrompt, interpolatePrompt } from '../prompt-loader';
+import { buildStrategySystemPrompt } from '../strategy-prompt-builder';
 import {
   PositionEvaluationSchema,
   type PositionEvaluation,
@@ -194,23 +195,8 @@ export async function evaluatePosition(
     maxTokens: 800, // Keep responses concise
   });
 
-  // Calculate strategy context - target profit of €300
-  const TARGET_PROFIT = 300;
+  // Calculate position value
   const positionValue = position.volume * position.currentPrice;
-
-  // Calculate the price needed to achieve €300 profit
-  // For long: profit = volume * (targetPrice - entryPrice) -> targetPrice = entryPrice + (targetProfit / volume)
-  // For short: profit = volume * (entryPrice - targetPrice) -> targetPrice = entryPrice - (targetProfit / volume)
-  const priceMovement = TARGET_PROFIT / position.volume;
-  const targetPrice = position.side === 'long'
-    ? position.entryPrice + priceMovement
-    : position.entryPrice - priceMovement;
-  const priceChangePercent = ((targetPrice - position.entryPrice) / position.entryPrice) * 100;
-
-  // Calculate required price description
-  const requiredPriceForTarget = position.side === 'long'
-    ? `€${targetPrice.toFixed(4)} (+${priceChangePercent.toFixed(2)}% from entry, +€${priceMovement.toFixed(4)} per XRP)`
-    : `€${targetPrice.toFixed(4)} (${priceChangePercent.toFixed(2)}% from entry, -€${priceMovement.toFixed(4)} per XRP)`;
 
   // Build user prompt
   const userPrompt = interpolatePrompt(prompts.user_prompt_template, {
@@ -226,14 +212,17 @@ export async function evaluatePosition(
     pnl_percent: position.pnlPercent.toFixed(2),
     hours_open: position.hoursOpen.toFixed(1),
     margin_used: position.marginUsed.toFixed(2),
-    required_price_for_target: requiredPriceForTarget,
     market_context: formatMarketContext(marketSnapshot),
     liquidation_distance: health.liquidationDistance.toFixed(2),
     margin_level: health.marginLevel.toFixed(0),
   });
 
+  // Inject strategy context into system prompt
+  const strategySection = buildStrategySystemPrompt();
+  const systemPromptWithStrategy = prompts.system_prompt.replace('{strategy_section}', strategySection);
+
   // Add JSON format to system prompt
-  const fullSystemPrompt = `${prompts.system_prompt}\n\n${prompts.json_format}`;
+  const fullSystemPrompt = `${systemPromptWithStrategy}\n\n${prompts.json_format}`;
 
   // Create prompt template
   const prompt = ChatPromptTemplate.fromMessages([

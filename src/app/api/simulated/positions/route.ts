@@ -48,7 +48,8 @@ export async function GET(request: Request) {
           pos.side as 'long' | 'short',
           pos.leverage,
           pos.totalFees,
-          accountEquity // Pass account equity for accurate Kraken-style liquidation calc
+          accountEquity, // Pass account equity for accurate Kraken-style liquidation calc
+          pos.openedAt.getTime() // Pass open time for rollover fee estimation
         );
         return {
           ...pos,
@@ -173,6 +174,7 @@ export async function POST(request: Request) {
       const remainingVolume = position.volume - volumeToClose;
       const remainingCost = position.totalCost - closedCost;
       const remainingFees = position.totalFees - (position.totalFees * portionRatio);
+      const remainingAvgPrice = remainingVolume > 0 ? (remainingCost / remainingVolume) : position.avgEntryPrice;
 
       updatedPosition = await prisma.simulatedPosition.update({
         where: { id: positionId },
@@ -180,6 +182,7 @@ export async function POST(request: Request) {
           volume: remainingVolume,
           totalCost: remainingCost,
           totalFees: remainingFees,
+          avgEntryPrice: remainingAvgPrice,
           realizedPnl: (position.realizedPnl || 0) + realizedPnl,
         },
       });

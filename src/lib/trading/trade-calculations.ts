@@ -5,7 +5,7 @@
  * fee estimates, and risk assessments.
  */
 
-import { calculateLiquidationPrice } from './liquidation';
+import { calculateLiquidationPrice as calculateUserLiquidationPrice } from './position-sizing';
 
 /**
  * Calculate required margin for a position
@@ -190,10 +190,13 @@ export function generateOrderPreview(
     tradeBalance.marginUsed,
     requiredMargin
   );
-  const liquidationPrice = calculateLiquidationPrice(
+  const direction = side === 'buy' ? 'long' : 'short';
+  const { liquidationPrice } = calculateUserLiquidationPrice(
     price,
-    leverage,
-    side === 'buy' ? 'long' : 'short'
+    requiredMargin,
+    total,
+    direction as 'long' | 'short',
+    leverage
   );
 
   return {

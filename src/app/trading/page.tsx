@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { generateRecommendation } from '@/lib/trading/recommendation';
 import { getTradingSession } from '@/lib/trading/session';
@@ -32,6 +32,17 @@ import type { LiquidationAnalysis } from '@/lib/trading/liquidation';
 import { getLiquidationInput } from '@/lib/trading/liquidation';
 import { LiquidationHeatmap } from '@/components/LiquidationHeatmap';
 import { useTradeNotifications } from '@/hooks/useTradeNotifications';
+import { useV2Engine } from '@/hooks/useV2Engine';
+import { PositionDashboard } from '@/components/PositionDashboard';
+import { AccountWidget } from '@/components/dashboard/AccountWidget';
+import { getDefaultStrategy, getStrategy, listStrategies } from '@/lib/trading/strategies';
+import type {
+  QuickEntryParams,
+  QuickCloseParams,
+  QuickDCAParams,
+  QuickTrailingStopParams,
+  QuickTakeProfitParams,
+} from '@/components/dashboard/types';
 
 export default function TradingPage() {
   const [testMode, setTestMode] = useState(true);
@@ -99,6 +110,8 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
   const [displayTf, setDisplayTf] = useState<number>(15);
   const [recommendation, setRecommendation] = useState<TradingRecommendation | null>(null);
   const lastRecommendationRef = useRef<string | null>(null);
+  const [strategyName, setStrategyName] = useState(() => getDefaultStrategy().meta.name);
+  const strategyOptions = useMemo(() => listStrategies(), []);
 
   // Sync trading mode to chat store so AI knows paper vs live
   useEffect(() => {
@@ -114,6 +127,15 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
   // Calculate orders count (open orders + pending drafts)
   const pendingDrafts = draftOrders.filter(d => d.status === 'pending');
   const ordersCount = openOrders.length + pendingDrafts.length;
+
+  // Strategy (moved up so callbacks can reference strategy.liquidation)
+  const strategy = useMemo(() => {
+    try {
+      return getStrategy(strategyName);
+    } catch {
+      return getDefaultStrategy();
+    }
+  }, [strategyName]);
 
   // Microstructure data from Market Microstructure section
   const [microData, setMicroData] = useState<MicrostructureInput | null>(null);
@@ -148,17 +170,276 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
   // Callback for LiquidationHeatmap component
   const handleLiquidationData = useCallback((analysis: LiquidationAnalysis | null) => {
     if (analysis) {
-      setLiqData(getLiquidationInput(analysis));
+      setLiqData(getLiquidationInput(analysis, strategy.liquidation));
     } else {
       setLiqData(null);
     }
-  }, []);
+  }, [strategy.liquidation]);
 
   const handleOrderExecuted = useCallback(() => {
     refreshSimulatedBalance(true);
     refreshSimulatedPositions(true);
     refreshOpenPositions(true);
   }, [refreshOpenPositions, refreshSimulatedBalance, refreshSimulatedPositions]);
+
+  // Order-in-flight guard for dashboard action buttons
+  const [orderInFlight, setOrderInFlight] = useState(false);
+
+  // Quick Entry handler
+  const handleQuickEntry = useCallback(async (params: QuickEntryParams) => {
+    setOrderInFlight(true);
+    try {
+      const side = params.direction === 'long' ? 'buy' : 'sell';
+      const isLimit = !!params.limitPrice;
+      const orderType = isLimit ? 'limit' : 'market';
+      const execPrice = isLimit ? params.limitPrice! : price;
+
+      if (testMode) {
+        const body: Record<string, unknown> = {
+          pair: 'XRPEUR',
+          type: side,
+          orderType,
+          volume: params.volume,
+          leverage: params.leverage,
+          marketPrice: price,
+        };
+        if (isLimit) body.price = params.limitPrice;
+
+        const res = await fetch('/api/simulated/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Order failed');
+        addToast({
+          title: `${params.direction.toUpperCase()} Entry ${isLimit ? 'Placed' : 'Filled'}`,
+          message: `${params.volume.toFixed(1)} XRP ${orderType} @ ${execPrice.toFixed(4)}`,
+          type: 'success', duration: 5000,
+        });
+      } else {
+        const body: Record<string, string> = {
+          pair: 'XRPEUR',
+          type: side,
+          ordertype: orderType,
+          volume: params.volume.toString(),
+          leverage: params.leverage.toString(),
+        };
+        if (isLimit) body.price = params.limitPrice!.toString();
+
+        const res = await fetch('/api/kraken/private/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error?.length) throw new Error(data.error?.[0] || 'Order failed');
+        addToast({
+          title: `${params.direction.toUpperCase()} Entry Submitted`,
+          message: `${params.volume.toFixed(1)} XRP ${orderType}${isLimit ? ` @ ${execPrice.toFixed(4)}` : ''}`,
+          type: 'success', duration: 5000,
+        });
+      }
+      handleOrderExecuted();
+    } finally {
+      setOrderInFlight(false);
+    }
+  }, [testMode, price, addToast, handleOrderExecuted]);
+
+  // Quick Close handler
+  const handleQuickClose = useCallback(async (params: QuickCloseParams) => {
+    setOrderInFlight(true);
+    try {
+      if (testMode) {
+        // Find the open simulated position
+        const posRes = await fetch('/api/simulated/positions?open=true&pair=XRPEUR');
+        const posData = await posRes.json();
+        const openPos = posData.positions?.[0];
+        if (!openPos) throw new Error('No open position found');
+
+        const res = await fetch('/api/simulated/positions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            positionId: openPos.id,
+            closePrice: price,
+            closeVolume: params.exitPercent < 100 ? params.volumeToClose : undefined,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Close failed');
+        const pnl = data.realizedPnl ?? 0;
+        addToast({
+          title: `Closed ${params.exitPercent}% Position`,
+          message: `P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} EUR`,
+          type: pnl >= 0 ? 'success' : 'error',
+          duration: 7000,
+        });
+      } else {
+        // Live: opposite-side market order with reduce-only
+        const openPos = openPositions[0];
+        if (!openPos) throw new Error('No open position found');
+        const closeSide = openPos.type === 'buy' ? 'sell' : 'buy';
+        const res = await fetch('/api/kraken/private/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pair: 'XRPEUR',
+            type: closeSide,
+            ordertype: 'market',
+            volume: params.volumeToClose.toString(),
+            leverage: (openPos.margin > 0 ? Math.round(openPos.cost / openPos.margin) : 10).toString(),
+            oflags: 'reduconly',
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error?.length) throw new Error(data.error?.[0] || 'Close failed');
+        addToast({ title: `Close ${params.exitPercent}% Submitted`, message: 'Market close order sent', type: 'success', duration: 5000 });
+      }
+      handleOrderExecuted();
+    } finally {
+      setOrderInFlight(false);
+    }
+  }, [testMode, price, openPositions, addToast, handleOrderExecuted]);
+
+  // Quick DCA handler
+  const handleQuickDCA = useCallback(async (params: QuickDCAParams) => {
+    setOrderInFlight(true);
+    try {
+      const side = params.direction === 'long' ? 'buy' : 'sell';
+      if (testMode) {
+        const res = await fetch('/api/simulated/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pair: 'XRPEUR',
+            type: side,
+            orderType: 'market',
+            volume: params.volume,
+            leverage: 10,
+            marketPrice: price,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'DCA order failed');
+        addToast({ title: `DCA Level ${params.dcaLevel} Filled`, message: `${params.volume.toFixed(1)} XRP @ ${price.toFixed(4)}`, type: 'success', duration: 5000 });
+      } else {
+        const res = await fetch('/api/kraken/private/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pair: 'XRPEUR',
+            type: side,
+            ordertype: 'market',
+            volume: params.volume.toString(),
+            leverage: '10',
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error?.length) throw new Error(data.error?.[0] || 'DCA order failed');
+        addToast({ title: `DCA Level ${params.dcaLevel} Submitted`, message: `${params.volume.toFixed(1)} XRP market order`, type: 'success', duration: 5000 });
+      }
+      handleOrderExecuted();
+    } finally {
+      setOrderInFlight(false);
+    }
+  }, [testMode, price, addToast, handleOrderExecuted]);
+
+  // Quick Trailing Stop handler
+  const handleQuickTrailingStop = useCallback(async (params: QuickTrailingStopParams) => {
+    setOrderInFlight(true);
+    try {
+      // Trailing stop: opposite side to close position
+      const side = params.direction === 'long' ? 'sell' : 'buy';
+      if (testMode) {
+        const res = await fetch('/api/simulated/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pair: 'XRPEUR',
+            type: side,
+            orderType: 'trailing-stop',
+            volume: params.volume,
+            leverage: 10,
+            marketPrice: price,
+            trailingOffset: params.offset,
+            trailingOffsetType: params.offsetType,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Trailing stop failed');
+        addToast({ title: 'Trailing Stop Placed', message: `${params.offset}${params.offsetType === 'percent' ? '%' : ''} offset`, type: 'success', duration: 5000 });
+      } else {
+        const trailingStopOffset = params.offsetType === 'percent'
+          ? `${params.offset}`
+          : `${params.offset}`;
+        const res = await fetch('/api/kraken/private/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pair: 'XRPEUR',
+            type: side,
+            ordertype: 'trailing-stop',
+            volume: params.volume.toString(),
+            leverage: '10',
+            price: trailingStopOffset,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error?.length) throw new Error(data.error?.[0] || 'Trailing stop failed');
+        addToast({ title: 'Trailing Stop Submitted', message: `${params.offset}${params.offsetType === 'percent' ? '%' : ''} offset`, type: 'success', duration: 5000 });
+      }
+      handleOrderExecuted();
+    } finally {
+      setOrderInFlight(false);
+    }
+  }, [testMode, price, addToast, handleOrderExecuted]);
+
+  // Quick Take Profit handler
+  const handleQuickTakeProfit = useCallback(async (params: QuickTakeProfitParams) => {
+    setOrderInFlight(true);
+    try {
+      // Take profit: opposite side to close position
+      const side = params.direction === 'long' ? 'sell' : 'buy';
+      if (testMode) {
+        const res = await fetch('/api/simulated/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pair: 'XRPEUR',
+            type: side,
+            orderType: 'take-profit',
+            volume: params.volume,
+            leverage: 10,
+            marketPrice: price,
+            price: params.price,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Take profit failed');
+        addToast({ title: 'Take Profit Placed', message: `Target: ${params.price.toFixed(4)} EUR`, type: 'success', duration: 5000 });
+      } else {
+        const res = await fetch('/api/kraken/private/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pair: 'XRPEUR',
+            type: side,
+            ordertype: 'take-profit',
+            volume: params.volume.toString(),
+            leverage: '10',
+            price: params.price.toString(),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error?.length) throw new Error(data.error?.[0] || 'Take profit failed');
+        addToast({ title: 'Take Profit Submitted', message: `Target: ${params.price.toFixed(4)} EUR`, type: 'success', duration: 5000 });
+      }
+      handleOrderExecuted();
+    } finally {
+      setOrderInFlight(false);
+    }
+  }, [testMode, price, addToast, handleOrderExecuted]);
 
   // Handle analyze click from trade history
   const handleAnalyzeClick = useCallback((positionId: string) => {
@@ -444,6 +725,21 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     });
   }, []);
 
+  // Strategy selection persistence
+  useEffect(() => {
+    const stored = localStorage.getItem('smartbeat:strategyName');
+    if (stored && strategyOptions.includes(stored)) {
+      setStrategyName(stored);
+    }
+  }, [strategyOptions]);
+
+  useEffect(() => {
+    localStorage.setItem('smartbeat:strategyName', strategyName);
+  }, [strategyName]);
+
+  // V2 Engine: position state, DCA signals, exit signals, sizing
+  const v2 = useV2Engine(recommendation, strategy);
+
   // Background trade notifications (signals, P&L, DCA, RSI, volume)
   useTradeNotifications({
     recommendation,
@@ -453,6 +749,8 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     openPositions,
     testMode,
     notificationsEnabled,
+    dcaSignal: v2.output.dcaSignal,
+    exitSignal: v2.output.exitSignal,
   });
 
   // Fetch reports count on mount
@@ -543,6 +841,23 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* Strategy Selector */}
+          <Tooltip content="Select trading strategy" position="left">
+            <label className="text-sm px-2 py-1 rounded bg-tertiary text-secondary border border-transparent flex items-center gap-2">
+              <span className="text-xs text-tertiary">Strategy</span>
+              <select
+                value={strategyName}
+                onChange={(event) => setStrategyName(event.target.value)}
+                className="bg-transparent text-secondary text-sm focus:outline-none"
+              >
+                {strategyOptions.map((name: string) => (
+                  <option key={name} value={name} className="bg-secondary">
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </Tooltip>
           {/* Test Mode Toggle */}
           <Tooltip content={
             <div>
@@ -655,7 +970,31 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
 
           {/* Sidebar - Right Column */}
         <div className="space-y-4">
-          {/* Entry Checklist - Now at top of sidebar */}
+          {/* Account Balance Widget */}
+          <AccountWidget testMode={testMode} />
+
+          {/* V2 Position Dashboard */}
+          <PositionDashboard
+            position={v2.output.position}
+            exitSignal={v2.output.exitSignal}
+            dcaSignal={v2.output.dcaSignal}
+            sizing={v2.output.sizing}
+            summary={v2.output.summary}
+            currentPrice={price}
+            config={v2.config}
+            strategyName={v2.strategyName}
+            testMode={testMode}
+            recommendation={recommendation}
+            orderInFlight={orderInFlight}
+            onEntryExecute={handleQuickEntry}
+            onCloseExecute={handleQuickClose}
+            onDCAExecute={handleQuickDCA}
+            onTrailingStopExecute={handleQuickTrailingStop}
+            onTakeProfitExecute={handleQuickTakeProfit}
+            onOpenTradeDrawer={() => setIsDrawerOpen(true)}
+          />
+
+          {/* Entry Checklist */}
           <div className="card p-4">
             <h3 className="text-xs text-tertiary uppercase tracking-wider mb-3 flex items-center gap-2">
               Entry Checklist

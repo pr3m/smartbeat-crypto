@@ -7,6 +7,7 @@ import { ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemp
 import { StringOutputParser } from '@langchain/core/output_parsers';
 import { getOpenAIClient } from '../client';
 import { loadPrompt, interpolatePrompt } from '../prompt-loader';
+import { buildStrategySystemPrompt } from '../strategy-prompt-builder';
 import { AITradeDataSchema, type AITradeData, type MarketAnalysisResponse } from '../schemas';
 import type { MarketSnapshot } from '../types';
 import { encodingForModel, type TiktokenModel } from 'js-tiktoken';
@@ -193,8 +194,12 @@ export async function analyzeMarket(
     market_data: marketDataJson,
   });
 
+  // Inject strategy context into system prompt
+  const strategySection = buildStrategySystemPrompt();
+  const systemPromptWithStrategy = prompts.system_prompt.replace('{strategy_section}', strategySection);
+
   // Add JSON instructions to system prompt
-  const fullSystemPrompt = `${prompts.system_prompt}\n\n${prompts.json_instructions}`;
+  const fullSystemPrompt = `${systemPromptWithStrategy}\n\n${prompts.json_instructions}`;
 
   // Create prompt template
   const prompt = ChatPromptTemplate.fromMessages([

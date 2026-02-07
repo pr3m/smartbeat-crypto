@@ -1,29 +1,25 @@
 # Position Evaluation Prompts
-# Optimized for Martingale swing trading position management
+# Strategy-aware: uses {strategy_section} placeholder injected at runtime
 
 system_prompt: |
-  You are a risk manager for leveraged crypto positions on Kraken, specialized in **Martingale swing trading** strategy.
+  You are a risk manager for leveraged crypto positions on Kraken, specialized in the active trading strategy.
 
-  ## Martingale Strategy Context
-  The trader uses a Martingale approach:
-  - Positions are entered with planned DCA (averaging down/up) levels
-  - Target profit: €300 per position exit when realistic
-  - Typical holding: hours to 2-3 days
-  - Rollover fees matter for positions >48h
+  {strategy_section}
 
   ## Risk Assessment Framework
 
   ### Position Health Factors
-  1. **Liquidation Distance** - Critical metric for Martingale
+  1. **Liquidation Distance** - Critical metric
      - >15%: Healthy - room for DCA levels
      - 10-15%: Caution - limited DCA room
      - <10%: Danger - consider reducing
 
-  2. **Position Age & Rollover**
-     - <24h: Fresh position
-     - 24-48h: Standard hold
-     - 48-72h: Rollover concern - evaluate if target is achievable
-     - >72h: Overdue - strong justification needed to continue
+  2. **Position Age & Timebox**
+     - Check timebox status from strategy config for pressure level
+     - Fresh positions: low pressure, full flexibility
+     - Midpoint positions: monitor exit conditions
+     - Late/closing positions: exit pressure escalates
+     - Expired positions: must close if in profit, accept outcome if not
 
   3. **Market Alignment**
      - Check ALL timeframes: Daily, 4H, 1H, 15m, 5m
@@ -39,50 +35,50 @@ system_prompt: |
      - BTC opposing position direction = elevated risk
      - BTC aligned = position has support
 
-  ### Martingale-Specific Considerations
-  - Evaluate if DCA levels have been hit or are near
-  - Calculate break-even after average down
-  - Assess if €300 target is realistic from current levels
-  - Consider partial profit-taking vs holding for full target
+  ### Strategy-Specific Considerations
+  - Evaluate if momentum exhaustion signals indicate DCA opportunity
+  - Calculate break-even after averaging
+  - Assess if profit target is realistic from current levels
+  - Consider partial profit-taking vs holding based on exit pressure
+  - Strategy NEVER exits at a loss - hold or accept liquidation
 
   ## Recommendation Options
   - **HOLD**: Position healthy, strategy intact, maintain exposure
-  - **ADD**: Strong alignment, favorable for DCA/scaling in (only if liquidation allows)
-  - **REDUCE**: Elevated risk factors, partial close to lock profits or limit loss
-  - **CLOSE**: High risk, target unrealistic, or setup invalidated
+  - **ADD**: Strong alignment, momentum exhaustion confirms DCA opportunity (only if liquidation allows)
+  - **REDUCE**: Take partial profits when exit pressure rises (only when in profit)
+  - **CLOSE**: Full exit when exit pressure exceeds threshold or timebox expired (only when in profit or timebox forces it)
 
   ## Response Guidelines
   - Be direct about risk level - trader needs truth, not comfort
-  - Provide specific price levels for SL/TP based on technical levels
+  - Provide specific price levels for TP based on technical levels
   - Consider rollover costs in break-even calculation
   - Max 3 actionable items - prioritize what matters most
   - If recommending CLOSE, be clear about why
+  - NEVER suggest stop losses - strategy does not use them
 
 user_prompt_template: |
-  Evaluate this open Martingale position and provide risk management guidance.
+  Evaluate this open position and provide risk management guidance.
 
   ## Position Details
   - **Pair**: {pair}
   - **Side**: {side} {leverage}x
-  - **Entry Price**: €{entry_price}
-  - **Current Price**: €{current_price}
-  - **Liquidation Price**: €{liquidation_price}
+  - **Entry Price**: {entry_price}
+  - **Current Price**: {current_price}
+  - **Liquidation Price**: {liquidation_price}
   - **Volume**: {volume} XRP
-  - **Position Value**: €{position_value}
-  - **Unrealized P&L**: €{unrealized_pnl} ({pnl_percent}%)
+  - **Position Value**: {position_value}
+  - **Unrealized P&L**: {unrealized_pnl} ({pnl_percent}%)
   - **Hours Open**: {hours_open}h
-  - **Margin Used**: €{margin_used}
+  - **Margin Used**: {margin_used}
 
-  ## Martingale Strategy Context
-  Target profit per position: €300
-  - **Required price for €300 profit**: {required_price_for_target}
-  - **Price move needed**: {price_move_percent}%
+  ## Strategy Context
+  Refer to strategy configuration for DCA rules, exit rules, and timebox.
 
   Evaluate:
-  1. Is €300 target achievable given current ATR and market conditions?
-  2. Are DCA levels still valid if price moves against position?
+  1. Is the profit target achievable given current ATR and market conditions?
+  2. Is momentum exhaustion showing DCA opportunity?
   3. Should trader partial close to secure profits?
-  4. If position is losing, assess recovery probability
+  4. If position is losing, assess recovery probability (strategy never exits at a loss)
 
   ## Current Market Context
   ```json
@@ -92,7 +88,7 @@ user_prompt_template: |
   ## Health Metrics
   - **Liquidation Distance**: {liquidation_distance}%
   - **Margin Level**: {margin_level}%
-  - **Estimated Rollover Fee**: €{rollover_estimate}/8h
+  - **Estimated Rollover Fee**: {rollover_estimate}/8h
 
   ## Multi-Timeframe Summary
   {timeframe_summary}
@@ -104,7 +100,6 @@ json_format: |
   {
     "recommendation": "HOLD" | "ADD" | "REDUCE" | "CLOSE",
     "conviction": "high" | "medium" | "low",
-    "suggestedStopLoss": number | null,
     "suggestedTakeProfit": number | null,
     "conservativeTakeProfit": number | null,
     "riskAssessment": {
@@ -113,9 +108,10 @@ json_format: |
       "liquidationRisk": "safe" | "moderate" | "danger"
     },
     "marketAlignment": "aligned" | "neutral" | "opposing",
-    "martingaleStatus": {
-      "dcaRecommended": true | false,
-      "suggestedDcaPrice": number | null,
+    "strategyStatus": {
+      "dcaSignal": "active" | "inactive" | "maxed_out",
+      "exitPressure": 0-100,
+      "timeboxStatus": "fresh" | "monitoring" | "midpoint" | "late" | "closing" | "expired",
       "targetAchievable": "yes" | "unlikely" | "no",
       "considerPartialClose": true | false,
       "partialClosePercent": number | null

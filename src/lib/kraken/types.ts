@@ -323,6 +323,14 @@ export interface ProcessedTransaction {
   notes?: string;
 }
 
+// Candlestick pattern detection
+export interface CandlestickPattern {
+  name: string;           // e.g., 'bullish_engulfing', 'hammer', 'shooting_star'
+  direction: 'bullish' | 'bearish' | 'neutral';
+  strength: number;       // 0-1 based on how textbook the pattern is
+  description: string;    // Human-readable e.g., "Bullish engulfing at support"
+}
+
 // Indicator types (from trading dashboard)
 export interface Indicators {
   rsi: number;
@@ -350,6 +358,8 @@ export interface Indicators {
   // Proper trend determination
   trend: 'bullish' | 'bearish' | 'neutral'; // Based on price structure vs EMAs
   trendScore: number; // -100 to +100 trend strength
+  /** Detected candlestick patterns on recent candles */
+  candlestickPatterns?: CandlestickPattern[];
 }
 
 export interface TimeframeData {
@@ -474,9 +484,16 @@ export interface TradingRecommendation {
     fundingRate: number | null;
     nearestTarget: number | null;
     aligned: boolean;
+    magnetEffect: 'aligned' | 'opposing' | 'none';
+    wallEffect: 'supporting' | 'blocking' | 'none';
+    asymmetry: 'strong_aligned' | 'mild_aligned' | 'neutral' | 'opposing';
+    description: string;
     adjustments: {
-      liqAligned: number;
+      magnetEffect: number;
+      wallEffect: number;
+      asymmetry: number;
       fundingConfirm: number;
+      proximityBonus: number;
       total: number;
     };
   };
@@ -600,4 +617,19 @@ export interface LiquidationInput {
     direction: 'bullish' | 'bearish' | 'neutral';
     strength: number;
   };
+  // Zone-aware metrics (computed by getLiquidationInput)
+  currentPrice: number;
+  nearestUpsideDistPct: number | null; // Distance % to nearest upside cluster
+  nearestDownsideDistPct: number | null; // Distance % to nearest downside cluster
+  strongestUpsideStrength: number; // 0-1 strength of strongest upside zone
+  strongestDownsideStrength: number; // 0-1 strength of strongest downside zone
+  strongestUpsideDensity: number; // 0-1 normalized density of strongest upside zone
+  strongestDownsideDensity: number; // 0-1 normalized density of strongest downside zone
+  asymmetryRatio: number; // >1 = more upside fuel, <1 = more downside fuel
+  upsideClusterCount: number; // Number of upside (short liq) zones
+  downsideClusterCount: number; // Number of downside (long liq) zones
+  upsideMagnet: boolean; // Nearest upside cluster acts as magnet
+  downsideMagnet: boolean; // Nearest downside cluster acts as magnet
+  upsideWall: boolean; // Upside cluster acts as wall/cascade fuel
+  downsideWall: boolean; // Downside cluster acts as wall/cascade fuel
 }

@@ -56,10 +56,12 @@ export function SimulatedPositions({ currentPrice, onPositionChange }: Simulated
       // Calculate liquidation price fallback if API value not available
       let liqPrice = pos.liquidationPrice ?? 0;
       if (liqPrice === 0 && pos.avgEntryPrice > 0 && pos.leverage > 0) {
-        const liqDistance = pos.avgEntryPrice / pos.leverage * 0.8;
+        // Kraken liquidates at ~80% margin level. With leverage L,
+        // that means a price move of 20%/L triggers liquidation (2% for 10x)
+        const liqMovePercent = 0.2 / pos.leverage;
         liqPrice = pos.side === 'long'
-          ? pos.avgEntryPrice - liqDistance
-          : pos.avgEntryPrice + liqDistance;
+          ? pos.avgEntryPrice * (1 - liqMovePercent)
+          : pos.avgEntryPrice * (1 + liqMovePercent);
       }
 
       const health = calculatePositionHealth({

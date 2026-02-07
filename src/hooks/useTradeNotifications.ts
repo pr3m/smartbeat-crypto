@@ -4,6 +4,8 @@ import { useEffect, useRef } from 'react';
 import { sendBrowserNotification } from '@/components/Toast';
 import type { TradingRecommendation, TimeframeData } from '@/lib/kraken/types';
 import type { SimulatedPosition, Position } from '@/components/TradingDataProvider';
+import { getDefaultStrategy } from '@/lib/trading/strategies';
+import type { DCASignal, ExitSignal } from '@/lib/trading/v2-types';
 
 interface UseTradeNotificationsProps {
   recommendation: TradingRecommendation | null;
@@ -13,6 +15,8 @@ interface UseTradeNotificationsProps {
   openPositions: Position[];
   testMode: boolean;
   notificationsEnabled: boolean;
+  dcaSignal?: DCASignal | null;
+  exitSignal?: ExitSignal | null;
 }
 
 // Cooldown durations in ms
@@ -23,8 +27,10 @@ const COOLDOWN_RSI_MS = 15 * 60 * 1000;
 
 // P&L milestone levels (percent from entry)
 const PNL_MILESTONES = [3, 5, -3, -5];
-// DCA levels (percent below entry for adding to position)
-const DCA_LEVELS = [-3, -5];
+
+// Derive DCA level from strategy config
+const strategy = getDefaultStrategy();
+const DCA_MIN_DRAWDOWN = strategy.dca.minDrawdownForDCA; // 3%
 
 function getPositionKey(position: SimulatedPosition | Position, testMode: boolean): string {
   const baseId = position.id;
@@ -70,6 +76,8 @@ export function useTradeNotifications({
   openPositions,
   testMode,
   notificationsEnabled,
+  dcaSignal,
+  exitSignal,
 }: UseTradeNotificationsProps) {
   // Previous state refs
   const prevActionRef = useRef<string | null>(null);
@@ -80,6 +88,7 @@ export function useTradeNotifications({
   const lastSetupAlertRef = useRef<number>(0);
   const lastVolumeAlertRef = useRef<number>(0);
   const lastRsiAlertRef = useRef<number>(0);
+  const lastExitSignalRef = useRef<string | null>(null);
 
   // P&L / DCA tracking: Map<positionId, Set<milestone>>
   const notifiedPnlLevelsRef = useRef<Map<string, Set<number>>>(new Map());
@@ -180,7 +189,7 @@ export function useTradeNotifications({
     // Volume spike: 15m volume ratio > 2.0x
     if (
       now - lastVolumeAlertRef.current > COOLDOWN_VOLUME_MS &&
-      indicators15m.volRatio > 2.0
+      indicators15m.volRatio > strategy.spike.volumeRatioThreshold
     ) {
       notify(
         'Volume Spike',
@@ -192,14 +201,14 @@ export function useTradeNotifications({
 
     // RSI extreme: 15m RSI < 25 or > 75
     if (now - lastRsiAlertRef.current > COOLDOWN_RSI_MS) {
-      if (indicators15m.rsi < 25) {
+      if (indicators15m.rsi < strategy.spike.oversoldRSI) {
         notify(
           'RSI Oversold',
           `15m RSI at ${indicators15m.rsi.toFixed(1)} — extreme oversold`,
           'rsi-extreme',
         );
         lastRsiAlertRef.current = now;
-      } else if (indicators15m.rsi > 75) {
+      } else if (indicators15m.rsi > strategy.spike.overboughtRSI) {
         notify(
           'RSI Overbought',
           `15m RSI at ${indicators15m.rsi.toFixed(1)} — extreme overbought`,
@@ -267,31 +276,69 @@ export function useTradeNotifications({
         }
       }
 
-      // DCA levels (only for long positions — Martingale add-on)
-      if (side === 'long') {
+      // DCA level (strategy-driven drawdown threshold)
+      {
         if (!notifiedDcaLevelsRef.current.has(positionKey)) {
           notifiedDcaLevelsRef.current.set(positionKey, new Set());
         }
         const notifiedDca = notifiedDcaLevelsRef.current.get(positionKey)!;
+        const dcaLevel = -DCA_MIN_DRAWDOWN; // e.g., -3
 
-        for (const level of DCA_LEVELS) {
-          if (notifiedDca.has(level)) continue;
+        if (!notifiedDca.has(dcaLevel)) {
+          const priceLevel = side === 'long'
+            ? entryPrice * (1 + dcaLevel / 100)   // price drops for long
+            : entryPrice * (1 - dcaLevel / 100);   // price rises for short
+          const crossed = side === 'long' ? price <= priceLevel : price >= priceLevel;
 
-          const priceLevel = entryPrice * (1 + level / 100);
-          if (price <= priceLevel) {
-            notifiedDca.add(level);
+          if (crossed) {
+            notifiedDca.add(dcaLevel);
             notify(
-              `DCA Level Hit: ${level}%`,
-              `Price €${price.toFixed(4)} is ${level}% below entry €${entryPrice.toFixed(4)} — consider Martingale add`,
-              `dca-${posId}-${level}`,
+              `DCA Level Hit: ${dcaLevel}%`,
+              `Price €${price.toFixed(4)} is ${DCA_MIN_DRAWDOWN}% against ${side.toUpperCase()} entry €${entryPrice.toFixed(4)} — wait for momentum exhaustion before adding`,
+              `dca-${posId}-${dcaLevel}`,
               'high',
               `dca-${posId}`,
             );
           }
         }
+
+        // V2 Engine DCA signal notification (momentum exhaustion based)
+        if (dcaSignal?.shouldDCA && dcaSignal.confidence >= 60) {
+          const dcaKey = `v2-dca-${posId}`;
+          if (!notifiedDcaLevelsRef.current.has(dcaKey) || !notifiedDcaLevelsRef.current.get(dcaKey)?.has(dcaSignal.dcaLevel)) {
+            if (!notifiedDcaLevelsRef.current.has(dcaKey)) {
+              notifiedDcaLevelsRef.current.set(dcaKey, new Set());
+            }
+            notifiedDcaLevelsRef.current.get(dcaKey)!.add(dcaSignal.dcaLevel);
+            notify(
+              `DCA Signal: Level ${dcaSignal.dcaLevel}`,
+              `Momentum exhaustion detected (${dcaSignal.confidence}% confidence) — ${dcaSignal.reason}`,
+              `v2-dca-${posId}-${dcaSignal.dcaLevel}`,
+              'high',
+              `v2-dca-${posId}`,
+            );
+          }
+        }
       }
     }
-  }, [price, simulatedPositions, openPositions, testMode, notificationsEnabled]);
+  }, [price, simulatedPositions, openPositions, testMode, notificationsEnabled, dcaSignal]);
+
+  // V2 Engine exit signal notification
+  useEffect(() => {
+    if (!notificationsEnabled || !exitSignal?.shouldExit) return;
+
+    const pressureBucket = Math.floor(exitSignal.totalPressure / 5) * 5;
+    const exitKey = `${exitSignal.urgency}-${pressureBucket}`;
+    if (lastExitSignalRef.current === exitKey) return;
+    lastExitSignalRef.current = exitKey;
+
+    notify(
+      `Exit Signal: ${exitSignal.urgency.toUpperCase()}`,
+      `Exit pressure ${exitSignal.totalPressure}% — ${exitSignal.explanation}`,
+      'v2-exit-signal',
+      exitSignal.urgency === 'immediate' ? 'high' : 'medium',
+    );
+  }, [exitSignal?.shouldExit, exitSignal?.urgency, exitSignal?.totalPressure, notificationsEnabled]);
 
   // Clean up notified levels for closed positions
   useEffect(() => {

@@ -4,7 +4,7 @@
  * Based on standard TA methods used in TradingView, MetaTrader, etc.
  */
 
-import type { OHLCData, Indicators } from '@/lib/kraken/types';
+import type { OHLCData, Indicators, CandlestickPattern } from '@/lib/kraken/types';
 
 /**
  * Calculate EMA (Exponential Moving Average)
@@ -335,6 +335,197 @@ export function analyzeTrend(
 }
 
 /**
+ * Detect candlestick patterns on recent OHLC candles.
+ * Analyzes the last N candles for reversal and indecision patterns
+ * meaningful on 5m and 15m timeframes for swing entry timing.
+ *
+ * Uses ATR-based significance filtering to ignore tiny patterns in choppy markets.
+ */
+export function detectCandlestickPatterns(ohlc: OHLCData[]): CandlestickPattern[] {
+  if (!ohlc || ohlc.length < 3) return [];
+
+  const patterns: CandlestickPattern[] = [];
+
+  // Calculate a simple ATR over available candles for significance filtering
+  const atrPeriod = Math.min(14, ohlc.length - 1);
+  let atrSum = 0;
+  for (let i = 1; i <= atrPeriod; i++) {
+    const idx = ohlc.length - 1 - (atrPeriod - i);
+    const tr = Math.max(
+      ohlc[idx].high - ohlc[idx].low,
+      Math.abs(ohlc[idx].high - ohlc[idx - 1].close),
+      Math.abs(ohlc[idx].low - ohlc[idx - 1].close)
+    );
+    atrSum += tr;
+  }
+  const recentATR = atrSum / atrPeriod;
+  const minBody = recentATR * 0.3; // Minimum body size for significance
+
+  // Helper: candle metrics
+  function metrics(c: OHLCData) {
+    const body = Math.abs(c.close - c.open);
+    const upperWick = c.high - Math.max(c.open, c.close);
+    const lowerWick = Math.min(c.open, c.close) - c.low;
+    const range = c.high - c.low;
+    const isGreen = c.close > c.open;
+    const isRed = c.close < c.open;
+    return { body, upperWick, lowerWick, range, isGreen, isRed };
+  }
+
+  const last = ohlc[ohlc.length - 1];
+  const prev = ohlc[ohlc.length - 2];
+  const prevPrev = ohlc.length >= 3 ? ohlc[ohlc.length - 3] : null;
+
+  const m = metrics(last);
+  const pm = metrics(prev);
+  const ppm = prevPrev ? metrics(prevPrev) : null;
+
+  // --- Doji (neutral / indecision) ---
+  if (m.range > 0 && m.body < m.range * 0.1 && m.range >= minBody * 0.5) {
+    const wickBalance = m.range > 0 ? Math.min(m.upperWick, m.lowerWick) / Math.max(m.upperWick, m.lowerWick) : 0;
+    const strength = Math.min(1, (1 - m.body / m.range) * (0.5 + wickBalance * 0.5));
+    patterns.push({
+      name: 'doji',
+      direction: 'neutral',
+      strength,
+      description: 'Doji - market indecision, open and close nearly equal',
+    });
+  }
+
+  // --- Hammer (bullish) ---
+  // Small body at top, long lower wick >= 2x body, little upper wick
+  if (m.body >= minBody * 0.3 && m.lowerWick >= 2 * m.body && m.upperWick <= m.body * 0.5 && m.range > 0) {
+    const wickRatio = m.lowerWick / Math.max(m.body, 0.0001);
+    const strength = Math.min(1, 0.5 + (wickRatio - 2) * 0.1 + (m.body >= minBody ? 0.2 : 0));
+    patterns.push({
+      name: 'hammer',
+      direction: 'bullish',
+      strength,
+      description: 'Hammer - rejection of lower prices, potential bullish reversal',
+    });
+  }
+
+  // --- Shooting Star (bearish) ---
+  // Small body at bottom, long upper wick >= 2x body, little lower wick
+  if (m.body >= minBody * 0.3 && m.upperWick >= 2 * m.body && m.lowerWick <= m.body * 0.5 && m.range > 0) {
+    const wickRatio = m.upperWick / Math.max(m.body, 0.0001);
+    const strength = Math.min(1, 0.5 + (wickRatio - 2) * 0.1 + (m.body >= minBody ? 0.2 : 0));
+    patterns.push({
+      name: 'shooting_star',
+      direction: 'bearish',
+      strength,
+      description: 'Shooting star - rejection of higher prices, potential bearish reversal',
+    });
+  }
+
+  // --- Pin Bar Bullish ---
+  // Very long lower wick >= 3x body, tiny upper wick
+  if (m.body > 0 && m.lowerWick >= 3 * m.body && m.upperWick <= m.body * 0.3 && m.range > 0) {
+    const wickRatio = m.lowerWick / Math.max(m.body, 0.0001);
+    const strength = Math.min(1, 0.6 + (wickRatio - 3) * 0.08 + (m.body >= minBody ? 0.15 : 0));
+    patterns.push({
+      name: 'pin_bar_bullish',
+      direction: 'bullish',
+      strength,
+      description: 'Bullish pin bar - strong rejection of lower prices',
+    });
+  }
+
+  // --- Pin Bar Bearish ---
+  // Very long upper wick >= 3x body, tiny lower wick
+  if (m.body > 0 && m.upperWick >= 3 * m.body && m.lowerWick <= m.body * 0.3 && m.range > 0) {
+    const wickRatio = m.upperWick / Math.max(m.body, 0.0001);
+    const strength = Math.min(1, 0.6 + (wickRatio - 3) * 0.08 + (m.body >= minBody ? 0.15 : 0));
+    patterns.push({
+      name: 'pin_bar_bearish',
+      direction: 'bearish',
+      strength,
+      description: 'Bearish pin bar - strong rejection of higher prices',
+    });
+  }
+
+  // --- Bullish Engulfing ---
+  // Current green candle's body fully engulfs previous red candle's body
+  if (m.isGreen && pm.isRed && m.body >= minBody) {
+    const currBodyHigh = Math.max(last.open, last.close);
+    const currBodyLow = Math.min(last.open, last.close);
+    const prevBodyHigh = Math.max(prev.open, prev.close);
+    const prevBodyLow = Math.min(prev.open, prev.close);
+    if (currBodyHigh > prevBodyHigh && currBodyLow < prevBodyLow) {
+      const engulfRatio = m.body / Math.max(pm.body, 0.0001);
+      const strength = Math.min(1, 0.6 + (engulfRatio - 1) * 0.15);
+      patterns.push({
+        name: 'bullish_engulfing',
+        direction: 'bullish',
+        strength,
+        description: 'Bullish engulfing - buyers overwhelmed sellers, reversal signal',
+      });
+    }
+  }
+
+  // --- Bearish Engulfing ---
+  // Current red candle's body fully engulfs previous green candle's body
+  if (m.isRed && pm.isGreen && m.body >= minBody) {
+    const currBodyHigh = Math.max(last.open, last.close);
+    const currBodyLow = Math.min(last.open, last.close);
+    const prevBodyHigh = Math.max(prev.open, prev.close);
+    const prevBodyLow = Math.min(prev.open, prev.close);
+    if (currBodyHigh > prevBodyHigh && currBodyLow < prevBodyLow) {
+      const engulfRatio = m.body / Math.max(pm.body, 0.0001);
+      const strength = Math.min(1, 0.6 + (engulfRatio - 1) * 0.15);
+      patterns.push({
+        name: 'bearish_engulfing',
+        direction: 'bearish',
+        strength,
+        description: 'Bearish engulfing - sellers overwhelmed buyers, reversal signal',
+      });
+    }
+  }
+
+  // --- Morning Star (bullish 3-candle reversal) ---
+  if (prevPrev && ppm) {
+    const isFirstBigRed = ppm.isRed && ppm.body >= minBody;
+    const isMiddleSmall = pm.body < ppm.body * 0.4 && pm.body < m.body * 0.4;
+    const isLastBigGreen = m.isGreen && m.body >= minBody;
+    // Last candle should close above midpoint of first candle
+    const firstMid = (prevPrev.open + prevPrev.close) / 2;
+    if (isFirstBigRed && isMiddleSmall && isLastBigGreen && last.close > firstMid) {
+      const recoveryRatio = m.body / Math.max(ppm.body, 0.0001);
+      const strength = Math.min(1, 0.5 + recoveryRatio * 0.2 + (pm.body < ppm.body * 0.2 ? 0.15 : 0));
+      patterns.push({
+        name: 'morning_star',
+        direction: 'bullish',
+        strength,
+        description: 'Morning star - 3-candle bullish reversal pattern',
+      });
+    }
+  }
+
+  // --- Evening Star (bearish 3-candle reversal) ---
+  if (prevPrev && ppm) {
+    const isFirstBigGreen = ppm.isGreen && ppm.body >= minBody;
+    const isMiddleSmall = pm.body < ppm.body * 0.4 && pm.body < m.body * 0.4;
+    const isLastBigRed = m.isRed && m.body >= minBody;
+    // Last candle should close below midpoint of first candle
+    const firstMid = (prevPrev.open + prevPrev.close) / 2;
+    if (isFirstBigGreen && isMiddleSmall && isLastBigRed && last.close < firstMid) {
+      const recoveryRatio = m.body / Math.max(ppm.body, 0.0001);
+      const strength = Math.min(1, 0.5 + recoveryRatio * 0.2 + (pm.body < ppm.body * 0.2 ? 0.15 : 0));
+      patterns.push({
+        name: 'evening_star',
+        direction: 'bearish',
+        strength,
+        description: 'Evening star - 3-candle bearish reversal pattern',
+      });
+    }
+  }
+
+  // Sort by strength descending
+  patterns.sort((a, b) => b.strength - a.strength);
+  return patterns;
+}
+
+/**
  * Calculate all indicators for OHLC data
  * Requires minimum 50 candles for accurate calculations
  *
@@ -420,6 +611,9 @@ export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
     absTrendScore >= 60 ? 'strong' :
     absTrendScore >= 35 ? 'moderate' : 'weak';
 
+  // Detect candlestick patterns on recent candles
+  const candlestickPatterns = detectCandlestickPatterns(data.slice(-5));
+
   return {
     rsi,
     macd,
@@ -445,6 +639,7 @@ export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
     ema50Slope,
     trend: trendAnalysis.trend,
     trendScore: trendAnalysis.trendScore,
+    candlestickPatterns,
   };
 }
 

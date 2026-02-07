@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { createDbErrorResponse } from '@/lib/db-error';
+import { FEE_RATES } from '@/lib/trading/trade-calculations';
 
 const DEFAULT_BALANCE = {
   eurBalance: 2000,
@@ -8,60 +9,182 @@ const DEFAULT_BALANCE = {
   cryptoValue: 0,
   equity: 2000,
   marginUsed: 0,
-  freeMargin: 20000, // equity * 10 (leverage)
+  freeMargin: 2000, // equity - marginUsed (real free margin, NOT notional)
   marginLevel: null,
   totalRealizedPnl: 0,
   totalFeesPaid: 0,
 };
 
 /**
- * GET /api/simulated/balance
- * Get the current simulated balance
+ * Calculate unrealized P&L for a position at a given price.
+ * Includes entry fees and estimated rollover fees (matches Kraken's net P&L).
  */
-export async function GET() {
+function calculatePositionPnL(
+  pos: { avgEntryPrice: number; volume: number; side: string; totalFees: number; totalCost: number; leverage: number; openedAt: Date },
+  currentPrice: number
+): number {
+  const rawPnl = pos.side === 'long'
+    ? (currentPrice - pos.avgEntryPrice) * pos.volume
+    : (pos.avgEntryPrice - currentPrice) * pos.volume;
+
+  // Include entry fees in P&L (Kraken shows net P&L)
+  // Estimate rollover: 0.02% of notional per 4 hours
+  const hoursOpen = (Date.now() - pos.openedAt.getTime()) / (1000 * 60 * 60);
+  const rolloverPeriods = Math.floor(hoursOpen / 4);
+  const notional = pos.avgEntryPrice * pos.volume;
+  const rolloverFee = notional * FEE_RATES.marginRollover * rolloverPeriods;
+
+  return rawPnl - pos.totalFees - rolloverFee;
+}
+
+function calculateLiquidationPnL(
+  pos: { avgEntryPrice: number; volume: number; side: string; totalFees: number; openedAt: Date },
+  currentPrice: number
+): { rawPnl: number; rolloverFee: number; netPnl: number } {
+  const rawPnl = pos.side === 'long'
+    ? (currentPrice - pos.avgEntryPrice) * pos.volume
+    : (pos.avgEntryPrice - currentPrice) * pos.volume;
+
+  const hoursOpen = (Date.now() - pos.openedAt.getTime()) / (1000 * 60 * 60);
+  const rolloverPeriods = Math.floor(hoursOpen / 4);
+  const notional = pos.avgEntryPrice * pos.volume;
+  const rolloverFee = notional * FEE_RATES.marginRollover * rolloverPeriods;
+
+  const netPnl = rawPnl - pos.totalFees - rolloverFee;
+
+  return { rawPnl, rolloverFee, netPnl };
+}
+
+/**
+ * GET /api/simulated/balance
+ * Get the current simulated balance with accurate margin calculations.
+ *
+ * Query params:
+ *   currentPrice - optional, used to compute unrealized P&L and dynamic equity
+ */
+export async function GET(request: Request) {
   try {
-    console.log('[Balance API] Fetching simulated balance...');
+    const { searchParams } = new URL(request.url);
+    const currentPrice = parseFloat(searchParams.get('currentPrice') || '0');
 
     // Get or create default balance
     let balance = await prisma.simulatedBalance.findUnique({
       where: { id: 'default' },
     });
 
-    console.log('[Balance API] Found balance:', balance ? 'yes' : 'no');
-
     if (!balance) {
-      console.log('[Balance API] Creating default balance...');
       balance = await prisma.simulatedBalance.create({
         data: {
           id: 'default',
           ...DEFAULT_BALANCE,
         },
       });
-      console.log('[Balance API] Default balance created');
     }
 
-    // Calculate current margin from open positions
+    // Fetch open positions for margin and P&L calculations
     const openPositions = await prisma.simulatedPosition.findMany({
       where: { isOpen: true },
     });
 
+    // Calculate margin used from open positions
     let marginUsed = 0;
     for (const pos of openPositions) {
       marginUsed += pos.totalCost / pos.leverage;
     }
 
-    // Update calculated fields
-    const equity = balance.eurBalance + balance.cryptoValue;
-    const freeMargin = Math.max(0, equity * 10 - marginUsed); // 10x leverage
+    // Calculate unrealized P&L across all positions (if price available)
+    let totalUnrealizedPnl = 0;
+    if (currentPrice > 0 && openPositions.length > 0) {
+      for (const pos of openPositions) {
+        totalUnrealizedPnl += calculatePositionPnL(pos, currentPrice);
+      }
+    }
+
+    // Equity = cash balance + crypto value + unrealized P&L on open positions
+    // This matches Kraken's equity calculation
+    const equity = balance.eurBalance + balance.cryptoValue + totalUnrealizedPnl;
+
+    // Free margin = equity - margin used (NOT multiplied by leverage!)
+    // This is the actual EUR you can commit as new margin collateral
+    const freeMargin = Math.max(0, equity - marginUsed);
+
+    // Margin level = (equity / margin used) * 100
+    // Kraken liquidates at ~80% margin level for retail
     const marginLevel = marginUsed > 0 ? (equity / marginUsed) * 100 : null;
 
-    // Return the balance with calculated fields
+    // Auto-liquidation check: if margin level drops below 80%, force-close all positions
+    let liquidated = false;
+    if (marginLevel !== null && marginLevel < 80 && currentPrice > 0) {
+      liquidated = true;
+
+      // Force-close all positions at current price
+      for (const pos of openPositions) {
+        const pnl = calculateLiquidationPnL(pos, currentPrice);
+
+        // Calculate closing fee
+        const closingNotional = pos.volume * currentPrice;
+        const closingFee = closingNotional * FEE_RATES.taker + closingNotional * FEE_RATES.marginOpen;
+
+        const realizedPnl = pnl.netPnl - closingFee;
+
+        await prisma.simulatedPosition.update({
+          where: { id: pos.id },
+          data: {
+            isOpen: false,
+            realizedPnl,
+            totalFees: pos.totalFees + closingFee,
+            closedAt: new Date(),
+          },
+        });
+
+        // Update balance
+        await prisma.simulatedBalance.update({
+          where: { id: 'default' },
+          data: {
+            eurBalance: { increment: realizedPnl },
+            totalRealizedPnl: { increment: realizedPnl },
+            totalFeesPaid: { increment: closingFee },
+          },
+        });
+      }
+
+      // Cancel all open orders
+      await prisma.simulatedOrder.updateMany({
+        where: { status: 'open' },
+        data: { status: 'cancelled' },
+      });
+
+      // Re-fetch balance after liquidation
+      balance = await prisma.simulatedBalance.findUnique({
+        where: { id: 'default' },
+      });
+
+      if (!balance) {
+        throw new Error('Balance missing after liquidation');
+      }
+
+      // Recalculate post-liquidation values
+      const postLiqEquity = balance.eurBalance + balance.cryptoValue;
+      return NextResponse.json({
+        ...balance,
+        equity: postLiqEquity,
+        marginUsed: 0,
+        freeMargin: postLiqEquity,
+        marginLevel: null,
+        unrealizedPnl: 0,
+        openPositionsCount: 0,
+        liquidated: true,
+        liquidationMessage: `Account liquidated at margin level ${marginLevel.toFixed(0)}%. All positions closed.`,
+      });
+    }
+
     return NextResponse.json({
       ...balance,
       equity,
       marginUsed,
       freeMargin,
       marginLevel,
+      unrealizedPnl: totalUnrealizedPnl,
       openPositionsCount: openPositions.length,
     });
   } catch (error) {
@@ -110,15 +233,16 @@ export async function POST(request: Request) {
         });
 
         // Reset balance
+        const resetEurBalance = amount || DEFAULT_BALANCE.eurBalance;
         balance = await prisma.simulatedBalance.update({
           where: { id: 'default' },
           data: {
-            eurBalance: amount || DEFAULT_BALANCE.eurBalance,
+            eurBalance: resetEurBalance,
             cryptoHoldings: '{}',
             cryptoValue: 0,
-            equity: amount || DEFAULT_BALANCE.equity,
+            equity: resetEurBalance,
             marginUsed: 0,
-            freeMargin: (amount || DEFAULT_BALANCE.equity) * 10,
+            freeMargin: resetEurBalance,
             marginLevel: null,
             totalRealizedPnl: 0,
             totalFeesPaid: 0,
@@ -133,12 +257,21 @@ export async function POST(request: Request) {
             { status: 400 }
           );
         }
+        const depositBalance = balance.eurBalance + amount;
+        const depositOpenPositions = await prisma.simulatedPosition.findMany({
+          where: { isOpen: true },
+        });
+        const depositMarginUsed = depositOpenPositions.reduce((total, pos) => total + (pos.totalCost / pos.leverage), 0);
+        const depositEquity = depositBalance + balance.cryptoValue;
+        const depositFreeMargin = Math.max(0, depositEquity - depositMarginUsed);
+
         balance = await prisma.simulatedBalance.update({
           where: { id: 'default' },
           data: {
-            eurBalance: balance.eurBalance + amount,
-            equity: balance.equity + amount,
-            freeMargin: balance.freeMargin + amount * 10,
+            eurBalance: depositBalance,
+            equity: depositEquity,
+            marginUsed: depositMarginUsed,
+            freeMargin: depositFreeMargin,
           },
         });
         break;
@@ -156,12 +289,21 @@ export async function POST(request: Request) {
             { status: 400 }
           );
         }
+        const withdrawBalance = balance.eurBalance - amount;
+        const withdrawOpenPositions = await prisma.simulatedPosition.findMany({
+          where: { isOpen: true },
+        });
+        const withdrawMarginUsed = withdrawOpenPositions.reduce((total, pos) => total + (pos.totalCost / pos.leverage), 0);
+        const withdrawEquity = withdrawBalance + balance.cryptoValue;
+        const withdrawFreeMargin = Math.max(0, withdrawEquity - withdrawMarginUsed);
+
         balance = await prisma.simulatedBalance.update({
           where: { id: 'default' },
           data: {
-            eurBalance: balance.eurBalance - amount,
-            equity: balance.equity - amount,
-            freeMargin: Math.max(0, balance.freeMargin - amount * 10),
+            eurBalance: withdrawBalance,
+            equity: withdrawEquity,
+            marginUsed: withdrawMarginUsed,
+            freeMargin: withdrawFreeMargin,
           },
         });
         break;

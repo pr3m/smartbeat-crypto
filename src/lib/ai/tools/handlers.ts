@@ -8,6 +8,13 @@ import { calculateIndicators, calculateBTCTrend } from '@/lib/trading/indicators
 import { generateRecommendation } from '@/lib/trading/recommendation';
 import type { ToolName } from './definitions';
 import type { OHLCData, TimeframeData } from '@/lib/kraken/types';
+import { getDefaultStrategy } from '@/lib/trading/strategies';
+import { buildStrategyContextForTools } from '@/lib/ai/strategy-prompt-builder';
+import { calculateEntrySize, calculateLiquidationPrice } from '@/lib/trading/position-sizing';
+import { analyzeDCAOpportunity } from '@/lib/trading/dca-signals';
+import { analyzeExitConditions, getExitStatusSummary, calculateTimeboxPressure, getTimePhase } from '@/lib/trading/exit-signals';
+import type { PositionState, TradeDirection } from '@/lib/trading/v2-types';
+import { EMPTY_POSITION_STATE } from '@/lib/trading/v2-types';
 
 // Base URL for internal API calls
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:4000';
@@ -52,6 +59,10 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>)
         return await getCurrentSetup(args);
       case 'analyze_position':
         return await analyzePosition(args);
+      case 'get_strategy_config':
+        return await getStrategyConfig(args);
+      case 'get_v2_engine_state':
+        return await getV2EngineState(args);
       default:
         return { success: false, error: `Unknown tool: ${name}` };
     }
@@ -474,6 +485,7 @@ async function getTradingRecommendation(args: Record<string, unknown>): Promise<
           short: `${recommendation.shortScore}/${recommendation.totalItems}`,
         },
         checklist: recommendation.checklist,
+        strategyContext: buildStrategyContextForTools(),
         btc: includeBTC ? {
           trend: btcTrend,
           change24h: btcChange.toFixed(2) + '%',
@@ -1368,7 +1380,14 @@ async function analyzePosition(args: Record<string, unknown>): Promise<ToolResul
       // Calculate risk metrics
       const positionValue = position.volume * currentPrice;
       const marginUsed = positionValue / position.leverage;
-      const liquidationDistance = ((position.avgEntryPrice * 0.92) - currentPrice) / currentPrice * 100; // Assuming 8% stop
+      const liqResult = calculateLiquidationPrice(
+        position.avgEntryPrice,
+        marginUsed,
+        positionValue,
+        position.side === 'buy' ? 'long' : 'short',
+        position.leverage
+      );
+      const liquidationDistance = liqResult.distancePercent;
 
       return {
         success: true,
@@ -1403,10 +1422,10 @@ async function analyzePosition(args: Record<string, unknown>): Promise<ToolResul
                                  (position.side === 'sell' && (currentSetup as any).action === 'SHORT'),
           } : null,
           suggestion: unrealizedPnl > 0 && pnlPercent > 5
-            ? 'Consider taking partial profits'
-            : unrealizedPnl < 0 && pnlPercent < -3
-              ? 'Review stop loss - position moving against you'
-              : 'Monitor position - within normal range',
+            ? 'Consider taking partial profits — check exit pressure via get_v2_engine_state'
+            : unrealizedPnl < 0
+              ? 'Strategy uses momentum exhaustion DCA and NO stop losses. Check DCA signal via get_v2_engine_state.'
+              : 'Monitor position — check timebox and exit pressure via get_v2_engine_state',
         },
       };
     }
@@ -1492,10 +1511,10 @@ async function analyzePosition(args: Record<string, unknown>): Promise<ToolResul
                                  (side === 'sell' && (currentSetup as any).action === 'SHORT'),
           } : null,
           suggestion: unrealizedPnl > 0 && pnlPercent > 5
-            ? 'Consider taking partial profits'
-            : unrealizedPnl < 0 && pnlPercent < -3
-              ? 'Review stop loss - position moving against you'
-              : 'Monitor position - within normal range',
+            ? 'Consider taking partial profits — check exit pressure via get_v2_engine_state'
+            : unrealizedPnl < 0
+              ? 'Strategy uses momentum exhaustion DCA and NO stop losses. Check DCA signal via get_v2_engine_state.'
+              : 'Monitor position — check timebox and exit pressure via get_v2_engine_state',
           totalKrakenPositions: entries.length,
         },
       };
@@ -1509,6 +1528,403 @@ async function analyzePosition(args: Record<string, unknown>): Promise<ToolResul
     return {
       success: false,
       error: `Failed to analyze position: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+/**
+ * Get current strategy configuration
+ */
+async function getStrategyConfig(args: Record<string, unknown>): Promise<ToolResult> {
+  const { section = 'all' } = args;
+
+  try {
+    const strategy = getDefaultStrategy();
+
+    if (section === 'all') {
+      return {
+        success: true,
+        data: {
+          meta: strategy.meta,
+          timeframeWeights: strategy.timeframeWeights,
+          signals: strategy.signals,
+          spike: strategy.spike,
+          positionSizing: strategy.positionSizing,
+          dca: {
+            ...strategy.dca,
+            exhaustionSignalDescriptions: {
+              rsiDivergence: `RSI dropping below ${strategy.dca.exhaustionThresholds.rsiOversold} (long) or above ${strategy.dca.exhaustionThresholds.rsiOverbought} (short) — momentum exhausting`,
+              volumeDryUp: `5m volume ratio dropping below ${strategy.dca.exhaustionThresholds.volumeDecline5m}x (declining) or ${strategy.dca.exhaustionThresholds.volumeFading5m}x (fading) — selling/buying pressure dying`,
+              macdContraction: `MACD histogram contracting toward zero (within ${strategy.dca.exhaustionThresholds.macdNearZero}) — momentum stalling`,
+              bbMiddleReturn: `BB position returning to middle band (${strategy.dca.exhaustionThresholds.bbMiddleLow}-${strategy.dca.exhaustionThresholds.bbMiddleHigh}) — volatility calming`,
+              priceStabilizing: `${strategy.dca.exhaustionThresholds.priceStabilizingMinMatches}+ of last ${strategy.dca.exhaustionThresholds.priceStabilizingLookback} candles showing HL (long) or LH (short) — price stabilizing`,
+            },
+          },
+          exit: strategy.exit,
+          antiGreed: strategy.antiGreed,
+          timebox: strategy.timebox,
+          risk: strategy.risk,
+          aiInstructions: strategy.aiInstructions || null,
+        },
+      };
+    }
+
+    // Return specific section
+    const sectionMap: Record<string, unknown> = {
+      meta: strategy.meta,
+      weights: strategy.timeframeWeights,
+      signals: strategy.signals,
+      positionSizing: strategy.positionSizing,
+      dca: strategy.dca,
+      exit: strategy.exit,
+      timebox: strategy.timebox,
+      antiGreed: strategy.antiGreed,
+      risk: strategy.risk,
+    };
+
+    const data = sectionMap[section as string];
+    if (!data) {
+      return { success: false, error: `Unknown section: ${section}. Valid: ${Object.keys(sectionMap).join(', ')}` };
+    }
+
+    return { success: true, data };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to get strategy config: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+/**
+ * Get v2 engine state for the current position.
+ * Server-side computation of DCA signals, exit signals, timebox, anti-greed, and sizing.
+ */
+async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResult> {
+  const { type = 'simulated' } = args;
+  const pair = 'XRPEUR';
+  const strategy = getDefaultStrategy();
+
+  try {
+    // Fetch current price
+    const ticker = await fetchTicker(pair);
+    const currentPrice = parseFloat(String(ticker.price || (ticker as any).c?.[0])) || 0;
+
+    if (currentPrice <= 0) {
+      return { success: false, error: 'Failed to get current price' };
+    }
+
+    // Fetch OHLC for indicator calculation
+    const [ohlc15m, ohlc1h, ohlc5m] = await Promise.all([
+      fetchOHLC(pair, 15),
+      fetchOHLC(pair, 60),
+      fetchOHLC(pair, 5),
+    ]);
+
+    const ind15m = calculateIndicators(ohlc15m);
+    const ind1h = calculateIndicators(ohlc1h);
+    const ind5m = calculateIndicators(ohlc5m);
+
+    // Get position data
+    let positionState: PositionState = EMPTY_POSITION_STATE;
+    let hasPosition = false;
+
+    if (type === 'simulated') {
+      const simPos = await prisma.simulatedPosition.findFirst({
+        where: { isOpen: true },
+        orderBy: { openedAt: 'desc' },
+      });
+
+      if (simPos) {
+        hasPosition = true;
+        const direction: TradeDirection = simPos.side === 'sell' ? 'short' : 'long';
+        const hoursOpen = (Date.now() - new Date(simPos.openedAt).getTime()) / 3600000;
+        const dirMult = direction === 'long' ? 1 : -1;
+        const priceDiff = (currentPrice - simPos.avgEntryPrice) * dirMult;
+        const unrealizedPnl = priceDiff * simPos.volume;
+        const unrealizedPnlPercent = (priceDiff / simPos.avgEntryPrice) * 100;
+        const positionValue = simPos.volume * currentPrice;
+        const marginUsed = positionValue / simPos.leverage;
+        const liqResult = calculateLiquidationPrice(simPos.avgEntryPrice, marginUsed, positionValue, direction, simPos.leverage);
+
+        positionState = {
+          isOpen: true,
+          direction,
+          phase: 'entry',
+          entries: [{
+            id: simPos.id,
+            type: 'initial',
+            dcaLevel: 0,
+            price: simPos.avgEntryPrice,
+            volume: simPos.volume,
+            marginUsed,
+            marginPercent: 0,
+            timestamp: new Date(simPos.openedAt).getTime(),
+            confidence: 0,
+            entryMode: 'full',
+            reason: 'Existing position',
+          }],
+          avgPrice: simPos.avgEntryPrice,
+          totalVolume: simPos.volume,
+          totalMarginUsed: marginUsed,
+          totalMarginPercent: 0,
+          dcaCount: 0,
+          unrealizedPnL: unrealizedPnl,
+          unrealizedPnLPercent: unrealizedPnlPercent,
+          unrealizedPnLLevered: unrealizedPnl,
+          unrealizedPnLLeveredPercent: unrealizedPnlPercent * simPos.leverage,
+          highWaterMarkPnL: Math.max(unrealizedPnl, 0),
+          drawdownFromHWM: 0,
+          drawdownFromHWMPercent: 0,
+          openedAt: new Date(simPos.openedAt).getTime(),
+          timeInTradeMs: hoursOpen * 3600000,
+          hoursRemaining: Math.max(0, strategy.timebox.maxHours - hoursOpen),
+          timeboxProgress: Math.min(1, hoursOpen / strategy.timebox.maxHours),
+          liquidationPrice: liqResult.liquidationPrice,
+          liquidationDistancePercent: liqResult.distancePercent,
+          leverage: simPos.leverage,
+          totalFees: simPos.totalFees,
+          rolloverCostPer4h: 0,
+        };
+      }
+    } else {
+      // Kraken positions
+      try {
+        const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`);
+        if (res.ok) {
+          const data = await res.json();
+          const entries = Object.entries(data);
+          if (entries.length > 0) {
+            hasPosition = true;
+            const [, posData] = entries[0];
+            const p = posData as Record<string, unknown>;
+            const vol = Number(p.vol) || 0;
+            const cost = Number(p.cost) || 0;
+            const entryPrice = vol > 0 ? cost / vol : 0;
+            const fee = Number(p.fee) || 0;
+            const margin = Number(p.margin) || 0;
+            const rawLev = p.leverage ? parseFloat(String(p.leverage)) : NaN;
+            const leverage = Number.isFinite(rawLev) ? rawLev : margin > 0 ? Math.round(cost / margin) : 10;
+            const side = String(p.type || 'buy');
+            const direction: TradeDirection = side === 'sell' ? 'short' : 'long';
+            const rawTime = p.time ? parseFloat(String(p.time)) : NaN;
+            const openTime = Number.isFinite(rawTime) ? rawTime * 1000 : Date.now();
+            const hoursOpen = (Date.now() - openTime) / 3600000;
+            const dirMult = direction === 'long' ? 1 : -1;
+            const priceDiff = (currentPrice - entryPrice) * dirMult;
+            const unrealizedPnl = priceDiff * vol - fee;
+            const unrealizedPnlPercent = entryPrice > 0 ? (priceDiff / entryPrice) * 100 : 0;
+            const posValue = vol * currentPrice;
+            const liqResult = calculateLiquidationPrice(entryPrice, margin, posValue, direction, leverage);
+
+            positionState = {
+              isOpen: true,
+              direction,
+              phase: 'entry',
+              entries: [{
+                id: 'kraken-pos',
+                type: 'initial',
+                dcaLevel: 0,
+                price: entryPrice,
+                volume: vol,
+                marginUsed: margin,
+                marginPercent: 0,
+                timestamp: openTime,
+                confidence: 0,
+                entryMode: 'full',
+                reason: 'Existing Kraken position',
+              }],
+              avgPrice: entryPrice,
+              totalVolume: vol,
+              totalMarginUsed: margin,
+              totalMarginPercent: 0,
+              dcaCount: 0,
+              unrealizedPnL: unrealizedPnl,
+              unrealizedPnLPercent: unrealizedPnlPercent,
+              unrealizedPnLLevered: unrealizedPnl,
+              unrealizedPnLLeveredPercent: unrealizedPnlPercent * leverage,
+              highWaterMarkPnL: Math.max(unrealizedPnl, 0),
+              drawdownFromHWM: 0,
+              drawdownFromHWMPercent: 0,
+              openedAt: openTime,
+              timeInTradeMs: hoursOpen * 3600000,
+              hoursRemaining: Math.max(0, strategy.timebox.maxHours - hoursOpen),
+              timeboxProgress: Math.min(1, hoursOpen / strategy.timebox.maxHours),
+              liquidationPrice: liqResult.liquidationPrice,
+              liquidationDistancePercent: liqResult.distancePercent,
+              leverage,
+              totalFees: fee,
+              rolloverCostPer4h: 0,
+            };
+          }
+        }
+      } catch {
+        // Position fetch failed, continue with no position
+      }
+    }
+
+    // Build result
+    const result: Record<string, unknown> = {
+      hasPosition,
+      currentPrice: currentPrice.toFixed(5),
+      strategyName: strategy.meta.name,
+    };
+
+    if (hasPosition) {
+      // Position info
+      const hoursOpen = positionState.timeInTradeMs / 3600000;
+      result.position = {
+        direction: positionState.direction,
+        avgPrice: positionState.avgPrice.toFixed(5),
+        totalVolume: positionState.totalVolume,
+        dcaCount: positionState.dcaCount,
+        maxDCA: strategy.positionSizing.maxDCACount,
+        unrealizedPnl: positionState.unrealizedPnL.toFixed(2),
+        unrealizedPnlPercent: positionState.unrealizedPnLPercent.toFixed(2) + '%',
+        liquidationPrice: positionState.liquidationPrice.toFixed(5),
+        liquidationDistance: positionState.liquidationDistancePercent.toFixed(2) + '%',
+      };
+
+      // Timebox status
+      const timePhase = getTimePhase(hoursOpen);
+      const timeboxPressure = calculateTimeboxPressure(hoursOpen, strategy.timebox);
+      const currentStep = strategy.timebox.steps.filter(s => hoursOpen >= s.hours).pop();
+      result.timebox = {
+        hoursOpen: hoursOpen.toFixed(1),
+        hoursRemaining: positionState.hoursRemaining.toFixed(1),
+        maxHours: strategy.timebox.maxHours,
+        progress: (positionState.timeboxProgress * 100).toFixed(0) + '%',
+        phase: timePhase,
+        pressure: timeboxPressure,
+        currentStep: currentStep?.label || 'Fresh entry',
+      };
+
+      // DCA signal analysis
+      if (ind15m && ind1h && ind5m) {
+        const dcaSignal = analyzeDCAOpportunity(
+          positionState,
+          ind15m,
+          ind1h,
+          ind5m,
+          ohlc5m,
+          currentPrice,
+          strategy.dca
+        );
+
+        result.dcaSignal = {
+          shouldDCA: dcaSignal.shouldDCA,
+          confidence: dcaSignal.confidence,
+          dcaLevel: dcaSignal.dcaLevel,
+          exhaustionType: dcaSignal.exhaustionType,
+          drawdownPercent: dcaSignal.drawdownPercent.toFixed(2) + '%',
+          reason: dcaSignal.reason,
+          signals: dcaSignal.signals.map(sig => ({
+            name: sig.name,
+            active: sig.active,
+            value: sig.value,
+            timeframe: sig.timeframe,
+          })),
+          warnings: dcaSignal.warnings,
+        };
+      }
+
+      // Exit signal analysis
+      if (ind15m && ind1h && ind5m) {
+        const exitSignal = analyzeExitConditions(
+          positionState,
+          ind15m,
+          ind1h,
+          ind5m,
+          currentPrice,
+          Date.now(),
+          strategy
+        );
+
+        const exitSummary = getExitStatusSummary(exitSignal);
+        result.exitSignal = {
+          shouldExit: exitSignal.shouldExit,
+          urgency: exitSignal.urgency,
+          reason: exitSignal.reason,
+          totalPressure: exitSignal.totalPressure,
+          pressureThreshold: strategy.exit.exitPressureThreshold,
+          explanation: exitSignal.explanation,
+          pressureSources: exitSignal.pressures.map(p => ({
+            source: p.source,
+            value: p.value,
+            detail: p.detail,
+          })),
+          statusSummary: exitSummary,
+        };
+      }
+
+      // Anti-greed status
+      if (strategy.antiGreed.enabled) {
+        result.antiGreed = {
+          enabled: true,
+          highWaterMark: positionState.highWaterMarkPnL.toFixed(2),
+          currentPnl: positionState.unrealizedPnL.toFixed(2),
+          drawdownFromHWM: positionState.drawdownFromHWMPercent.toFixed(1) + '%',
+          threshold: strategy.antiGreed.drawdownThresholdPercent + '%',
+          triggered: positionState.drawdownFromHWMPercent >= strategy.antiGreed.drawdownThresholdPercent
+            && positionState.highWaterMarkPnL >= strategy.antiGreed.minHWMToTrack,
+        };
+      }
+    } else {
+      // No position - show position sizing recommendation
+      result.noPosition = true;
+      result.note = 'No open position. Use get_trading_recommendation to check if entry conditions are met.';
+
+      // Get available margin for sizing calculation
+      let availableMargin = 0;
+      if (type === 'simulated') {
+        const balance = await prisma.simulatedBalance.findUnique({
+          where: { id: 'default' },
+        });
+        availableMargin = balance?.freeMargin || 20000;
+      } else {
+        try {
+          const tbRes = await fetch(`${BASE_URL}/api/kraken/private/trade-balance`);
+          if (tbRes.ok) {
+            const tb = await tbRes.json();
+            availableMargin = parseFloat(tb.mf) || 0;
+          }
+        } catch {
+          availableMargin = 0;
+        }
+      }
+
+      if (availableMargin > 0) {
+        // Show what sizing would look like at different confidence levels
+        const fullEntry = calculateEntrySize(80, currentPrice, availableMargin, strategy.positionSizing);
+        const cautiousEntry = calculateEntrySize(70, currentPrice, availableMargin, strategy.positionSizing);
+
+        result.sizing = {
+          availableMargin: availableMargin.toFixed(2),
+          fullEntry: {
+            confidence: '80%+',
+            marginToUse: fullEntry.marginToUse.toFixed(2),
+            marginPercent: fullEntry.marginPercent.toFixed(1) + '%',
+            positionValue: fullEntry.positionValue.toFixed(2),
+            volume: fullEntry.volume.toFixed(2),
+            dcaCapacity: fullEntry.remainingDCACapacity,
+          },
+          cautiousEntry: {
+            confidence: '65-79%',
+            marginToUse: cautiousEntry.marginToUse.toFixed(2),
+            marginPercent: cautiousEntry.marginPercent.toFixed(1) + '%',
+            positionValue: cautiousEntry.positionValue.toFixed(2),
+            volume: cautiousEntry.volume.toFixed(2),
+            dcaCapacity: cautiousEntry.remainingDCACapacity,
+          },
+        };
+      }
+    }
+
+    return { success: true, data: result };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to get v2 engine state: ${error instanceof Error ? error.message : 'Unknown error'}`,
     };
   }
 }

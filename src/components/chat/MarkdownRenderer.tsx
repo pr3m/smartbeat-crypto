@@ -41,6 +41,12 @@ function parseMarkdown(text: string): string {
   input = input.replace(/^([ \t]*[-*] .+)\n\n+(?=[ \t]*[-*] )/gm, '$1\n');
   input = input.replace(/^([ \t]*\d+\. .+)\n\n+(?=[ \t]*\d+\. )/gm, '$1\n');
 
+  // Insert blank lines around header lines so they always become their own block.
+  // Before: ensure a blank line before any header that doesn't already have one
+  input = input.replace(/([^\n])\n(#{1,4} )/g, '$1\n\n$2');
+  // After: ensure a blank line after any header line followed by non-blank content
+  input = input.replace(/^(#{1,4} .+)\n(?!\n)/gm, '$1\n\n');
+
   // Split into blocks by double newlines
   const blocks = input.split(/\n{2,}/);
   const htmlBlocks: string[] = [];

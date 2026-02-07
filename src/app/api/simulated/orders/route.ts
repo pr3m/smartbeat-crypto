@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { createDbErrorResponse } from '@/lib/db-error';
-import { calculateSimulatedFees, calculateMarginRequired } from '@/lib/trading/simulated-pnl';
+import { calculateSimulatedFees, calculateMarginRequired, calculateSimulatedPnL } from '@/lib/trading/simulated-pnl';
 
 /**
  * DELETE /api/simulated/orders
@@ -165,12 +165,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Balance not initialized' }, { status: 400 });
     }
 
-    // Calculate required margin
-    // For trailing stops, use market price for margin calculation
-    const executionPrice = orderType === 'market' || needsTrailingOffset ? marketPrice : price;
-    const marginRequired = calculateMarginRequired(volume, executionPrice, leverage);
-
-    // Check available margin (considering open positions)
     const openPositions = await prisma.simulatedPosition.findMany({
       where: { isOpen: true },
     });
@@ -179,10 +173,49 @@ export async function POST(request: Request) {
       currentMarginUsed += pos.totalCost / pos.leverage;
     }
 
-    const equity = balance.eurBalance + balance.cryptoValue;
-    const freeMargin = equity * 10 - currentMarginUsed; // 10x max leverage
+    const exitPosition = openPositions.find(pos => (
+      pos.pair === pair
+      && ((pos.side === 'long' && type === 'sell') || (pos.side === 'short' && type === 'buy'))
+    ));
 
-    if (marginRequired > freeMargin) {
+    const isExitOrderType = [
+      'stop-loss',
+      'stop-loss-limit',
+      'take-profit',
+      'take-profit-limit',
+      'trailing-stop',
+      'trailing-stop-limit',
+    ].includes(orderType);
+
+    const isReduceOnlyExit = Boolean(exitPosition && isExitOrderType && volume <= exitPosition.volume);
+
+    // Calculate required margin
+    // For trailing stops, use market price for margin calculation
+    const executionPrice = orderType === 'market' || needsTrailingOffset ? marketPrice : price;
+    const marginRequired = calculateMarginRequired(volume, executionPrice, leverage);
+
+    // Check available margin (considering open positions + unrealized P&L)
+    let totalUnrealizedPnl = 0;
+    if (marketPrice > 0) {
+      for (const pos of openPositions) {
+        const pnl = calculateSimulatedPnL(
+          pos.avgEntryPrice,
+          marketPrice,
+          pos.volume,
+          pos.side as 'long' | 'short',
+          pos.leverage,
+          pos.totalFees,
+          undefined,
+          pos.openedAt.getTime()
+        );
+        totalUnrealizedPnl += pnl.unrealizedPnl;
+      }
+    }
+
+    const equity = balance.eurBalance + balance.cryptoValue + totalUnrealizedPnl;
+    const freeMargin = equity - currentMarginUsed; // Real free margin (NOT multiplied by leverage)
+
+    if (!isReduceOnlyExit && marginRequired > freeMargin) {
       return NextResponse.json(
         { error: `Insufficient margin. Required: €${marginRequired.toFixed(2)}, Available: €${freeMargin.toFixed(2)}` },
         { status: 400 }

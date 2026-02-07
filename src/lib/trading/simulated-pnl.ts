@@ -1,7 +1,8 @@
 /**
  * Simulated Trading P&L Calculations
  *
- * Utilities for calculating P&L on simulated positions
+ * Utilities for calculating P&L on simulated positions.
+ * All P&L values are NET (after fees + rollover), matching Kraken's reporting.
  */
 
 import { FEE_RATES } from './trade-calculations';
@@ -15,17 +16,23 @@ export interface SimulatedPnLResult {
   marginUsed: number;
   currentValue: number;
   costBasis: number;
+  rolloverFee: number;
+  totalFeesIncRollover: number;
 }
 
 /**
- * Calculate unrealized P&L for a simulated position
+ * Calculate unrealized P&L for a simulated position.
+ *
+ * P&L is NET of all fees (entry + estimated rollover), matching Kraken's display.
+ *
  * @param entryPrice - Average entry price
  * @param currentPrice - Current market price
  * @param volume - Position volume (always positive)
  * @param side - 'long' or 'short'
  * @param leverage - Leverage multiplier
- * @param totalFees - Total fees paid
- * @param equity - Total account equity (optional, for accurate Kraken liquidation calc)
+ * @param totalFees - Total fees paid at entry
+ * @param equity - Total account equity (for Kraken liquidation calc)
+ * @param openedAt - Position open timestamp (for rollover calculation)
  */
 export function calculateSimulatedPnL(
   entryPrice: number,
@@ -34,7 +41,8 @@ export function calculateSimulatedPnL(
   side: 'long' | 'short',
   leverage: number,
   totalFees: number,
-  equity?: number
+  equity?: number,
+  openedAt?: number
 ): SimulatedPnLResult {
   // Calculate position values
   const costBasis = entryPrice * volume;
@@ -48,30 +56,37 @@ export function calculateSimulatedPnL(
     rawPnl = costBasis - currentValue;
   }
 
-  // Unrealized P&L (before fees)
-  const unrealizedPnl = rawPnl;
-  const unrealizedPnlPercent = costBasis > 0 ? (rawPnl / costBasis) * 100 : 0;
+  // Estimate rollover fee: 0.02% of notional per 4 hours
+  let rolloverFee = 0;
+  if (openedAt && openedAt > 0) {
+    const hoursOpen = (Date.now() - openedAt) / (1000 * 60 * 60);
+    const rolloverPeriods = Math.floor(hoursOpen / 4);
+    rolloverFee = costBasis * FEE_RATES.marginRollover * rolloverPeriods;
+  }
 
-  // Levered P&L (actual return on margin)
+  const totalFeesIncRollover = totalFees + rolloverFee;
+
+  // Unrealized P&L is NET (after all fees) — matches Kraken's display
+  const unrealizedPnl = rawPnl - totalFeesIncRollover;
+  const unrealizedPnlPercent = costBasis > 0 ? (unrealizedPnl / costBasis) * 100 : 0;
+
+  // Levered P&L = same EUR value but as % of margin invested
   const marginUsed = costBasis / leverage;
-  const unrealizedPnlLevered = rawPnl - totalFees;
+  const unrealizedPnlLevered = unrealizedPnl;
   const unrealizedPnlLeveredPercent = marginUsed > 0 ? (unrealizedPnlLevered / marginUsed) * 100 : 0;
 
-  // Calculate liquidation price using Kraken's actual formula
-  // Kraken liquidates at ~40% margin level, considering total account equity
-  // Formula from Kraken docs:
-  // Long: Liquidation Price = Entry Price - ((Equity - (Used Margin × 0.4)) / Volume)
-  // Short: Liquidation Price = Leverage × (Trade Balance + (Entry × Volume)) / (Volume × (0.4 + Leverage))
-  const accountEquity = equity ?? marginUsed; // Use position margin if no equity provided
+  // Calculate liquidation price using Kraken's formula
+  // Kraken liquidates at ~80% margin level
+  // For a single position: price where equity drops to 80% of margin
+  const accountEquity = equity ?? marginUsed;
   let liquidationPrice: number;
 
   if (side === 'long') {
-    // Long: price drops until equity reaches 40% of margin
-    liquidationPrice = entryPrice - ((accountEquity - (marginUsed * 0.4)) / volume);
+    // Long: price drops until equity reaches 80% of margin
+    liquidationPrice = entryPrice - ((accountEquity - (marginUsed * 0.8)) / volume);
   } else {
-    // Short: price rises until equity reaches 40% of margin
-    // Using simplified formula: entry + ((equity - margin*0.4) / volume)
-    liquidationPrice = entryPrice + ((accountEquity - (marginUsed * 0.4)) / volume);
+    // Short: price rises until equity reaches 80% of margin
+    liquidationPrice = entryPrice + ((accountEquity - (marginUsed * 0.8)) / volume);
   }
 
   // Ensure liquidation price is positive
@@ -86,6 +101,8 @@ export function calculateSimulatedPnL(
     marginUsed,
     currentValue,
     costBasis,
+    rolloverFee,
+    totalFeesIncRollover,
   };
 }
 
@@ -124,7 +141,8 @@ export function calculateMarginRequired(
 }
 
 /**
- * Check if a position would be liquidated at a given price
+ * Check if a position would be liquidated at a given price.
+ * Uses margin level check: liquidate when equity < 80% of margin used.
  */
 export function isLiquidated(
   entryPrice: number,
@@ -132,8 +150,14 @@ export function isLiquidated(
   side: 'long' | 'short',
   leverage: number
 ): boolean {
+  // Calculate P&L as fraction of margin
   const movePercent = ((currentPrice - entryPrice) / entryPrice) * 100;
-  const liquidationThreshold = 100 / leverage; // e.g., 10% for 10x leverage
+  // With 10x leverage, 8% move wipes 80% of margin → liquidation at ~80% margin level
+  // margin level = (margin + pnl) / margin * 100
+  // liquidation when margin level < 80: pnl < -0.2 * margin = -0.2 * (notional/leverage)
+  // pnl = movePercent/100 * notional → movePercent/100 * notional < -0.2 * notional / leverage
+  // movePercent < -20/leverage (for long)
+  const liquidationThreshold = 20 / leverage; // 2% for 10x
 
   if (side === 'long') {
     return movePercent <= -liquidationThreshold;
