@@ -44,6 +44,7 @@ import {
   DEFAULT_TIMEBOX,
   DEFAULT_ANTI_GREED,
 } from './v2-types';
+import type { ReversalSignal } from './reversal-detector';
 
 // ============================================================================
 // TIME PHASE DETERMINATION
@@ -340,7 +341,8 @@ export function analyzeExitConditions(
   ind5m: Indicators,
   currentPrice: number,
   currentTime: number,
-  strategy: TradingStrategy = DEFAULT_STRATEGY
+  strategy: TradingStrategy = DEFAULT_STRATEGY,
+  reversalSignal?: ReversalSignal | null
 ): ExitSignal {
   const antiGreedConfig = strategy.antiGreed;
   const timeboxConfig = strategy.timebox;
@@ -442,6 +444,62 @@ export function analyzeExitConditions(
     });
   }
 
+  // 8. Candlestick reversal pattern detection
+  let reversalPressureActive = false;
+  if (reversalSignal && reversalSignal.detected) {
+    // Only add pressure if the reversal is AGAINST our position
+    const reversalOpposesPosition =
+      (position.direction === 'long' && reversalSignal.direction === 'bearish') ||
+      (position.direction === 'short' && reversalSignal.direction === 'bullish');
+
+    if (reversalOpposesPosition) {
+      // Map reversal phase + confidence to pressure value
+      let reversalPressure = 0;
+      switch (reversalSignal.phase) {
+        case 'confirmation':
+          reversalPressure = reversalSignal.confidence >= 70 ? 85 : 65;
+          break;
+        case 'initiation':
+          reversalPressure = reversalSignal.confidence >= 50 ? 55 : 40;
+          break;
+        case 'indecision':
+          reversalPressure = 30;
+          break;
+        case 'exhaustion':
+          reversalPressure = reversalSignal.exhaustionScore > 60 ? 40 : 25;
+          break;
+      }
+
+      if (reversalPressure > 0) {
+        reversalPressureActive = true;
+        const patternNames = reversalSignal.patterns
+          .filter(p => p.type.startsWith('reversal_'))
+          .slice(0, 2)
+          .map(p => p.name.replace(/_/g, ' '));
+        const detail = patternNames.length > 0
+          ? `↺ ${reversalSignal.direction} reversal: ${patternNames.join(', ')} (${reversalSignal.phase}, ${reversalSignal.confidence}%)`
+          : `↺ ${reversalSignal.direction} ${reversalSignal.phase} (${reversalSignal.confidence}%)`;
+
+        pressures.push({
+          source: 'reversal_detected',
+          value: reversalPressure,
+          weight: 0.20,
+          detail,
+        });
+      }
+    }
+  }
+
+  // De-duplicate: when reversal_detected is active, reduce MACD reversal weight
+  // to avoid double-counting (the reversal detector already includes MACD crossover
+  // in its confidence score). We halve the MACD pressure weight.
+  if (reversalPressureActive && macdReversal.active) {
+    const macdPressure = pressures.find(p => p.detail === macdReversal.detail);
+    if (macdPressure) {
+      macdPressure.weight = 0.08; // Reduced from 0.15
+    }
+  }
+
   // --- Calculate composite pressure ---
   let totalPressure = 0;
   let totalWeight = 0;
@@ -471,8 +529,11 @@ export function analyzeExitConditions(
 
   // --- Determine primary reason ---
   let primaryReason: ExitReason = 'timebox_approaching';
+  const hasReversalPressure = pressures.some(p => p.source === 'reversal_detected' && p.value >= 60);
   if (antiGreed.active) {
     primaryReason = 'anti_greed';
+  } else if (hasReversalPressure) {
+    primaryReason = 'reversal_detected';
   } else if (trendReversal.active && trendReversal.value >= 80) {
     primaryReason = 'trend_reversal';
   } else if (timePhase === 'overdue') {

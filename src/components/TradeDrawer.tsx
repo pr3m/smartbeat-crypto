@@ -46,7 +46,9 @@ export function TradeDrawer({ isOpen, onClose, testMode, children }: TradeDrawer
 
   // Prevent body scroll when drawer is open on mobile
   useEffect(() => {
-    if (isOpen) {
+    if (typeof window === 'undefined') return;
+    const shouldLockScroll = window.matchMedia('(max-width: 1023px)').matches;
+    if (isOpen && shouldLockScroll) {
       document.body.style.overflow = 'hidden';
     } else {
       document.body.style.overflow = '';

@@ -132,6 +132,27 @@ export interface MarketSnapshot {
     flipSuggestion: boolean;
     waitFor: string[];
   };
+  // Reversal detection status from candlestick pattern analysis
+  reversalStatus?: {
+    detected: boolean;
+    phase: 'exhaustion' | 'indecision' | 'initiation' | 'confirmation';
+    direction: 'bullish' | 'bearish';
+    confidence: number;
+    exhaustionScore: number;
+    urgency: 'immediate' | 'developing' | 'early_warning';
+    description: string;
+    patterns: string[];
+  };
+  // Candlestick patterns detected per timeframe (top patterns by reliability*strength)
+  candlestickPatterns?: {
+    [timeframe: string]: Array<{
+      name: string;
+      type: string;
+      reliability: number;
+      strength: number;
+      candlesUsed: number;
+    }>;
+  };
 }
 
 export interface TimeframeSnapshot {

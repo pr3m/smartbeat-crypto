@@ -5,6 +5,7 @@
  */
 
 import type { OHLCData, Indicators, CandlestickPattern } from '@/lib/kraken/types';
+import { detectAllCandlestickPatterns } from './candlestick-patterns';
 
 /**
  * Calculate EMA (Exponential Moving Average)
@@ -613,6 +614,8 @@ export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
 
   // Detect candlestick patterns on recent candles
   const candlestickPatterns = detectCandlestickPatterns(data.slice(-5));
+  // Extended pattern detection (uses last 10+ candles for context)
+  const extendedPatterns = detectAllCandlestickPatterns(data.slice(-15));
 
   return {
     rsi,
@@ -640,6 +643,7 @@ export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
     trend: trendAnalysis.trend,
     trendScore: trendAnalysis.trendScore,
     candlestickPatterns,
+    extendedPatterns,
   };
 }
 

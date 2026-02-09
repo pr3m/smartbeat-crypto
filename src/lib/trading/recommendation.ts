@@ -22,6 +22,7 @@ import type {
 } from './v2-types';
 import { DEFAULT_STRATEGY } from './v2-types';
 import { detectKnife, KNIFE_GATING_ENABLED, type KnifeAnalysis } from './knife-detection';
+import { detectReversal, type ReversalSignal, NO_REVERSAL } from './reversal-detector';
 
 export interface TimeframeWeights {
   '1d': number;
@@ -34,8 +35,8 @@ export interface TimeframeWeights {
 export const DEFAULT_WEIGHTS: TimeframeWeights = {
   '1d': 10,  // Macro trend filter
   '4h': 18,  // Trend context
-  '1h': 40,  // Primary decision timeframe (trader trusts this most)
-  '15m': 24, // Entry timing
+  '1h': 24,  // Setup confirmation
+  '15m': 40, // Primary entry timing (trader trusts this most)
   '5m': 8,   // Candlestick patterns only
 };
 
@@ -1137,7 +1138,8 @@ export function formatChecklist(
   micro?: MicrostructureInput | null,
   liq?: LiquidationInput | null,
   ind1d?: Indicators | null,
-  liqConfig?: LiquidationStrategyConfig
+  liqConfig?: LiquidationStrategyConfig,
+  reversalSignal?: ReversalSignal | null
 ): TradingRecommendation['checklist'] {
   const flowAnalysis = micro ? analyzeFlow(direction, micro) : null;
   const liqAnalysis = liq ? analyzeLiquidation(direction, liq, liqConfig) : null;
@@ -1204,6 +1206,21 @@ export function formatChecklist(
     };
   }
 
+  // Add reversal signal to checklist when detected
+  if (reversalSignal && reversalSignal.detected) {
+    const reversalAligns = (direction === 'long' && reversalSignal.direction === 'bullish')
+      || (direction === 'short' && reversalSignal.direction === 'bearish');
+    const patternNames = reversalSignal.patterns
+      .filter(p => p.type.startsWith('reversal_'))
+      .slice(0, 2)
+      .map(p => p.name.replace(/_/g, ' '));
+    const patternStr = patternNames.length > 0 ? patternNames.join(', ') : reversalSignal.phase;
+    checklist.reversalSignal = {
+      pass: reversalAligns && reversalSignal.confidence >= 40,
+      value: `${reversalAligns ? '↺' : '⚠'} ${reversalSignal.direction} ${reversalSignal.phase} (${reversalSignal.confidence}%) ${patternStr}`,
+    };
+  }
+
   return checklist;
 }
 
@@ -1237,7 +1254,8 @@ export function calculateDirectionStrength(
   btcTrend: 'bull' | 'bear' | 'neut',
   micro: MicrostructureInput | null,
   liq: LiquidationInput | null,
-  signalConfig: SignalEvaluationConfig = DEFAULT_STRATEGY.signals
+  signalConfig: SignalEvaluationConfig = DEFAULT_STRATEGY.signals,
+  reversalSignal?: ReversalSignal | null
 ): { strength: number; signals: SignalWeight[]; reasons: string[]; warnings: string[] } {
   const signals: SignalWeight[] = [];
   const reasons: string[] = [];
@@ -1479,9 +1497,61 @@ export function calculateDirectionStrength(
   }
   candleValue = Math.max(0, Math.min(1, candleValue));
 
-  signals.push({ name: 'Candles', weight: w.candlestick ?? 8, value: candleValue });
+  signals.push({ name: 'Candles', weight: w.candlestick ?? 4, value: candleValue });
   if (candleValue >= 0.7 && candleReason) reasons.push(`Candle: ${candleReason}`);
   if (candleValue < 0.3) warnings.push(`⚠️ Opposing candlestick pattern`);
+
+  // 11. Reversal / Exhaustion Gate (weight: 12) - "Trade the reversal, not the chase"
+  // Boosts the reversal direction and penalizes the exhausted direction
+  const reversalWeight = w.reversal ?? 12;
+  if (reversalSignal && reversalSignal.detected) {
+    let reversalValue = 0.5; // Neutral baseline
+
+    // Does the reversal ALIGN with this direction?
+    // E.g., bullish reversal aligns with 'long', bearish reversal aligns with 'short'
+    const reversalAligns = (direction === 'long' && reversalSignal.direction === 'bullish')
+      || (direction === 'short' && reversalSignal.direction === 'bearish');
+
+    if (reversalAligns) {
+      // Reversal supports this direction — BOOST based on confidence and phase
+      const phaseMultiplier = {
+        exhaustion: 0.3,   // Early — mild boost
+        indecision: 0.5,   // Developing
+        initiation: 0.7,   // Clear signal
+        confirmation: 0.9, // Strong signal
+      }[reversalSignal.phase];
+
+      reversalValue = 0.5 + phaseMultiplier * (reversalSignal.confidence / 100) * 0.5;
+      reversalValue = Math.min(1, reversalValue);
+
+      if (reversalValue >= 0.7) {
+        reasons.push(`↺ ${reversalSignal.phase} reversal (${reversalSignal.confidence}%)`);
+      }
+    } else {
+      // Reversal OPPOSES this direction — this direction is exhausting, PENALIZE
+      const phaseMultiplier = {
+        exhaustion: 0.15,  // Early — mild penalty
+        indecision: 0.25,  // Developing
+        initiation: 0.35,  // Clear counter-signal
+        confirmation: 0.45,// Strong counter-signal
+      }[reversalSignal.phase];
+
+      reversalValue = 0.5 - phaseMultiplier * (reversalSignal.confidence / 100);
+      reversalValue = Math.max(0, reversalValue);
+
+      if (reversalValue < 0.3) {
+        warnings.push(`⚠️ ${reversalSignal.phase} reversal opposing (${reversalSignal.confidence}%)`);
+      }
+      if (reversalSignal.exhaustionScore > 60) {
+        warnings.push(`⚠️ Direction exhausting (${reversalSignal.exhaustionScore}%)`);
+      }
+    }
+
+    signals.push({ name: 'Reversal', weight: reversalWeight, value: reversalValue });
+  } else {
+    // No reversal detected — neutral contribution (doesn't help or hurt)
+    signals.push({ name: 'Reversal', weight: reversalWeight, value: 0.5 });
+  }
 
   // Calculate weighted strength
   let totalWeight = 0;
@@ -1673,13 +1743,30 @@ export function generateRecommendation(
     return null;
   }
 
+  // Reversal detection — analyze OHLC across available timeframes
+  // Build timeframe data dynamically from what's available
+  const reversalOhlc: Record<string, typeof tf5m.ohlc> = {};
+  const reversalInd: Record<string, Indicators> = {};
+  if (tf5m.ohlc?.length >= 5 && ind5m) { reversalOhlc['5'] = tf5m.ohlc; reversalInd['5'] = ind5m; }
+  if (tf15m.ohlc?.length >= 5 && ind15m) { reversalOhlc['15'] = tf15m.ohlc; reversalInd['15'] = ind15m; }
+
+  let reversalSignal: ReversalSignal | null = null;
+  if (Object.keys(reversalOhlc).length > 0) {
+    reversalSignal = detectReversal({
+      ohlcByTimeframe: reversalOhlc,
+      indicatorsByTimeframe: reversalInd,
+      currentDirection: null, // No position context in recommendation engine
+      timeframePriority: ['5', '15'],
+    });
+  }
+
   // Evaluate both directions (with microstructure, liquidation, and daily data)
   const longChecks = evaluateLongConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d);
   const shortChecks = evaluateShortConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d);
 
-  // Calculate weighted strength scores for BOTH directions
-  const longStrengthResult = calculateDirectionStrength('long', longChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig);
-  const shortStrengthResult = calculateDirectionStrength('short', shortChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig);
+  // Calculate weighted strength scores for BOTH directions (with reversal intelligence)
+  const longStrengthResult = calculateDirectionStrength('long', longChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal);
+  const shortStrengthResult = calculateDirectionStrength('short', shortChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal);
 
   // Base score (6-7 conditions depending on daily availability, excluding flowConfirm and liqBias)
   const longPassed = countPassed(longChecks, false);
@@ -1696,8 +1783,8 @@ export function generateRecommendation(
 
   // Format checklists for BOTH directions
   const liqConfig = strat.liquidation;
-  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig);
-  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig);
+  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal);
+  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal);
 
   // Determine which setup is stronger (based on weighted strength)
   const bestSetup = longStrengthResult.strength >= shortStrengthResult.strength ? 'long' : 'short';
@@ -1845,11 +1932,32 @@ export function generateRecommendation(
   if (longFlowAnalysis.hasDivergence) {
     allWarnings.push(`Divergence: ${longFlowAnalysis.divergenceType}`);
   }
+  // Reversal warnings
+  if (reversalSignal && reversalSignal.detected && reversalSignal.confidence >= 40) {
+    const revDir = reversalSignal.direction === 'bullish' ? '↑ Bullish' : '↓ Bearish';
+    allWarnings.push(`↺ ${revDir} reversal ${reversalSignal.phase} (${reversalSignal.confidence}%)`);
+    if (reversalSignal.exhaustionScore > 50) {
+      allWarnings.push(`⚡ Direction exhaustion: ${reversalSignal.exhaustionScore}%`);
+    }
+  }
 
   // Apply adjustments to confidence
   const flowAnalysis = bestSetup === 'long' ? longFlowAnalysis : shortFlowAnalysis;
   const liqAnalysis = bestSetup === 'long' ? longLiqAnalysis : shortLiqAnalysis;
   let confidence = baseConfidence + flowAnalysis.adjustments.total + liqAnalysis.adjustments.total;
+
+  // Reversal confidence adjustment
+  // If recommended direction aligns with a developing reversal, boost confidence
+  // If entering against a reversal, reduce confidence
+  if (reversalSignal && reversalSignal.detected && action !== 'WAIT') {
+    const recAligns = (action === 'LONG' && reversalSignal.direction === 'bullish')
+      || (action === 'SHORT' && reversalSignal.direction === 'bearish');
+    if (recAligns && reversalSignal.confidence >= 50) {
+      confidence += Math.round(reversalSignal.confidence / 10); // +5 to +10
+    } else if (!recAligns && reversalSignal.confidence >= 40) {
+      confidence -= Math.round(reversalSignal.confidence / 8); // -5 to -12
+    }
+  }
 
   // ATR volatility adjustment
   if (ind15m.atr && currentPrice && currentPrice > 0) {
@@ -1912,6 +2020,19 @@ export function generateRecommendation(
       signals: knifeAnalysis.signals,
       waitFor: knifeAnalysis.waitFor,
       reasons: knifeAnalysis.reasons,
+    } : undefined,
+    reversalStatus: reversalSignal?.detected ? {
+      detected: true,
+      phase: reversalSignal.phase,
+      direction: reversalSignal.direction,
+      confidence: reversalSignal.confidence,
+      exhaustionScore: reversalSignal.exhaustionScore,
+      urgency: reversalSignal.urgency,
+      description: reversalSignal.description,
+      patterns: reversalSignal.patterns
+        .filter(p => p.type.startsWith('reversal_'))
+        .slice(0, 5)
+        .map(p => p.name.replace(/_/g, ' ')),
     } : undefined,
   };
 }

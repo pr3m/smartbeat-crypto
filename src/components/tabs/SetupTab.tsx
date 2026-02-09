@@ -72,6 +72,71 @@ interface SetupTabProps {
   addToast: (toast: { title: string; message: string; type: 'success' | 'error' | 'signal' | 'info' | 'warning'; duration?: number }) => void;
 }
 
+/** Plain-language tooltips for each candlestick pattern */
+const CANDLESTICK_TOOLTIPS: Record<string, string> = {
+  // Single-candle patterns
+  doji: 'Buyers and sellers are evenly matched — the market can\'t decide. Often appears before a direction change, especially after a strong move.',
+  long_legged_doji: 'Wild swings in both directions, but price ended where it started. Shows extreme indecision — a big move may follow.',
+  dragonfly_doji: 'Price dropped sharply but buyers pushed it all the way back up. At a bottom, this often signals buyers are stepping in.',
+  gravestone_doji: 'Price spiked up but sellers pushed it all the way back down. At a top, this often signals sellers are taking over.',
+  hammer: 'Price fell hard during the candle but buyers fought back, closing near the top. Classic "bottom is in" signal after a decline.',
+  inverted_hammer: 'Price tried to rally but couldn\'t hold gains. Still bullish after a decline — it shows buyers are starting to test higher prices.',
+  shooting_star: 'Price spiked up then collapsed back down. After a rally, this signals buyers are losing steam and a pullback may follow.',
+  hanging_man: 'Looks like a hammer, but appears at the top of a rally. Warns that selling pressure is creeping in despite the uptrend.',
+  spinning_top: 'Small body with wicks on both sides — neither buyers nor sellers won. The trend may be losing conviction.',
+  bullish_marubozu: 'All-green candle with no wicks — buyers dominated from open to close. Shows very strong buying pressure.',
+  bearish_marubozu: 'All-red candle with no wicks — sellers dominated from open to close. Shows very strong selling pressure.',
+  bullish_belt_hold: 'Opens at the low and closes near the high after a decline. Buyers grabbed control right from the open — bullish shift.',
+  bearish_belt_hold: 'Opens at the high and closes near the low after a rally. Sellers took over from the open — bearish shift.',
+
+  // Two-candle patterns
+  bullish_engulfing: 'A large green candle completely swallows the previous red candle. One of the strongest reversal signals — buyers overwhelmed sellers.',
+  bearish_engulfing: 'A large red candle completely swallows the previous green candle. Sellers overwhelmed buyers — strong warning of a downturn.',
+  piercing_line: 'After a red candle, the next opens lower but closes above the midpoint. Buyers are fighting back — potential bottom forming.',
+  dark_cloud_cover: 'After a green candle, the next opens higher but closes below the midpoint. Sellers are pushing back — potential top forming.',
+  tweezer_bottom: 'Two candles touch the same low — the market tested that price twice and held. Support level confirmed, often marks a bottom.',
+  tweezer_top: 'Two candles touch the same high — the market tested that price twice and failed. Resistance confirmed, often marks a top.',
+  bullish_harami: 'A small green candle fits inside the previous red candle. Selling pressure is fading — the decline may be losing steam.',
+  bearish_harami: 'A small red candle fits inside the previous green candle. Buying pressure is fading — the rally may be losing steam.',
+  bullish_kicker: 'A gap up followed by strong buying — one of the most powerful bullish signals. Sentiment shifted dramatically overnight.',
+  bearish_kicker: 'A gap down followed by strong selling — one of the most powerful bearish signals. Sentiment shifted dramatically overnight.',
+  matching_low: 'Two candles close at the same low, forming a double bottom. This price level is acting as strong support.',
+  matching_high: 'Two candles close at the same high, forming a double top. This price level is acting as strong resistance.',
+
+  // Three-candle patterns
+  morning_star: 'Red candle, tiny indecision candle, then strong green candle. Classic three-act reversal: selling, hesitation, buying takeover.',
+  evening_star: 'Green candle, tiny indecision candle, then strong red candle. Classic three-act reversal: buying, hesitation, selling takeover.',
+  three_white_soldiers: 'Three consecutive strong green candles — buyers are firmly in control. Very strong bullish momentum signal.',
+  three_black_crows: 'Three consecutive strong red candles — sellers are firmly in control. Very strong bearish momentum signal.',
+  three_inside_up: 'Harami pattern confirmed by a third green candle breaking higher. The reversal from bearish to bullish is confirmed.',
+  three_inside_down: 'Harami pattern confirmed by a third red candle breaking lower. The reversal from bullish to bearish is confirmed.',
+  bullish_abandoned_baby: 'A gap-down doji followed by a gap-up green candle. Extremely rare and powerful — sellers completely exhausted.',
+  bearish_abandoned_baby: 'A gap-up doji followed by a gap-down red candle. Extremely rare and powerful — buyers completely exhausted.',
+  three_outside_up: 'Engulfing pattern confirmed by a third green candle. Strong bullish reversal — the momentum shift is validated.',
+  three_outside_down: 'Engulfing pattern confirmed by a third red candle. Strong bearish reversal — the momentum shift is validated.',
+  tri_star: 'Three doji candles in a row — extreme indecision building up. A big directional move often follows this tension.',
+  advance_block: 'Three green candles, but each is weaker than the last. Buying is slowing down — the rally may be running out of fuel.',
+  deliberation: 'Two strong green candles followed by a small one. The rally is hesitating — potential top forming.',
+
+  // Continuation patterns
+  rising_three_methods: 'A strong green candle, brief pullback, then another strong green candle. The uptrend paused to catch its breath and is resuming.',
+  falling_three_methods: 'A strong red candle, brief bounce, then another strong red candle. The downtrend paused briefly and is resuming.',
+  mat_hold: 'Bullish continuation where a brief dip stays within the prior candle\'s range. The uptrend is healthy and likely to continue.',
+  upside_tasuki_gap: 'A gap up followed by a slight pullback that doesn\'t fill the gap. Buyers still in charge — trend continues up.',
+  downside_tasuki_gap: 'A gap down followed by a slight bounce that doesn\'t fill the gap. Sellers still in charge — trend continues down.',
+};
+
+function getCandlestickTooltip(patternName: string, patternType: string): string {
+  const tooltip = CANDLESTICK_TOOLTIPS[patternName];
+  if (tooltip) return tooltip;
+
+  // Fallback for unknown patterns
+  if (patternType.includes('bullish')) return 'A bullish pattern suggesting potential upward price movement.';
+  if (patternType.includes('bearish')) return 'A bearish pattern suggesting potential downward price movement.';
+  if (patternType === 'indecision') return 'An indecision pattern — the market is uncertain. Watch for the next candle to confirm direction.';
+  return 'A candlestick pattern that may signal a change in price direction.';
+}
+
 export function SetupTab({
   price,
   priceChange,
@@ -509,6 +574,104 @@ export function SetupTab({
             ))}
           </div>
         </div>
+
+        {/* Candlestick Patterns for selected TF */}
+        {currentIndicators?.extendedPatterns && currentIndicators.extendedPatterns.length > 0 && (
+          <div className="border-t border-primary pt-3 mt-3">
+            <div className="text-xs text-tertiary uppercase mb-2 flex items-center gap-2">
+              {TIMEFRAMES.find(t => t.value === displayTf)?.label} Candlestick Patterns
+              <span className="text-[10px] bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded">
+                {currentIndicators.extendedPatterns.length}
+              </span>
+              <HelpIcon tooltip={
+                <div className="space-y-1">
+                  <div className="font-semibold">Candlestick Patterns</div>
+                  <div>Classic price action patterns detected on the last few candles. Hover each pattern for details.</div>
+                  <div className="space-y-0.5 text-gray-300">
+                    <div><span className="text-white font-medium">Rel (Reliability):</span> How often this pattern correctly predicts the next move historically</div>
+                    <div><span className="text-white font-medium">Str (Strength):</span> How strong the current instance is based on candle proportions and context</div>
+                  </div>
+                  <div className="text-gray-400">Multi-candle patterns (2-3) are more reliable than single-candle patterns.</div>
+                </div>
+              } />
+            </div>
+            <div className="space-y-1.5">
+              {currentIndicators.extendedPatterns
+                .sort((a, b) => (b.reliability * b.strength) - (a.reliability * a.strength))
+                .slice(0, 5)
+                .map((pattern, i) => {
+                  const typeColors: Record<string, { bg: string; text: string; icon: string }> = {
+                    reversal_bullish: { bg: 'bg-green-500/10 border-green-500/30', text: 'text-green-400', icon: '↑' },
+                    reversal_bearish: { bg: 'bg-red-500/10 border-red-500/30', text: 'text-red-400', icon: '↓' },
+                    continuation_bullish: { bg: 'bg-blue-500/10 border-blue-500/30', text: 'text-blue-400', icon: '→' },
+                    continuation_bearish: { bg: 'bg-blue-500/10 border-blue-500/30', text: 'text-blue-400', icon: '→' },
+                    indecision: { bg: 'bg-yellow-500/10 border-yellow-500/30', text: 'text-yellow-400', icon: '◆' },
+                  };
+                  const colors = typeColors[pattern.type] || typeColors.indecision;
+                  const reliabilityBar = Math.round(pattern.reliability * 100);
+                  const strengthBar = Math.round(pattern.strength * 100);
+                  const tooltipText = getCandlestickTooltip(pattern.name, pattern.type);
+
+                  return (
+                    <Tooltip
+                      key={`${pattern.name}-${i}`}
+                      content={<div className="text-xs leading-relaxed">{tooltipText}</div>}
+                      position="top"
+                      maxWidth="320px"
+                      block
+                    >
+                      <div
+                        className={`flex items-center gap-2 p-2 rounded-lg border ${colors.bg} text-xs`}
+                      >
+                        <span className={`text-base ${colors.text}`}>{colors.icon}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className={`font-semibold ${colors.text} capitalize`}>
+                              {pattern.name.replace(/_/g, ' ')}
+                            </span>
+                            <span className="text-tertiary">
+                              {pattern.candlesUsed}-candle
+                            </span>
+                          </div>
+                          <div className="text-tertiary truncate">{pattern.description}</div>
+                        </div>
+                        <div className="flex flex-col items-end gap-0.5 shrink-0">
+                          <div className="flex items-center gap-1">
+                            <span className="text-tertiary">Rel</span>
+                            <div className="w-12 h-1.5 bg-tertiary/30 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${reliabilityBar >= 70 ? 'bg-green-500' : reliabilityBar >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                                style={{ width: `${reliabilityBar}%` }}
+                              />
+                            </div>
+                            <span className="mono w-7 text-right">{reliabilityBar}%</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <span className="text-tertiary">Str</span>
+                            <div className="w-12 h-1.5 bg-tertiary/30 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${strengthBar >= 70 ? 'bg-green-500' : strengthBar >= 50 ? 'bg-yellow-500' : 'bg-orange-500'}`}
+                                style={{ width: `${strengthBar}%` }}
+                              />
+                            </div>
+                            <span className="mono w-7 text-right">{strengthBar}%</span>
+                          </div>
+                        </div>
+                      </div>
+                    </Tooltip>
+                  );
+                })}
+            </div>
+          </div>
+        )}
+        {currentIndicators && (!currentIndicators.extendedPatterns || currentIndicators.extendedPatterns.length === 0) && (
+          <div className="border-t border-primary pt-3 mt-3">
+            <div className="text-xs text-tertiary uppercase mb-2">
+              {TIMEFRAMES.find(t => t.value === displayTf)?.label} Candlestick Patterns
+            </div>
+            <div className="text-xs text-tertiary/60 py-2 text-center">No patterns detected</div>
+          </div>
+        )}
       </div>
 
       {/* Candlestick Chart */}

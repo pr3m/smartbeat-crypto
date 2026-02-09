@@ -31,6 +31,7 @@ import { updatePositionState, calculateEntrySize } from '@/lib/trading/position-
 import { calculateKrakenLiquidationPrice } from '@/lib/trading/position-health';
 import { analyzeDCAOpportunity } from '@/lib/trading/dca-signals';
 import { analyzeExitConditions, getExitStatusSummary } from '@/lib/trading/exit-signals';
+import { detectReversal, type ReversalSignal } from '@/lib/trading/reversal-detector';
 
 // ============================================================================
 // BRIDGE: Kraken positions -> PositionState
@@ -440,6 +441,18 @@ export function useV2Engine(
       );
     }
 
+    // Reversal detection for exit signal enhancement
+    const ohlc15m = tfData[15]?.ohlc ?? [];
+    let positionReversalSignal: ReversalSignal | null = null;
+    if (positionState.isOpen && ind5m && ind15m && ohlc5m.length >= 5 && ohlc15m.length >= 5) {
+      positionReversalSignal = detectReversal({
+        ohlcByTimeframe: { '5': ohlc5m, '15': ohlc15m },
+        indicatorsByTimeframe: { '5': ind5m, '15': ind15m },
+        currentDirection: positionState.direction,
+        timeframePriority: ['5', '15'],
+      });
+    }
+
     // Exit signal (only when position is open)
     let exitSignal = null;
     if (positionState.isOpen && ind15m && ind1h && ind5m) {
@@ -450,7 +463,8 @@ export function useV2Engine(
         ind5m,
         price,
         Date.now(),
-        strategy
+        strategy,
+        positionReversalSignal
       );
     }
 

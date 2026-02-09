@@ -173,6 +173,24 @@ function formatMarketContext(snapshot: MarketSnapshot | null): string {
     };
   }
 
+  // Add reversal status if detected (critical for hold/exit decisions)
+  if (snapshot.reversalStatus?.detected) {
+    context.reversalStatus = {
+      phase: snapshot.reversalStatus.phase,
+      direction: snapshot.reversalStatus.direction,
+      confidence: snapshot.reversalStatus.confidence + '%',
+      exhaustionScore: snapshot.reversalStatus.exhaustionScore,
+      urgency: snapshot.reversalStatus.urgency,
+      description: snapshot.reversalStatus.description,
+      patterns: snapshot.reversalStatus.patterns,
+    };
+  }
+
+  // Add candlestick patterns per timeframe
+  if (snapshot.candlestickPatterns) {
+    context.candlestickPatterns = snapshot.candlestickPatterns;
+  }
+
   return JSON.stringify(context, null, 2);
 }
 

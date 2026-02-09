@@ -644,6 +644,30 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
         flipSuggestion: recommendation.knifeStatus.flipSuggestion,
         waitFor: recommendation.knifeStatus.waitFor,
       } : undefined,
+      reversalStatus: recommendation?.reversalStatus?.detected ? {
+        detected: true,
+        phase: recommendation.reversalStatus.phase,
+        direction: recommendation.reversalStatus.direction,
+        confidence: recommendation.reversalStatus.confidence,
+        exhaustionScore: recommendation.reversalStatus.exhaustionScore,
+        urgency: recommendation.reversalStatus.urgency,
+        description: recommendation.reversalStatus.description,
+        patterns: recommendation.reversalStatus.patterns,
+      } : undefined,
+      candlestickPatterns: (() => {
+        const result: Record<string, Array<{ name: string; type: string; reliability: number; strength: number; candlesUsed: number }>> = {};
+        const tfMap: Record<string, number> = { '5m': 5, '15m': 15, '1h': 60, '4h': 240 };
+        for (const [label, minutes] of Object.entries(tfMap)) {
+          const patterns = tfData[minutes]?.indicators?.extendedPatterns;
+          if (patterns && patterns.length > 0) {
+            result[label] = [...patterns]
+              .sort((a, b) => (b.reliability * b.strength) - (a.reliability * a.strength))
+              .slice(0, 3)
+              .map(p => ({ name: p.name, type: p.type, reliability: p.reliability, strength: p.strength, candlesUsed: p.candlesUsed }));
+          }
+        }
+        return Object.keys(result).length > 0 ? result : undefined;
+      })(),
     };
   }, [price, openPrice, high24h, low24h, volume24h, btcTrend, btcChange, tfData, recommendation, microData, liqData, testMode, simulatedPositions, openPositions, fearGreed]);
 
@@ -1064,50 +1088,65 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
               {recommendation && recommendation.checklist ? (
                 Object.entries(recommendation.checklist).map(([key, item]) => {
                   const tooltips: Record<string, { title: string; desc: string }> = {
+                    trend1d: {
+                      title: 'Daily Trend Filter',
+                      desc: 'The daily timeframe provides macro context. Counter-trend entries on the daily are higher risk. Weight: 10.',
+                    },
                     trend4h: {
                       title: '4H Trend Direction',
-                      desc: 'The 4-hour timeframe sets the overall trend. For LONG: need bullish bias. For SHORT: need bearish bias. This is the most important filter (40% weight).',
+                      desc: 'The 4-hour timeframe sets the overall trend. For LONG: need bullish bias. For SHORT: need bearish bias. Weight: 18.',
                     },
                     setup1h: {
                       title: '1H Setup Confirmation',
-                      desc: 'The 1-hour timeframe confirms the setup. Should align with 4H trend direction. Provides 30% weight to the signal.',
+                      desc: 'The 1-hour timeframe confirms the setup. Should align with 4H trend direction. Weight: 38.',
                     },
                     entry15m: {
                       title: '15m Entry Timing',
-                      desc: 'The 15-minute RSI times your entry. For LONG: RSI should be oversold (<35). For SHORT: RSI should be overbought (>65). This catches the reversal point.',
+                      desc: 'Multi-signal entry timing (RSI + BB + MACD + EMA20 confluence). Catches the entry point. Weight: 18.',
                     },
                     volume: {
                       title: 'Volume Confirmation',
-                      desc: 'Current volume should be >1.3x the 20-period average. High volume confirms institutional interest and increases probability of follow-through.',
+                      desc: 'Context-aware volume: pullbacks need low vol (0.5-1.3x), breakouts need high vol (>1.3x). Weight: 6.',
                     },
                     btcAlign: {
                       title: 'BTC Correlation',
-                      desc: 'Bitcoin trend should not oppose your trade. For LONG: BTC should not be bearish. For SHORT: BTC should not be bullish. XRP often follows BTC direction.',
+                      desc: 'Bitcoin trend should not oppose your trade. XRP often follows BTC direction. Weight: 8.',
+                    },
+                    macdMomentum: {
+                      title: 'MACD Momentum',
+                      desc: 'MACD histogram confirms momentum direction. Dead zone (near zero) = neutral. Weight: 6.',
                     },
                     rsiExtreme: {
                       title: 'RSI Extreme Level',
                       desc: 'RSI should be at an extreme level for high-probability reversals. LONG needs RSI <35 (oversold). SHORT needs RSI >65 (overbought).',
                     },
                     flowConfirm: {
-                      title: 'Flow Confirmation (Option B)',
-                      desc: 'Real-time order flow should support your trade direction. For LONG: need bid imbalance >20% OR rising CVD. For SHORT: need ask imbalance >20% OR falling CVD. Expand Market Microstructure section to enable.',
+                      title: 'Flow Confirmation',
+                      desc: 'Real-time order flow should support your trade direction. Expand Market Microstructure section to enable. Weight: 4.',
                     },
                     liqBias: {
                       title: 'Liquidation Bias',
-                      desc: 'Liquidation structure should align with your trade direction. For LONG: need short squeeze potential (shorts stacked above). For SHORT: need long squeeze potential (longs stacked below). Expand Liquidation Analysis section to enable.',
+                      desc: 'Liquidation structure should align with trade direction. Expand Liquidation Analysis to enable. Weight: 6.',
+                    },
+                    reversalSignal: {
+                      title: 'Reversal Detection',
+                      desc: 'Multi-timeframe candlestick pattern confluence detecting direction reversals. Phases: exhaustion → indecision → initiation → confirmation. Boosts reversal direction, penalizes exhausted direction. Weight: 12.',
                     },
                   };
                   const tip = tooltips[key] || { title: key, desc: '' };
 
                   const labels: Record<string, string> = {
+                    trend1d: '1D trend',
                     trend4h: '4H trend',
                     setup1h: '1H setup',
                     entry15m: '15m entry',
-                    volume: 'Volume >1.3x',
+                    volume: 'Volume',
                     btcAlign: 'BTC aligned',
+                    macdMomentum: 'MACD momentum',
                     rsiExtreme: 'RSI extreme',
                     flowConfirm: 'Flow confirm',
                     liqBias: 'Liq bias',
+                    reversalSignal: 'Reversal',
                   };
 
                   return (
@@ -1122,7 +1161,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
                       position="left"
                       block
                     >
-                      <div className={`flex items-center gap-2 py-1.5 border-b border-primary/50 text-sm ${key === 'flowConfirm' ? 'bg-blue-500/5' : key === 'liqBias' ? 'bg-purple-500/5' : ''}`}>
+                      <div className={`flex items-center gap-2 py-1.5 border-b border-primary/50 text-sm ${key === 'reversalSignal' ? 'bg-orange-500/5' : key === 'flowConfirm' ? 'bg-blue-500/5' : key === 'liqBias' ? 'bg-purple-500/5' : ''}`}>
                         <div
                           className={`w-5 h-5 rounded-full flex items-center justify-center text-xs flex-shrink-0 ${
                             item.pass ? 'bg-green-500 text-black' : 'bg-red-500/80 text-white'
@@ -1154,6 +1193,66 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
                 SHORT: <strong className={recommendation && recommendation.shortScore >= 5 ? 'text-red-500' : recommendation && recommendation.shortScore >= 3 ? 'text-yellow-500' : ''}>{recommendation?.shortScore || 0}</strong>/{recommendation?.totalItems || 6}
               </span>
             </div>
+
+            {/* Reversal Status */}
+            {recommendation?.reversalStatus?.detected && (
+              <Tooltip
+                content={
+                  <div className="text-xs leading-relaxed space-y-1.5">
+                    <div className="font-semibold">Reversal Detection</div>
+                    <div>Detects when the current price direction is running out of steam using candlestick patterns across 5m and 15m timeframes.</div>
+                    <div className="space-y-0.5 text-gray-300">
+                      <div><span className="text-white font-medium">Phase:</span> {
+                        recommendation.reversalStatus.phase === 'exhaustion' ? 'Momentum fading — earliest signal, lowest certainty'
+                        : recommendation.reversalStatus.phase === 'indecision' ? 'Doji/spinning tops appearing — market can\'t decide'
+                        : recommendation.reversalStatus.phase === 'initiation' ? 'First reversal pattern appeared — direction changing'
+                        : 'Multi-timeframe patterns confirmed — high confidence reversal'
+                      }</div>
+                      <div><span className="text-white font-medium">Confidence {recommendation.reversalStatus.confidence}%:</span> Based on pattern count, multi-TF confluence, RSI divergence, and volume spikes</div>
+                      <div><span className="text-white font-medium">Exhaustion {recommendation.reversalStatus.exhaustionScore}%:</span> How spent the current direction is (shrinking bodies, declining volume)</div>
+                      <div><span className="text-white font-medium">Urgency:</span> {
+                        recommendation.reversalStatus.urgency === 'immediate' ? 'Act now — confirmed reversal with high confidence'
+                        : recommendation.reversalStatus.urgency === 'developing' ? 'Developing — reversal forming, prepare to act'
+                        : 'Early warning — first signs, monitor closely'
+                      }</div>
+                    </div>
+                  </div>
+                }
+                position="bottom"
+                maxWidth="380px"
+                block
+              >
+                <div className={`mt-3 p-3 rounded-lg border text-xs ${
+                  recommendation.reversalStatus.direction === 'bullish'
+                    ? 'bg-green-500/10 border-green-500/30'
+                    : 'bg-red-500/10 border-red-500/30'
+                }`}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className={`font-semibold ${
+                      recommendation.reversalStatus.direction === 'bullish' ? 'text-green-400' : 'text-red-400'
+                    }`}>
+                      ↺ {recommendation.reversalStatus.direction === 'bullish' ? 'Bullish' : 'Bearish'} Reversal — {recommendation.reversalStatus.phase}
+                    </span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      recommendation.reversalStatus.confidence >= 70 ? 'bg-green-500/30 text-green-300'
+                      : recommendation.reversalStatus.confidence >= 50 ? 'bg-yellow-500/30 text-yellow-300'
+                      : 'bg-tertiary/30 text-tertiary'
+                    }`}>
+                      {recommendation.reversalStatus.confidence}%
+                    </span>
+                  </div>
+                  <div className="flex gap-3 text-tertiary">
+                    <span>Exhaustion: {recommendation.reversalStatus.exhaustionScore}%</span>
+                    <span>Urgency: {recommendation.reversalStatus.urgency.replace('_', ' ')}</span>
+                  </div>
+                  {recommendation.reversalStatus.patterns.length > 0 && (
+                    <div className="mt-1 text-secondary">
+                      Patterns: {recommendation.reversalStatus.patterns.join(', ')}
+                    </div>
+                  )}
+                </div>
+              </Tooltip>
+            )}
           </div>
 
           {/* Liquidation Bias Summary */}

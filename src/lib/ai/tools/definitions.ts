@@ -76,7 +76,7 @@ export const assistantTools: ChatCompletionTool[] = [
     function: {
       name: 'get_market_data',
       description:
-        'Get current market data for a trading pair including price, 24h stats, and optionally OHLC candles with technical indicators.',
+        'Get current market data for a trading pair including price, 24h stats, and optionally OHLC candles with technical indicators and candlestick pattern detection.',
       parameters: {
         type: 'object',
         properties: {
@@ -102,7 +102,7 @@ export const assistantTools: ChatCompletionTool[] = [
     function: {
       name: 'get_trading_recommendation',
       description:
-        'Get the full multi-timeframe trading recommendation for XRP/EUR. Analyzes 4H, 1H, 15m, and 5m timeframes using the same algorithm as the Trading dashboard. Returns action (LONG/SHORT/WAIT), confidence, checklist with all conditions, and reasoning.',
+        'Get the full multi-timeframe trading recommendation for XRP/EUR. Analyzes 4H, 1H, 15m, and 5m timeframes using the same algorithm as the Trading dashboard. Returns action (LONG/SHORT/WAIT), confidence, checklist with all conditions, reasoning, reversal detection status, and candlestick patterns.',
       parameters: {
         type: 'object',
         properties: {
@@ -369,7 +369,7 @@ export const assistantTools: ChatCompletionTool[] = [
     function: {
       name: 'get_v2_engine_state',
       description:
-        'Get the v2 trading engine state for the current position. Returns DCA signal (momentum exhaustion analysis with 5 signals), exit signal (pressure breakdown from 7 sources), timebox status (hours elapsed/remaining, current step, pressure), anti-greed status (HWM, drawdown), and position sizing recommendation. Use this when the user asks about DCA, exit, or position management.',
+        'Get the v2 trading engine state for the current position. Returns DCA signal (momentum exhaustion analysis with 5 signals), exit signal (pressure breakdown from 8 sources including reversal detection), reversal signal (candlestick pattern-based reversal phase, confidence, patterns), timebox status (hours elapsed/remaining, current step, pressure), anti-greed status (HWM, drawdown), and position sizing recommendation. Use this when the user asks about DCA, exit, or position management.',
       parameters: {
         type: 'object',
         properties: {

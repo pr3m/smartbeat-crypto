@@ -312,6 +312,7 @@ export type ExitReason =
   | 'anti_greed'                // Gave back too much from HWM
   | 'condition_deterioration'   // Entry conditions no longer valid
   | 'knife_detected'            // Knife detection triggered against position
+  | 'reversal_detected'         // Candlestick reversal pattern detected against position
   | 'manual_override';          // User/AI forced exit
 
 /** How urgent is the exit */
@@ -467,6 +468,7 @@ export interface DirectionWeightMap {
   flow: number;
   liq: number;
   candlestick: number;
+  reversal: number;
 }
 
 /** Liquidation zone-aware strategy config */

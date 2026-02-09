@@ -13,6 +13,7 @@ import { buildStrategyContextForTools } from '@/lib/ai/strategy-prompt-builder';
 import { calculateEntrySize, calculateLiquidationPrice } from '@/lib/trading/position-sizing';
 import { analyzeDCAOpportunity } from '@/lib/trading/dca-signals';
 import { analyzeExitConditions, getExitStatusSummary, calculateTimeboxPressure, getTimePhase } from '@/lib/trading/exit-signals';
+import { detectReversal5m15m } from '@/lib/trading/reversal-detector';
 import type { PositionState, TradeDirection } from '@/lib/trading/v2-types';
 import { EMPTY_POSITION_STATE } from '@/lib/trading/v2-types';
 
@@ -383,6 +384,13 @@ async function getMarketData(args: Record<string, unknown>): Promise<ToolResult>
             bias: indicators.bias,
             score: indicators.score,
           };
+          // Include top candlestick patterns if detected
+          if (indicators.extendedPatterns && indicators.extendedPatterns.length > 0) {
+            data.candlestickPatterns = [...indicators.extendedPatterns]
+              .sort((a, b) => (b.reliability * b.strength) - (a.reliability * a.strength))
+              .slice(0, 3)
+              .map(p => ({ name: p.name, type: p.type, reliability: p.reliability, strength: p.strength, candlesUsed: p.candlesUsed }));
+          }
         }
       } else {
         data.indicators = { error: 'Insufficient OHLC data for indicators' };
@@ -490,6 +498,20 @@ async function getTradingRecommendation(args: Record<string, unknown>): Promise<
           trend: btcTrend,
           change24h: btcChange.toFixed(2) + '%',
         } : undefined,
+        reversalStatus: recommendation.reversalStatus || undefined,
+        candlestickPatterns: (() => {
+          const patterns: Record<string, Array<{ name: string; type: string; reliability: number; strength: number }>> = {};
+          const tfIndicators: Record<string, typeof ind5m> = { '5m': ind5m, '15m': ind15m };
+          for (const [label, ind] of Object.entries(tfIndicators)) {
+            if (ind?.extendedPatterns && ind.extendedPatterns.length > 0) {
+              patterns[label] = [...ind.extendedPatterns]
+                .sort((a, b) => (b.reliability * b.strength) - (a.reliability * a.strength))
+                .slice(0, 3)
+                .map(p => ({ name: p.name, type: p.type, reliability: p.reliability, strength: p.strength }));
+            }
+          }
+          return Object.keys(patterns).length > 0 ? patterns : undefined;
+        })(),
         timeframeIndicators: {
           '4h': {
             rsi: ind4h.rsi.toFixed(1),
@@ -1828,7 +1850,14 @@ async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResu
         };
       }
 
-      // Exit signal analysis
+      // Reversal detection for exit analysis
+      let reversalSignal = null;
+      if (ind5m && ind15m) {
+        const posDir = positionState.direction === 'long' ? 'long' as const : positionState.direction === 'short' ? 'short' as const : null;
+        reversalSignal = detectReversal5m15m(ohlc5m, ohlc15m, ind5m, ind15m, posDir);
+      }
+
+      // Exit signal analysis (now includes reversal signal as 8th source)
       if (ind15m && ind1h && ind5m) {
         const exitSignal = analyzeExitConditions(
           positionState,
@@ -1837,7 +1866,8 @@ async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResu
           ind5m,
           currentPrice,
           Date.now(),
-          strategy
+          strategy,
+          reversalSignal
         );
 
         const exitSummary = getExitStatusSummary(exitSignal);
@@ -1854,6 +1884,23 @@ async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResu
             detail: p.detail,
           })),
           statusSummary: exitSummary,
+        };
+      }
+
+      // Reversal signal status (for AI reasoning about position management)
+      if (reversalSignal && reversalSignal.detected) {
+        result.reversalSignal = {
+          detected: true,
+          phase: reversalSignal.phase,
+          direction: reversalSignal.direction,
+          confidence: reversalSignal.confidence + '%',
+          exhaustionScore: reversalSignal.exhaustionScore,
+          urgency: reversalSignal.urgency,
+          description: reversalSignal.description,
+          patterns: reversalSignal.patterns
+            .filter(p => p.type.startsWith('reversal_'))
+            .slice(0, 3)
+            .map(p => p.name.replace(/_/g, ' ')),
         };
       }
 

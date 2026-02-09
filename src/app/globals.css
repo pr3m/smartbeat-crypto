@@ -138,6 +138,7 @@ body {
   background-color: var(--background-secondary);
   border: 1px solid var(--border);
   border-radius: 8px;
+  isolation: isolate;
 }
 
 /* Button variants */

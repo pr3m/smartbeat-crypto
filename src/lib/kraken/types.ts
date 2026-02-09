@@ -358,8 +358,10 @@ export interface Indicators {
   // Proper trend determination
   trend: 'bullish' | 'bearish' | 'neutral'; // Based on price structure vs EMAs
   trendScore: number; // -100 to +100 trend strength
-  /** Detected candlestick patterns on recent candles */
+  /** Detected candlestick patterns on recent candles (basic) */
   candlestickPatterns?: CandlestickPattern[];
+  /** Extended patterns with reliability, type, and candle count from new pattern library */
+  extendedPatterns?: import('@/lib/trading/candlestick-patterns').ExtendedCandlestickPattern[];
 }
 
 export interface TimeframeData {
@@ -458,6 +460,7 @@ export interface TradingRecommendation {
     macdMomentum: ChecklistItem; // MACD histogram momentum (replaces rsiExtreme)
     flowConfirm?: ChecklistItem; // Option B: Flow confirmation
     liqBias?: ChecklistItem; // Liquidation bias alignment
+    reversalSignal?: ChecklistItem; // Reversal pattern confluence
   };
   // Option A: Flow analysis
   flowStatus?: {
@@ -499,6 +502,17 @@ export interface TradingRecommendation {
   };
   // Knife detection status
   knifeStatus?: KnifeStatus;
+  // Reversal detection status
+  reversalStatus?: {
+    detected: boolean;
+    phase: 'exhaustion' | 'indecision' | 'initiation' | 'confirmation';
+    direction: 'bullish' | 'bearish';
+    confidence: number;
+    exhaustionScore: number;
+    urgency: 'immediate' | 'developing' | 'early_warning';
+    description: string;
+    patterns: string[]; // Pattern names for display
+  };
 }
 
 // Microstructure data for recommendation engine

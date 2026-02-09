@@ -10,8 +10,8 @@
   "timeframeWeights": {
     "1d": 10,
     "4h": 18,
-    "1h": 40,
-    "15m": 24,
+    "1h": 24,
+    "15m": 40,
     "5m": 8
   },
 
@@ -23,14 +23,15 @@
     "directionWeights": {
       "1dTrend": 10,
       "4hTrend": 18,
-      "1hSetup": 40,
-      "15mEntry": 20,
+      "1hSetup": 18,
+      "15mEntry": 38,
       "volume": 6,
       "btcAlign": 8,
       "macdMom": 6,
       "flow": 4,
       "liq": 6,
-      "candlestick": 8
+      "candlestick": 4,
+      "reversal": 12
     },
 
     "gradeThresholds": {

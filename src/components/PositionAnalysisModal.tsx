@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { useToast } from './Toast';
 import { InlineChat } from './chat';
 import type { PositionEvaluation, PositionHealthMetrics, MarketSnapshot } from '@/lib/ai/types';
@@ -154,8 +155,8 @@ AI Evaluation Result:
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+  const modal = (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/70 backdrop-blur-sm"
@@ -370,4 +371,10 @@ AI Evaluation Result:
       </div>
     </div>
   );
+
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  return createPortal(modal, document.body);
 }
