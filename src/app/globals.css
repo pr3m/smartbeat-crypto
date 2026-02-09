@@ -697,3 +697,250 @@ input[type="range"].slider-thumb::-moz-range-thumb {
   font-weight: 600;
   color: var(--foreground);
 }
+
+/* ============================================
+   Arena Trading Competition Styles
+   ============================================ */
+
+/* Agent identity colors */
+:root {
+  --agent-1: #ff6b6b;
+  --agent-2: #4ecdc4;
+  --agent-3: #45b7d1;
+  --agent-4: #96ceb4;
+  --agent-5: #ffeaa7;
+  --agent-6: #dfe6e9;
+  --agent-7: #fd79a8;
+  --agent-8: #a29bfe;
+}
+
+/* Health bar gradient colors */
+:root {
+  --health-safe: var(--green);
+  --health-caution: var(--yellow);
+  --health-danger: var(--orange);
+  --health-critical: var(--red);
+  --health-death-row: #8b0000;
+  --health-dead: var(--foreground-tertiary);
+}
+
+/* Arena animations */
+@keyframes rank-up {
+  0% {
+    transform: translateY(0);
+    box-shadow: 0 0 0 rgba(63, 185, 80, 0);
+  }
+  40% {
+    transform: translateY(-4px);
+    box-shadow: 0 0 12px rgba(63, 185, 80, 0.4);
+  }
+  100% {
+    transform: translateY(0);
+    box-shadow: 0 0 0 rgba(63, 185, 80, 0);
+  }
+}
+
+@keyframes rank-down {
+  0% {
+    transform: translateY(0);
+    box-shadow: 0 0 0 rgba(248, 81, 73, 0);
+  }
+  40% {
+    transform: translateY(4px);
+    box-shadow: 0 0 12px rgba(248, 81, 73, 0.4);
+  }
+  100% {
+    transform: translateY(0);
+    box-shadow: 0 0 0 rgba(248, 81, 73, 0);
+  }
+}
+
+@keyframes agent-death {
+  0% {
+    filter: grayscale(0);
+    opacity: 1;
+    transform: translateX(0);
+  }
+  10% {
+    transform: translateX(-3px);
+  }
+  20% {
+    transform: translateX(3px);
+  }
+  30% {
+    transform: translateX(-2px);
+  }
+  40% {
+    transform: translateX(2px);
+  }
+  50% {
+    transform: translateX(0);
+  }
+  100% {
+    filter: grayscale(1);
+    opacity: 0.5;
+    transform: translateX(0);
+  }
+}
+
+@keyframes trade-flash {
+  0% {
+    background-color: transparent;
+  }
+  20% {
+    background-color: rgba(88, 166, 255, 0.15);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@keyframes results-reveal {
+  0% {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  60% {
+    transform: scale(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes pulse-health {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 8px 2px rgba(88, 166, 255, 0.3);
+  }
+}
+
+@keyframes badge-earn {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.25);
+  }
+  70% {
+    transform: scale(0.95);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Arena animation utility classes */
+.animate-rank-up {
+  animation: rank-up 0.6s ease-out;
+}
+
+.animate-rank-down {
+  animation: rank-down 0.6s ease-out;
+}
+
+.animate-agent-death {
+  animation: agent-death 0.8s ease-out forwards;
+}
+
+.animate-trade-flash {
+  animation: trade-flash 0.5s ease-out;
+}
+
+.animate-results-reveal {
+  animation: results-reveal 0.5s ease-out;
+}
+
+.animate-pulse-health {
+  animation: pulse-health 1s ease-in-out infinite;
+}
+
+.animate-badge-earn {
+  animation: badge-earn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Arena utility classes */
+.arena-card {
+  background-color: var(--background-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  transition: border-color 0.2s ease;
+}
+
+.arena-card:hover {
+  border-color: var(--foreground-tertiary);
+}
+
+.arena-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  transition: background-color 0.15s ease;
+}
+
+.arena-agent-row:hover {
+  background-color: var(--background-tertiary);
+}
+
+.arena-health-bar {
+  height: 6px;
+  border-radius: 3px;
+  background-color: var(--background-tertiary);
+  overflow: hidden;
+  position: relative;
+}
+
+.arena-health-bar > div {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease, background-color 0.4s ease;
+}
+
+.arena-event-item {
+  padding: 6px 10px;
+  border-left: 3px solid transparent;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  transition: background-color 0.15s ease;
+}
+
+.arena-event-item:hover {
+  background-color: var(--background-tertiary);
+}
+
+.arena-event-item[data-importance="high"] {
+  border-left-color: var(--yellow);
+}
+
+.arena-event-item[data-importance="critical"] {
+  border-left-color: var(--red);
+}
+
+.arena-avatar {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.75rem;
+  border: 2px solid;
+  transition: filter 0.3s ease, opacity 0.3s ease;
+}
+
+.arena-avatar.dead {
+  filter: grayscale(1);
+  opacity: 0.5;
+}
+
+.arena-avatar.trading {
+  animation: pulse-health 1s ease-in-out infinite;
+}

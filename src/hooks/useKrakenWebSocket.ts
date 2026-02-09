@@ -141,10 +141,43 @@ export function useKrakenWebSocket(
               };
 
               const normalizedPair = pair.replace('/', '');
-              setTickers((prev) => ({
-                ...prev,
-                [normalizedPair]: tickerUpdate,
-              }));
+
+              // Throttle ticker updates using the same mechanism as trade updates
+              pendingTickerUpdatesRef.current[normalizedPair] = tickerUpdate;
+
+              const now = Date.now();
+              const timeSinceLastUpdate = now - lastTickerUpdateRef.current;
+
+              if (timeSinceLastUpdate >= TICKER_THROTTLE_MS) {
+                lastTickerUpdateRef.current = now;
+                const updates = { ...pendingTickerUpdatesRef.current };
+                pendingTickerUpdatesRef.current = {};
+
+                setTickers((prev) => {
+                  const next = { ...prev };
+                  for (const [pairKey, update] of Object.entries(updates)) {
+                    next[pairKey] = update as TickerData;
+                  }
+                  return next;
+                });
+              } else if (!tickerThrottleTimeoutRef.current) {
+                tickerThrottleTimeoutRef.current = setTimeout(() => {
+                  tickerThrottleTimeoutRef.current = null;
+                  lastTickerUpdateRef.current = Date.now();
+                  const updates = { ...pendingTickerUpdatesRef.current };
+                  pendingTickerUpdatesRef.current = {};
+
+                  if (Object.keys(updates).length > 0) {
+                    setTickers((prev) => {
+                      const next = { ...prev };
+                      for (const [pairKey, update] of Object.entries(updates)) {
+                        next[pairKey] = update as TickerData;
+                      }
+                      return next;
+                    });
+                  }
+                }, TICKER_THROTTLE_MS - timeSinceLastUpdate);
+              }
             }
 
             // Handle OHLC updates - format: [channelID, [time, etime, open, high, low, close, vwap, volume, count], channelName, pair]

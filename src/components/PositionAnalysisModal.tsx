@@ -202,8 +202,15 @@ AI Evaluation Result:
             </div>
             <div className="bg-tertiary/30 rounded-lg p-3">
               <div className="text-xs text-tertiary">Liquidation</div>
-              <div className={`font-semibold mono ${positionData.liquidationPrice <= 0 ? 'text-green-400' : 'text-orange-400'}`}>
-                {positionData.liquidationPrice <= 0 ? 'Very Safe' : `€${positionData.liquidationPrice.toFixed(4)}`}
+              <div className={`font-semibold mono ${
+                positionData.liquidationPrice <= 0 ? 'text-green-400'
+                : health.liquidationStatus === 'danger' ? 'text-red-400'
+                : health.liquidationStatus === 'warning' ? 'text-orange-400'
+                : 'text-green-400'
+              }`}>
+                {positionData.liquidationPrice <= 0
+                  ? 'Very Safe'
+                  : `€${positionData.liquidationPrice.toFixed(4)} (${health.liquidationDistance.toFixed(0)}% away)`}
               </div>
             </div>
           </div>

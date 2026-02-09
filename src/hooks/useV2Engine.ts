@@ -170,6 +170,7 @@ function bridgeToPositionState(
     const priceDiff = direction === 'long'
       ? currentPrice - avgPrice
       : avgPrice - currentPrice;
+    // Gross P&L (fees subtracted later by updatePositionState)
     unrealizedPnL = priceDiff * volume;
     const notional = avgPrice * volume;
     unrealizedPnLPercent = notional > 0 ? (unrealizedPnL / notional) * 100 : 0;
@@ -369,14 +370,14 @@ export function useV2Engine(
     ? parseFloat(tradeBalance.mf || '0')
     : 0;
 
-  const config: TradingEngineConfig = {
+  const config: TradingEngineConfig = useMemo(() => ({
     positionSizing: strategy.positionSizing,
     antiGreed: strategy.antiGreed,
     timebox: strategy.timebox,
     timeframeWeights: strategy.timeframeWeights,
     dca: strategy.dca,
     exit: strategy.exit,
-  };
+  }), [strategy]);
 
   // Build the full v2 engine output
   const result = useMemo<V2EngineResult>(() => {

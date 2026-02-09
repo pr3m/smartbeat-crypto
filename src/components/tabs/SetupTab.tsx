@@ -119,7 +119,7 @@ export function SetupTab({
   return (
     <div className="space-y-4">
       {/* Open Orders */}
-      <OpenOrders testMode={testMode} onEditOrder={onEditOrder} />
+      <OpenOrders testMode={testMode} onEditOrder={onEditOrder} defaultCollapsed />
 
       {/* Open Positions - Show real or simulated based on mode */}
       {testMode ? (
@@ -128,7 +128,7 @@ export function SetupTab({
           onPositionChange={handleOrderExecuted}
         />
       ) : (
-        <OpenPositions currentPrice={price} />
+        <OpenPositions currentPrice={price} defaultCollapsed />
       )}
 
       {/* Recommendation Box */}

@@ -2,17 +2,24 @@
  * Position Health Calculator
  * Calculates health metrics for open positions
  *
- * Kraken Liquidation Formulas (from Kraken docs):
+ * Kraken Liquidation Formulas (from Kraken support docs):
  * - Margin Level = (Equity / Used Margin) × 100
  * - Liquidation occurs at ~40% margin level
  *
- * Long: Liquidation Price = Entry Price - ((Equity - (Used Margin × 0.4)) / Volume)
+ * Long:  Liquidation Price = Entry Price - ((Trade Balance - (Used Margin × 0.4)) / Volume)
  * Short: Liquidation Price = Leverage × (Trade Balance + (Entry × Volume)) / (Volume × (0.4 + Leverage))
+ *
+ * IMPORTANT: Both formulas use Trade Balance (tb), NOT Equity (e).
+ * Trade Balance = account value excluding unrealized P&L.
+ * Equity = Trade Balance + unrealized P&L (changes with price, not suitable for static liq calc).
+ *
+ * These are CROSS-MARGIN formulas: the entire account balance supports all positions.
+ * A large account balance relative to position size → liquidation price far from entry.
  */
 
 /**
- * Calculate the correct liquidation price based on Kraken's formula
- * This accounts for total account equity, not just a simple percentage
+ * Calculate the correct liquidation price based on Kraken's formula.
+ * Uses cross-margin model: entire account trade balance supports the position.
  */
 export function calculateKrakenLiquidationPrice(params: {
   side: 'long' | 'short';
@@ -20,14 +27,14 @@ export function calculateKrakenLiquidationPrice(params: {
   volume: number;
   marginUsed: number;
   leverage: number;
-  equity: number; // Total account equity (tradeBalance.e)
-  tradeBalance: number; // Trade balance (tradeBalance.tb)
+  equity: number; // Total account equity (tradeBalance.e) — used by health metrics, not liq calc
+  tradeBalance: number; // Trade balance (tradeBalance.tb) — used for liquidation calculation
 }): number {
-  const { side, entryPrice, volume, marginUsed, leverage, equity, tradeBalance } = params;
+  const { side, entryPrice, volume, marginUsed, leverage, tradeBalance } = params;
 
   if (side === 'long') {
-    // Liquidation Price = Entry Price - ((Equity - (Used Margin × 0.4)) / Volume)
-    const liqPrice = entryPrice - ((equity - (marginUsed * 0.4)) / volume);
+    // Long: Liquidation Price = Entry Price - ((Trade Balance - (Used Margin × 0.4)) / Volume)
+    const liqPrice = entryPrice - ((tradeBalance - (marginUsed * 0.4)) / volume);
     // Liquidation price can't be negative
     return Math.max(0, liqPrice);
   } else {

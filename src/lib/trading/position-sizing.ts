@@ -461,7 +461,7 @@ export function updatePositionState(
 ): PositionState {
   if (!position.isOpen) return position;
 
-  // Update P&L
+  // Update P&L (gross price movement)
   const pnl = calculateUnrealizedPnL(
     currentPrice,
     position.avgPrice,
@@ -470,6 +470,14 @@ export function updatePositionState(
     position.leverage,
     position.totalMarginUsed
   );
+
+  // Subtract fees+rollover so P&L matches what the trader actually nets
+  const totalCosts = position.totalFees;
+  pnl.pnl -= totalCosts;
+  pnl.pnlLevered -= totalCosts;
+  const notionalValue = position.avgPrice * position.totalVolume;
+  pnl.pnlPercent = notionalValue > 0 ? (pnl.pnl / notionalValue) * 100 : 0;
+  pnl.pnlLeveredPercent = position.totalMarginUsed > 0 ? (pnl.pnlLevered / position.totalMarginUsed) * 100 : 0;
 
   // Update high water mark
   const highWaterMarkPnL = Math.max(position.highWaterMarkPnL, pnl.pnlLevered);

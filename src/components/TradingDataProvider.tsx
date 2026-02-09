@@ -126,7 +126,7 @@ interface TradingDataContextValue {
   tfData: Record<number, TimeframeData>;
   loading: boolean;
   error: string | null;
-  nextRefresh: number;
+  getNextRefresh: () => number;
   refreshOhlc: (force?: boolean) => void;
   tradeBalance: TradeBalance | null;
   tradeBalanceLoading: boolean;
@@ -177,7 +177,8 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
   const [btcTrend, setBtcTrend] = useState<'bull' | 'bear' | 'neut'>('neut');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [nextRefresh, setNextRefresh] = useState(TRADING_REFRESH_INTERVAL_SEC);
+  // nextRefresh is tracked via nextRefreshRef (set up near the countdown timer effect)
+  // to avoid putting a per-second-changing value into context.
   const [tfData, setTfData] = useState<Record<number, TimeframeData>>({
     5: { ohlc: [], indicators: null },
     15: { ohlc: [], indicators: null },
@@ -204,7 +205,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
 
   const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
   const [openOrdersLoading, setOpenOrdersLoading] = useState(true); // Start as true to prevent flash
-  const [lastOrderFillCheck, setLastOrderFillCheck] = useState(0);
+  const lastOrderFillCheckRef = useRef(0);
 
   const [fearGreed, setFearGreed] = useState<FearGreedData | null>(null);
   const [fearGreedLoading, setFearGreedLoading] = useState(false);
@@ -246,7 +247,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
       lastOhlcFetchRef.current = stored;
       const elapsed = Date.now() - stored;
       if (elapsed < TRADING_REFRESH_INTERVAL_MS) {
-        setNextRefresh(Math.max(0, TRADING_REFRESH_INTERVAL_SEC - Math.floor(elapsed / 1000)));
+        nextRefreshRef.current = (Math.max(0, TRADING_REFRESH_INTERVAL_SEC - Math.floor(elapsed / 1000)));
       }
     }
   }, []);
@@ -366,12 +367,12 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
       setTfData(newTfData);
       setLoading(false);
       setError(null);
-      setNextRefresh(TRADING_REFRESH_INTERVAL_SEC);
+      nextRefreshRef.current = (TRADING_REFRESH_INTERVAL_SEC);
     } catch (err) {
       console.error('Load error:', err);
       setError(err instanceof Error ? err.message : 'Failed to load data');
       setLoading(false);
-      setNextRefresh(TRADING_REFRESH_INTERVAL_SEC);
+      nextRefreshRef.current = (TRADING_REFRESH_INTERVAL_SEC);
     } finally {
       ohlcLoadingRef.current = false;
     }
@@ -812,13 +813,15 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     return () => clearInterval(interval);
   }, [enabled, refreshOhlc]);
 
+  // Countdown timer updates a ref (not state) to avoid re-rendering 14+ context consumers every second.
+  // The page component reads this via getNextRefresh() and manages its own local state for display.
+  const nextRefreshRef = useRef(TRADING_REFRESH_INTERVAL_SEC);
   useEffect(() => {
     const interval = setInterval(() => {
       const last = lastOhlcFetchRef.current;
       if (!last) return;
       const elapsed = Date.now() - last;
-      const remaining = Math.max(0, TRADING_REFRESH_INTERVAL_SEC - Math.floor(elapsed / 1000));
-      setNextRefresh(remaining);
+      nextRefreshRef.current = Math.max(0, TRADING_REFRESH_INTERVAL_SEC - Math.floor(elapsed / 1000));
     }, 1000);
     return () => clearInterval(interval);
   }, []);
@@ -878,6 +881,20 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     hadInitialPriceRef.current = false;
   }, [testMode]);
 
+  // Clear stale data when switching modes to prevent cross-contamination
+  // Without this, switching from test→live leaves simulatedPositions in state,
+  // causing useV2Engine to show a stale simulated position instead of the real one
+  useEffect(() => {
+    if (!testMode) {
+      setSimulatedPositions([]);
+      setSimulatedBalanceLoading(false);
+      setSimulatedPositionsLoading(false);
+    } else {
+      setOpenPositions([]);
+      setOpenPositionsLoading(false);
+    }
+  }, [testMode]);
+
   useEffect(() => {
     if (!enabled) return;
     refreshOpenOrders();
@@ -904,17 +921,31 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
 
   // Check and fill limit orders when price changes (test mode only)
   // Also runs when positions are open (for liquidation checks via balance API)
+  // Uses refs for throttling and latest values to avoid re-render cascades
+  const openOrdersRef = useRef(openOrders);
+  openOrdersRef.current = openOrders;
+  const simulatedPositionsRef = useRef(simulatedPositions);
+  simulatedPositionsRef.current = simulatedPositions;
+  const simulatedBalanceRef = useRef(simulatedBalance);
+  simulatedBalanceRef.current = simulatedBalance;
+  const refreshOpenOrdersRef = useRef(refreshOpenOrders);
+  refreshOpenOrdersRef.current = refreshOpenOrders;
+  const refreshSimulatedPositionsRef = useRef(refreshSimulatedPositions);
+  refreshSimulatedPositionsRef.current = refreshSimulatedPositions;
+  const refreshSimulatedBalanceRef = useRef(refreshSimulatedBalance);
+  refreshSimulatedBalanceRef.current = refreshSimulatedBalance;
+
   useEffect(() => {
     if (!testMode || !enabled || !price || price <= 0) return;
 
     // Throttle checks to every 2 seconds minimum
     const now = Date.now();
-    if (now - lastOrderFillCheck < 2000) return;
-    setLastOrderFillCheck(now);
+    if (now - lastOrderFillCheckRef.current < 2000) return;
+    lastOrderFillCheckRef.current = now;
 
     // Check if there are open orders OR open positions (positions need liquidation monitoring)
-    const hasOpenOrders = openOrders.length > 0;
-    const hasOpenPositions = simulatedPositions.length > 0 || (simulatedBalance?.openPositionsCount ?? 0) > 0;
+    const hasOpenOrders = openOrdersRef.current.length > 0;
+    const hasOpenPositions = simulatedPositionsRef.current.length > 0 || (simulatedBalanceRef.current?.openPositionsCount ?? 0) > 0;
     if (!hasOpenOrders && !hasOpenPositions) return;
 
     const checkAndFillOrders = async () => {
@@ -930,9 +961,9 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
           if (res.ok) {
             const data = await res.json();
             if (data.filled > 0) {
-              refreshOpenOrders(true);
-              refreshSimulatedPositions(true);
-              refreshSimulatedBalance(true);
+              refreshOpenOrdersRef.current(true);
+              refreshSimulatedPositionsRef.current(true);
+              refreshSimulatedBalanceRef.current(true);
               return; // Balance refresh will handle liquidation check
             }
           }
@@ -941,7 +972,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
         // If positions are open, refresh balance to trigger liquidation check
         // (balance API now checks margin level and auto-liquidates if < 80%)
         if (hasOpenPositions) {
-          refreshSimulatedBalance(true);
+          refreshSimulatedBalanceRef.current(true);
         }
       } catch (err) {
         console.error('Error checking limit orders:', err);
@@ -949,7 +980,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     };
 
     checkAndFillOrders();
-  }, [price, testMode, enabled, openOrders.length, simulatedPositions.length, simulatedBalance?.openPositionsCount, lastOrderFillCheck, refreshOpenOrders, refreshSimulatedPositions, refreshSimulatedBalance]);
+  }, [price, testMode, enabled]);
 
   const hasOpenSimulatedPosition = useMemo(() => {
     if (simulatedBalance?.openPositionsCount !== undefined) {
@@ -957,6 +988,9 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     }
     return simulatedPositions.length > 0;
   }, [simulatedBalance, simulatedPositions]);
+
+  // Stable getter for countdown — avoids putting a per-second changing value in context
+  const getNextRefresh = useCallback(() => nextRefreshRef.current, []);
 
   const value = useMemo<TradingDataContextValue>(() => ({
     wsStatus,
@@ -972,7 +1006,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     tfData,
     loading,
     error,
-    nextRefresh,
+    getNextRefresh,
     refreshOhlc,
     tradeBalance,
     tradeBalanceLoading,
@@ -1014,7 +1048,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     tfData,
     loading,
     error,
-    nextRefresh,
+    getNextRefresh,
     refreshOhlc,
     tradeBalance,
     tradeBalanceLoading,

@@ -412,16 +412,18 @@ export function CandlestickChart({
 
     setIsReady(true);
 
-    // Sync time scales
-    const syncTimeScale = (sourceChart: IChartApi, targetCharts: (IChartApi | null)[]) => {
-      sourceChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-        if (range) {
-          targetCharts.forEach(tc => tc?.timeScale().setVisibleLogicalRange(range));
-        }
-      });
+    // Sync time scales — store handler for cleanup
+    let isSyncing = false;
+    const syncHandler = (range: { from: number; to: number } | null) => {
+      if (range && !isSyncing) {
+        isSyncing = true;
+        rsiChartRef.current?.timeScale().setVisibleLogicalRange(range);
+        macdChartRef.current?.timeScale().setVisibleLogicalRange(range);
+        atrChartRef.current?.timeScale().setVisibleLogicalRange(range);
+        isSyncing = false;
+      }
     };
-
-    syncTimeScale(chart, [rsiChartRef.current, macdChartRef.current, atrChartRef.current]);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(syncHandler);
 
     // Handle resize
     const handleResize = () => {
@@ -436,6 +438,7 @@ export function CandlestickChart({
 
     return () => {
       window.removeEventListener('resize', handleResize);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(syncHandler);
       chart.remove();
       rsiChartRef.current?.remove();
       macdChartRef.current?.remove();

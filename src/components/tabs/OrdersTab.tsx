@@ -90,7 +90,7 @@ export function OrdersTab({
               {testMode ? 'TEST' : 'LIVE'}
             </span>
           </h3>
-          <OpenOrders testMode={testMode} onEditOrder={onEditOrder} />
+          <OpenOrders testMode={testMode} onEditOrder={onEditOrder} defaultCollapsed />
         </div>
       )}
 

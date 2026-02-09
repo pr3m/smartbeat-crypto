@@ -99,6 +99,7 @@ export function AIUsageTab() {
     market_analysis: 'Market Analysis',
     position_evaluation: 'Position Evaluation',
     trade_review: 'Trade Review',
+    arena_agent: 'Arena Agents',
   };
 
   if (loading) {

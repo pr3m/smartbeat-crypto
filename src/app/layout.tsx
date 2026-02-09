@@ -30,6 +30,12 @@ function Navigation() {
                 Trading
               </Link>
               <Link
+                href="/arena"
+                className="text-secondary hover:text-primary transition-colors"
+              >
+                Arena
+              </Link>
+              <Link
                 href="/tax"
                 className="text-secondary hover:text-primary transition-colors"
               >

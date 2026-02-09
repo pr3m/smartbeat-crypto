@@ -93,7 +93,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     tfData,
     loading,
     error,
-    nextRefresh,
+    getNextRefresh,
     refreshOhlc,
     refreshOpenPositions,
     refreshSimulatedBalance,
@@ -108,6 +108,15 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
   const setTradingMode = useChatStore((s) => s.setTradingMode);
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [displayTf, setDisplayTf] = useState<number>(15);
+
+  // Local countdown state — isolated from the shared context to avoid re-rendering 14+ consumers every second
+  const [nextRefresh, setNextRefresh] = useState(REFRESH_INTERVAL);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNextRefresh(getNextRefresh());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [getNextRefresh]);
   const [recommendation, setRecommendation] = useState<TradingRecommendation | null>(null);
   const lastRecommendationRef = useRef<string | null>(null);
   const [strategyName, setStrategyName] = useState(() => getDefaultStrategy().meta.name);
@@ -681,7 +690,11 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     }
   }, [buildMarketSnapshot, addToast]);
 
-  // Generate recommendation when data changes
+  // Generate recommendation when indicator data changes (not on every price tick)
+  // Price is only used for ATR volatility calc — a ref avoids re-running on every tick
+  const priceForRecRef = useRef(price);
+  priceForRecRef.current = price;
+
   useEffect(() => {
     // Only generate if we have indicator data
     if (!tfData[240].indicators || !tfData[60].indicators || !tfData[15].indicators || !tfData[5].indicators) {
@@ -698,7 +711,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
       microData, // Pass microstructure data for flow analysis
       liqData, // Pass liquidation data for liq bias analysis
       tfData[1440], // Daily timeframe for trend filter (NEW)
-      price // Current price for ATR volatility calculation
+      priceForRecRef.current // Current price for ATR volatility calculation
     );
 
     console.log('Generated recommendation:', rec?.action, 'Long:', rec?.longScore, 'Short:', rec?.shortScore, 'Flow:', rec?.flowStatus?.status, 'Liq:', rec?.liquidationStatus?.bias);
@@ -716,7 +729,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     }
 
     lastRecommendationRef.current = rec?.action || null;
-  }, [tfData, btcTrend, btcChange, microData, liqData, addToast, price]);
+  }, [tfData, btcTrend, btcChange, microData, liqData, addToast]);
 
   // Request notification permission on mount
   useEffect(() => {

@@ -558,3 +558,185 @@ model AIUsage {
   @@index([model])
   @@index([feature, model, createdAt])
 }
+
+// ============================================
+// Arena Trading Competition Models
+// ============================================
+
+// Arena session - a single competition run
+model ArenaSession {
+  id            String   @id @default(cuid())
+  status        String   @default("pending") // pending, running, paused, completed, cancelled
+  config        String   // JSON: ArenaSessionConfig
+  startedAt     DateTime?
+  endedAt       DateTime?
+  totalRunTimeMs Int     @default(0)
+  startPrice    Float?
+  endPrice      Float?
+  summary       String?  // JSON: end-of-session results
+
+  agents        ArenaAgent[]
+  snapshots     ArenaSnapshot[]
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+// Arena agent - an AI competitor in a session
+model ArenaAgent {
+  id               String   @id @default(cuid())
+  sessionId        String
+  session          ArenaSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  // Identity
+  name             String
+  personality      String   // Agent personality prompt
+  avatarShape      String   // hexagon, diamond, circle, triangle, square, pentagon, octagon, star
+  colorIndex       Int      // 0-7 for --agent-1 through --agent-8
+
+  // Strategy
+  strategyConfig   String   // JSON: Partial<TradingStrategy> mutations
+
+  // Capital & P&L
+  startingCapital  Float
+  currentCapital   Float
+  totalPnl         Float    @default(0)
+  totalFees        Float    @default(0)
+
+  // Performance
+  winCount         Int      @default(0)
+  lossCount        Int      @default(0)
+  maxDrawdown      Float    @default(0)
+  peakEquity       Float
+
+  // Health & status
+  health           Float    @default(100) // 0-100
+  rank             Int      @default(0)
+  status           String   @default("alive") // alive, liquidated, bankrupt
+  deathTick        Int?
+  deathReason      String?
+
+  // AI usage tracking
+  llmCallCount     Int      @default(0)
+  totalInputTokens Int      @default(0)
+  totalOutputTokens Int     @default(0)
+  estimatedCostUsd Float    @default(0)
+
+  positions        ArenaPosition[]
+  decisions        ArenaDecision[]
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([sessionId, status])
+  @@index([sessionId, rank])
+}
+
+// Arena position - a trade made by an agent
+model ArenaPosition {
+  id              String   @id @default(cuid())
+  agentId         String
+  agent           ArenaAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  pair            String   @default("XRPEUR")
+  side            String   // long, short
+  volume          Float
+  avgEntryPrice   Float
+  leverage        Int      @default(10)
+  marginUsed      Float
+  totalFees       Float    @default(0)
+
+  // DCA tracking
+  dcaCount        Int      @default(0)
+  dcaHistory      String?  // JSON: array of DCA entries
+
+  // Status
+  isOpen          Boolean  @default(true)
+  exitPrice       Float?
+  realizedPnl     Float?
+  holdDurationMs  Int?
+
+  // Reasoning
+  entryReasoning  String?  // JSON
+  exitReasoning   String?  // JSON
+  entryConditions String?  // JSON: market snapshot at entry
+
+  createdAt       DateTime @default(now())
+  closedAt        DateTime?
+
+  @@index([agentId, isOpen])
+  @@index([agentId, createdAt])
+}
+
+// Arena decision - logged agent actions (batch-inserted)
+model ArenaDecision {
+  id              String   @id @default(cuid())
+  agentId         String
+  agent           ArenaAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  tick            Int
+  action          String   // open_long, open_short, close, dca, hold, wait
+  reasoning       String?  // Short reasoning text
+  confidence      Float    @default(0)
+  usedLLM         Boolean  @default(false)
+
+  // Market context at decision time
+  priceAt         Float
+  balanceAt       Float
+  pnlAt           Float    @default(0)
+
+  // Token usage (if LLM was used)
+  inputTokens     Int?
+  outputTokens    Int?
+
+  createdAt       DateTime @default(now())
+
+  @@index([agentId, tick])
+  @@index([agentId, action])
+}
+
+// Arena snapshot - periodic leaderboard state
+model ArenaSnapshot {
+  id              String   @id @default(cuid())
+  sessionId       String
+  session         ArenaSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  data            String   // JSON: array of agent states
+  marketPrice     Float
+
+  createdAt       DateTime @default(now())
+
+  @@index([sessionId, createdAt])
+}
+
+// Arena strategy - extracted from winning agents
+model ArenaStrategy {
+  id              String   @id @default(cuid())
+
+  name            String
+  description     String
+  config          String   // JSON: TradingStrategy
+
+  // Source
+  sourceSessionId String?
+  sourceAgentName String?
+
+  // Performance metrics
+  winRate         Float    @default(0)
+  totalPnl        Float    @default(0)
+  sharpeRatio     Float?
+  maxDrawdown     Float    @default(0)
+  totalTrades     Int      @default(0)
+
+  // Rating
+  rating          Float    @default(0)
+  isActive        Boolean  @default(true)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([isActive, rating])
+}

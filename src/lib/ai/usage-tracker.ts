@@ -17,7 +17,7 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   'o1-preview': { input: 15.00, output: 60.00 },
 };
 
-export type AIFeature = 'chat' | 'market_analysis' | 'position_evaluation' | 'trade_review';
+export type AIFeature = 'chat' | 'market_analysis' | 'position_evaluation' | 'trade_review' | 'arena_agent';
 
 export interface TrackUsageParams {
   feature: AIFeature;
