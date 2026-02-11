@@ -298,7 +298,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
             ordertype: 'market',
             volume: params.volumeToClose.toString(),
             leverage: (openPos.margin > 0 ? Math.round(openPos.cost / openPos.margin) : 10).toString(),
-            oflags: 'reduconly',
+            reduce_only: true,
           }),
         });
         const data = await res.json();
@@ -392,6 +392,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
             volume: params.volume.toString(),
             leverage: '10',
             price: trailingStopOffset,
+            reduce_only: true,
           }),
         });
         const data = await res.json();
@@ -438,6 +439,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
             volume: params.volume.toString(),
             leverage: '10',
             price: params.price.toString(),
+            reduce_only: true,
           }),
         });
         const data = await res.json();
@@ -777,13 +779,14 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
   // V2 Engine: position state, DCA signals, exit signals, sizing
   const v2 = useV2Engine(recommendation, strategy);
 
-  // Background trade notifications (signals, P&L, DCA, RSI, volume)
-  useTradeNotifications({
+  // Background trade notifications (signals, P&L, DCA, RSI, volume, order fills)
+  const { markOrderCancelled } = useTradeNotifications({
     recommendation,
     tfData,
     price,
     simulatedPositions,
     openPositions,
+    openOrders,
     testMode,
     notificationsEnabled,
     dcaSignal: v2.output.dcaSignal,
@@ -1001,6 +1004,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
               handleLiquidationData={handleLiquidationData}
               handleOrderExecuted={handleOrderExecuted}
               onEditOrder={handleEditOrder}
+              onOrderCancelled={markOrderCancelled}
               addToast={addToast}
             />
           </div>
@@ -1329,6 +1333,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
           testMode={testMode}
           onEditOrder={handleEditOrder}
           onEditDraft={handleEditDraft}
+          onOrderCancelled={markOrderCancelled}
         />
       )}
 

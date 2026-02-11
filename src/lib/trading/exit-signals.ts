@@ -1,33 +1,34 @@
 /**
  * Exit Signal Engine v2
  *
- * Condition-based exit system with 48h timebox and anti-greed logic.
+ * PROFIT-SEEKING exit system with regime-aware timebox and knife integration.
  * The trader has NO stop loss and NO fixed take-profit.
  *
  * TRADER'S RULES:
- * - Ideally exit within 48 hours
  * - Take any profit, little profit is better than nothing
  * - Prevent staying in trade too long hoping for more profit
  * - If no volatility or volume, take small profit and exit - even +50 EUR
  * - No selling at loss (willing to be liquidated)
  *
- * TIME PRESSURE:
- * - 0-12h (normal): no urgency unless strong exit signal
- * - 12-24h (monitor): consider exit if in profit
- * - 24-36h (escalating): recommended exit if any green
- * - 36-48h (urgent): take whatever is there
- * - 48h+ (overdue): exit on any green tick
+ * REGIME-AWARE TIMEBOX:
+ * - strong_trend: up to 72h, timebox weight 0.05 (backstop only)
+ * - trending: up to 48h, timebox weight 0.10
+ * - ranging/low_vol: up to 36h, timebox weight 0.20
+ * Phase boundaries scale proportionally with maxHours.
  *
- * CONDITION-BASED EXITS:
- * - 15m RSI extremes (momentum exhaustion)
- * - 1H MACD histogram reversal
- * - Volume declining while in profit
- * - Anti-greed: P&L dropped 30%+ from high water mark
+ * PROFIT-AWARE EXITS:
+ * - Profitable trades get higher exit thresholds (hold longer when winning)
+ * - +20% P&L → threshold 70, +10% → threshold 65
+ * - Strong trend regime adds +10 to threshold (cap 80)
+ *
+ * KNIFE EXIT PRESSURE:
+ * - Knife impulse/capitulation against position → high exit pressure
+ * - Overrides profit-aware threshold to 50 for emergency exits
  *
  * CRITICAL: shouldExit is NEVER true when at a loss (unrealizedPnL < 0)
  */
 
-import type { Indicators } from '@/lib/kraken/types';
+import type { Indicators, KnifeStatus } from '@/lib/kraken/types';
 import type {
   PositionState,
   ExitSignal,
@@ -45,6 +46,7 @@ import {
   DEFAULT_ANTI_GREED,
 } from './v2-types';
 import type { ReversalSignal } from './reversal-detector';
+import type { MarketRegimeAnalysis } from './market-regime';
 
 // ============================================================================
 // TIME PHASE DETERMINATION
@@ -55,12 +57,19 @@ export type TimePhase = 'normal' | 'monitor' | 'escalating' | 'urgent' | 'overdu
 
 /**
  * Determine the time phase based on hours in trade.
+ * Phase boundaries scale proportionally with maxHours:
+ * - normal: < 25% of maxHours
+ * - monitor: 25-50%
+ * - escalating: 50-75%
+ * - urgent: 75-100%
+ * - overdue: > 100%
  */
-export function getTimePhase(hoursInTrade: number): TimePhase {
-  if (hoursInTrade >= 48) return 'overdue';
-  if (hoursInTrade >= 36) return 'urgent';
-  if (hoursInTrade >= 24) return 'escalating';
-  if (hoursInTrade >= 12) return 'monitor';
+export function getTimePhase(hoursInTrade: number, maxHours = 48): TimePhase {
+  const pct = maxHours > 0 ? hoursInTrade / maxHours : 1;
+  if (pct >= 1.0) return 'overdue';
+  if (pct >= 0.75) return 'urgent';
+  if (pct >= 0.50) return 'escalating';
+  if (pct >= 0.25) return 'monitor';
   return 'normal';
 }
 
@@ -332,6 +341,9 @@ export function determineUrgency(
  * @param currentPrice - Current market price
  * @param currentTime - Current timestamp (ms)
  * @param strategy - Trading strategy (provides exit, antiGreed, timebox config)
+ * @param reversalSignal - Candlestick reversal pattern detection
+ * @param knifeStatus - Knife detection status (sharp move against position)
+ * @param regimeAnalysis - Market regime analysis (adjusts timebox + weights)
  * @returns ExitSignal with all analysis results
  */
 export function analyzeExitConditions(
@@ -342,7 +354,9 @@ export function analyzeExitConditions(
   currentPrice: number,
   currentTime: number,
   strategy: TradingStrategy = DEFAULT_STRATEGY,
-  reversalSignal?: ReversalSignal | null
+  reversalSignal?: ReversalSignal | null,
+  knifeStatus?: KnifeStatus | null,
+  regimeAnalysis?: MarketRegimeAnalysis | null
 ): ExitSignal {
   const antiGreedConfig = strategy.antiGreed;
   const timeboxConfig = strategy.timebox;
@@ -354,34 +368,40 @@ export function analyzeExitConditions(
 
   const isInProfit = position.unrealizedPnL > 0;
   const hoursInTrade = position.timeInTradeMs / (1000 * 60 * 60);
-  const timePhase = getTimePhase(hoursInTrade);
+
+  // Use regime-adjusted maxHours if available, otherwise fall back to strategy config
+  const effectiveMaxHours = regimeAnalysis?.adjustedTimeboxMaxHours ?? timeboxConfig.maxHours;
+  const timePhase = getTimePhase(hoursInTrade, effectiveMaxHours);
+
+  // Regime-adjusted timebox weight (backstop, not driver)
+  const timeboxWeight = regimeAnalysis?.adjustedTimeboxWeight ?? 0.20;
 
   // --- Calculate all pressures ---
   const pressures: ExitPressure[] = [];
 
-  // 1. Timebox pressure
+  // 1. Timebox pressure (regime-aware weight)
   const timeboxPressureValue = calculateTimeboxPressure(hoursInTrade, timeboxConfig);
   if (timeboxPressureValue > 0) {
     pressures.push({
       source: 'timebox_expired' as ExitReason,
       value: timeboxPressureValue,
-      weight: 0.30,
-      detail: `${hoursInTrade.toFixed(1)}h in trade (${timePhase}) - pressure ${timeboxPressureValue.toFixed(0)}%`,
+      weight: timeboxWeight,
+      detail: `${hoursInTrade.toFixed(1)}h in trade (${timePhase}, max ${effectiveMaxHours}h) - pressure ${timeboxPressureValue.toFixed(0)}%`,
     });
   }
 
-  // 2. RSI exhaustion
+  // 2. RSI exhaustion (weight 0.25, up from 0.20)
   const rsiExhaustion = detectRSIExhaustion(position.direction, ind15m.rsi);
   if (rsiExhaustion.active) {
     pressures.push({
       source: 'momentum_exhaustion',
       value: rsiExhaustion.value,
-      weight: 0.20,
+      weight: 0.25,
       detail: rsiExhaustion.detail,
     });
   }
 
-  // 3. MACD reversal
+  // 3. MACD reversal (weight 0.18, up from 0.15)
   const macdReversal = detectMACDReversal(
     position.direction,
     ind1h.histogram ?? 0,
@@ -391,23 +411,23 @@ export function analyzeExitConditions(
     pressures.push({
       source: 'momentum_exhaustion',
       value: macdReversal.value,
-      weight: 0.15,
+      weight: 0.18,
       detail: macdReversal.detail,
     });
   }
 
-  // 4. Volume drying up
+  // 4. Volume drying up (weight 0.15, up from 0.10)
   const volumeDryUp = detectVolumeDryUp(ind15m.volRatio, ind5m.volRatio, isInProfit);
   if (volumeDryUp.active) {
     pressures.push({
       source: 'condition_deterioration',
       value: volumeDryUp.value,
-      weight: 0.10,
+      weight: 0.15,
       detail: volumeDryUp.detail,
     });
   }
 
-  // 5. Anti-greed
+  // 5. Anti-greed (weight 0.25, unchanged)
   const antiGreed = detectAntiGreed(
     position.unrealizedPnL,
     position.highWaterMarkPnL,
@@ -422,29 +442,29 @@ export function analyzeExitConditions(
     });
   }
 
-  // 6. Momentum fading
+  // 6. Momentum fading (weight 0.15, up from 0.10)
   const momentumFade = detectMomentumFading(position.direction, ind15m);
   if (momentumFade.active) {
     pressures.push({
       source: 'momentum_exhaustion',
       value: momentumFade.value,
-      weight: 0.10,
+      weight: 0.15,
       detail: momentumFade.detail,
     });
   }
 
-  // 7. Trend reversal
+  // 7. Trend reversal (weight 0.25, up from 0.20 — most important signal)
   const trendReversal = detectTrendReversal(position.direction, ind1h);
   if (trendReversal.active) {
     pressures.push({
       source: 'trend_reversal',
       value: trendReversal.value,
-      weight: 0.20,
+      weight: 0.25,
       detail: trendReversal.detail,
     });
   }
 
-  // 8. Candlestick reversal pattern detection
+  // 8. Candlestick reversal pattern detection (weight 0.20, unchanged)
   let reversalPressureActive = false;
   if (reversalSignal && reversalSignal.detected) {
     // Only add pressure if the reversal is AGAINST our position
@@ -490,13 +510,58 @@ export function analyzeExitConditions(
     }
   }
 
+  // 9. Knife exit pressure — sharp move against position (weight 0.22)
+  let knifeEmergency = false;
+  if (knifeStatus && knifeStatus.isKnife) {
+    // Only add pressure if the knife opposes our position
+    const knifeOpposesPosition =
+      (position.direction === 'long' && knifeStatus.direction === 'falling') ||
+      (position.direction === 'short' && knifeStatus.direction === 'rising');
+
+    if (knifeOpposesPosition) {
+      let knifePressure = 0;
+      switch (knifeStatus.phase) {
+        case 'impulse':
+          knifePressure = 95;
+          knifeEmergency = true;
+          break;
+        case 'capitulation':
+          knifePressure = 85;
+          knifeEmergency = true;
+          break;
+        case 'stabilizing':
+          knifePressure = 50;
+          break;
+        case 'confirming':
+          knifePressure = 30;
+          break;
+        case 'safe':
+        default:
+          knifePressure = 0;
+          break;
+      }
+
+      // Scale by knife score (0-100)
+      knifePressure = Math.round(knifePressure * Math.min(1, knifeStatus.knifeScore / 100));
+
+      if (knifePressure > 0) {
+        pressures.push({
+          source: 'knife_detected',
+          value: knifePressure,
+          weight: 0.22,
+          detail: `🔪 ${knifeStatus.direction} knife ${knifeStatus.phase} (score ${knifeStatus.knifeScore.toFixed(0)}) against ${position.direction}`,
+        });
+      }
+    }
+  }
+
   // De-duplicate: when reversal_detected is active, reduce MACD reversal weight
   // to avoid double-counting (the reversal detector already includes MACD crossover
   // in its confidence score). We halve the MACD pressure weight.
   if (reversalPressureActive && macdReversal.active) {
     const macdPressure = pressures.find(p => p.detail === macdReversal.detail);
     if (macdPressure) {
-      macdPressure.weight = 0.08; // Reduced from 0.15
+      macdPressure.weight = 0.09; // Reduced from 0.18
     }
   }
 
@@ -510,11 +575,27 @@ export function analyzeExitConditions(
   // Normalize to 0-100
   totalPressure = totalWeight > 0 ? Math.min(100, totalPressure / totalWeight) : 0;
 
-  // Boost pressure when timebox is critical
-  if (timePhase === 'overdue') {
-    totalPressure = Math.max(totalPressure, 90);
-  } else if (timePhase === 'urgent') {
-    totalPressure = Math.max(totalPressure, 50);
+  // Soft backstop: overdue AND profitable → floor at 60 (not 90)
+  // No forced minimum for 'urgent' — let real signals drive exits
+  if (timePhase === 'overdue' && isInProfit) {
+    totalPressure = Math.max(totalPressure, 60);
+  }
+
+  // --- Profit-aware exit threshold ---
+  // Hold longer when the trade is working well
+  let effectiveExitThreshold = exitConfig.exitPressureThreshold; // 60
+  if (position.unrealizedPnLPercent > 20) {
+    effectiveExitThreshold = 70;
+  } else if (position.unrealizedPnLPercent > 10) {
+    effectiveExitThreshold = 65;
+  }
+  // Strong trend regime: even more patient
+  if (regimeAnalysis?.regime === 'strong_trend') {
+    effectiveExitThreshold = Math.min(80, effectiveExitThreshold + 10);
+  }
+  // Knife emergency overrides: lower threshold for safety
+  if (knifeEmergency) {
+    effectiveExitThreshold = Math.min(effectiveExitThreshold, 50);
   }
 
   // --- Determine urgency ---
@@ -522,16 +603,19 @@ export function analyzeExitConditions(
 
   // --- Determine shouldExit ---
   // CRITICAL RULE: Never exit at a loss (trader prefers liquidation)
-  // Exception: none. Even at 48h+, only exit if in profit.
+  // Exception: none. Even at timebox expiry, only exit if in profit.
   // Minimum profit check from strategy config
   const meetsMinProfit = position.unrealizedPnL >= exitConfig.minProfitForExit;
-  const shouldExit = isInProfit && meetsMinProfit && totalPressure >= exitConfig.exitPressureThreshold;
+  const shouldExit = isInProfit && meetsMinProfit && totalPressure >= effectiveExitThreshold;
 
   // --- Determine primary reason ---
   let primaryReason: ExitReason = 'timebox_approaching';
+  const hasKnifePressure = pressures.some(p => p.source === 'knife_detected' && p.value >= 50);
   const hasReversalPressure = pressures.some(p => p.source === 'reversal_detected' && p.value >= 60);
   if (antiGreed.active) {
     primaryReason = 'anti_greed';
+  } else if (hasKnifePressure) {
+    primaryReason = 'knife_detected';
   } else if (hasReversalPressure) {
     primaryReason = 'reversal_detected';
   } else if (trendReversal.active && trendReversal.value >= 80) {
@@ -549,21 +633,24 @@ export function analyzeExitConditions(
   // --- Build explanation ---
   const explanationParts: string[] = [];
   if (shouldExit) {
-    explanationParts.push(`Exit recommended (pressure ${totalPressure.toFixed(0)}%).`);
+    explanationParts.push(`Exit recommended (pressure ${totalPressure.toFixed(0)}%, threshold ${effectiveExitThreshold}).`);
   } else if (isInProfit) {
-    explanationParts.push(`In profit but pressure low (${totalPressure.toFixed(0)}%).`);
+    explanationParts.push(`In profit but pressure low (${totalPressure.toFixed(0)}%, need ${effectiveExitThreshold}).`);
   } else {
     explanationParts.push(`At a loss - no exit signal (trader holds to liquidation).`);
   }
 
   if (timePhase !== 'normal') {
-    explanationParts.push(`Time: ${hoursInTrade.toFixed(1)}h (${timePhase}).`);
+    explanationParts.push(`Time: ${hoursInTrade.toFixed(1)}h / ${effectiveMaxHours}h (${timePhase}).`);
   }
   if (isInProfit) {
     explanationParts.push(`P&L: +${position.unrealizedPnL.toFixed(0)} EUR.`);
   }
   if (antiGreed.active) {
     explanationParts.push(antiGreed.detail);
+  }
+  if (regimeAnalysis) {
+    explanationParts.push(`Regime: ${regimeAnalysis.regime.replace('_', ' ')}.`);
   }
 
   // --- Suggested exit percentage ---

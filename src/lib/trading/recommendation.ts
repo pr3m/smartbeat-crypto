@@ -23,6 +23,7 @@ import type {
 import { DEFAULT_STRATEGY } from './v2-types';
 import { detectKnife, KNIFE_GATING_ENABLED, type KnifeAnalysis } from './knife-detection';
 import { detectReversal, type ReversalSignal, NO_REVERSAL } from './reversal-detector';
+import { detectMarketRegime, type MarketRegimeAnalysis } from './market-regime';
 
 export interface TimeframeWeights {
   '1d': number;
@@ -1838,8 +1839,12 @@ export function generateRecommendation(
   let reason = '';
   let baseConfidence = 0;
 
-  // Use strength-based thresholds from strategy config
-  const { actionThreshold, directionLeadThreshold, sitOnHandsThreshold } = signalConfig;
+  // Market regime detection — adjusts action threshold dynamically
+  const regimeAnalysis = detectMarketRegime(ind4h, ind1h, strat.regime);
+
+  // Use regime-adjusted action threshold instead of fixed strategy value
+  const { directionLeadThreshold, sitOnHandsThreshold } = signalConfig;
+  const actionThreshold = regimeAnalysis.adjustedActionThreshold;
   const fullConfidenceThreshold = strat.positionSizing.fullEntryConfidence;
 
   if (longStrengthResult.strength >= actionThreshold && longStrengthResult.strength > shortStrengthResult.strength + directionLeadThreshold) {
@@ -1972,6 +1977,11 @@ export function generateRecommendation(
   // Cap confidence and round to integer
   confidence = Math.round(Math.min(Math.max(confidence, 5), 95));
 
+  // WAIT signals must never pass position sizing gate
+  if (action === 'WAIT') {
+    confidence = Math.min(confidence, strat.positionSizing.minEntryConfidence - 1);
+  }
+
   return {
     action,
     confidence,
@@ -2034,6 +2044,15 @@ export function generateRecommendation(
         .slice(0, 5)
         .map(p => p.name.replace(/_/g, ' ')),
     } : undefined,
+    regimeStatus: {
+      regime: regimeAnalysis.regime,
+      confidence: regimeAnalysis.confidence,
+      adx: regimeAnalysis.adx,
+      bbWidthPercent: regimeAnalysis.bbWidthPercent,
+      adjustedActionThreshold: regimeAnalysis.adjustedActionThreshold,
+      adjustedTimeboxMaxHours: regimeAnalysis.adjustedTimeboxMaxHours,
+      description: regimeAnalysis.description,
+    },
   };
 }
 

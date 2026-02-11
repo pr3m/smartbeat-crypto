@@ -22,6 +22,7 @@ type OpenOrder = OpenOrderData;
 interface OpenOrdersProps {
   testMode: boolean;
   onEditOrder?: (order: OpenOrder) => void;
+  onOrderCancelled?: (orderId: string) => void;
   defaultCollapsed?: boolean;
 }
 
@@ -32,7 +33,7 @@ interface ConfirmCancelState {
   cancelAll: boolean;
 }
 
-export function OpenOrders({ testMode, onEditOrder, defaultCollapsed = false }: OpenOrdersProps) {
+export function OpenOrders({ testMode, onEditOrder, onOrderCancelled, defaultCollapsed = false }: OpenOrdersProps) {
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [cancellingAll, setCancellingAll] = useState(false);
@@ -116,6 +117,9 @@ export function OpenOrders({ testMode, onEditOrder, defaultCollapsed = false }: 
         throw new Error(result.error || 'Failed to cancel order');
       }
 
+      // Mark as cancelled before refresh to prevent false fill notification
+      onOrderCancelled?.(orderId);
+
       addToast({
         title: 'Order Cancelled',
         message: `Order ${orderId.slice(0, 8)}... cancelled`,
@@ -151,6 +155,11 @@ export function OpenOrders({ testMode, onEditOrder, defaultCollapsed = false }: 
 
       if (!response.ok) {
         throw new Error(result.error || 'Failed to cancel orders');
+      }
+
+      // Mark all as cancelled before refresh to prevent false fill notifications
+      for (const order of orders) {
+        onOrderCancelled?.(order.id);
       }
 
       addToast({

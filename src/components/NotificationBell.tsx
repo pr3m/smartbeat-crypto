@@ -21,6 +21,7 @@ const TYPE_COLORS: Record<string, string> = {
   rsi: 'bg-orange-500',
   pnl: 'bg-emerald-500',
   dca: 'bg-cyan-500',
+  order: 'bg-green-500',
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -31,6 +32,7 @@ const TYPE_LABELS: Record<string, string> = {
   rsi: 'RSI Alert',
   pnl: 'P&L Milestone',
   dca: 'DCA Level',
+  order: 'Order Fill',
 };
 
 const TYPE_DESCRIPTIONS: Record<string, string> = {
@@ -41,6 +43,7 @@ const TYPE_DESCRIPTIONS: Record<string, string> = {
   rsi: 'The 15-minute RSI reached an extreme level. Below 25 is deeply oversold (potential bounce), above 75 is deeply overbought (potential pullback).',
   pnl: 'An open position crossed a P&L percentage milestone. Consider taking partial profits at positive milestones or reviewing stop losses at negative ones.',
   dca: 'Price dropped to a level where adding to a long position (Dollar Cost Averaging / Martingale) may improve the average entry price.',
+  order: 'An open order (limit, stop-loss, take-profit, or trailing stop) was filled by Kraken. The order has been executed at the specified price or better.',
 };
 
 const PRIORITY_LABELS: Record<string, { label: string; color: string }> = {

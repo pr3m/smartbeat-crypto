@@ -338,6 +338,7 @@ export class KrakenClient {
     if (params.price2) reqParams.price2 = params.price2;
     if (params.displayvol) reqParams.displayvol = params.displayvol;
     if (params.leverage) reqParams.leverage = params.leverage;
+    if (params.reduce_only) reqParams.reduce_only = true;
     if (params.oflags) reqParams.oflags = params.oflags;
     if (params.starttm) reqParams.starttm = params.starttm;
     if (params.expiretm) reqParams.expiretm = params.expiretm;

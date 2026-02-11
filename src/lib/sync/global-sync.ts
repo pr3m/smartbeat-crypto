@@ -551,6 +551,28 @@ async function upsertTrade(trade: TradeInfoWithId): Promise<{ created: boolean }
   });
 
   if (existing) {
+    // Update existing margin trades when close data becomes available
+    // (trade synced while open, now closed with P&L data)
+    if (isMargin && trade.posstatus === 'closed' && existing.posstatus !== 'closed') {
+      const hasCloseData = trade.cprice && parseFloat(trade.cprice) > 0;
+      const netPnl = trade.net ? parseFloat(trade.net) : null;
+      const closingTradeId = trade.trades && trade.trades.length > 0 ? trade.trades[0] : null;
+
+      await prisma.transaction.update({
+        where: { krakenRefId },
+        data: {
+          posstatus: 'closed',
+          closePrice: hasCloseData ? parseFloat(trade.cprice!) : null,
+          closeCost: trade.ccost ? parseFloat(trade.ccost) : null,
+          closeFee: trade.cfee ? parseFloat(trade.cfee) : null,
+          closeVolume: trade.cvol ? parseFloat(trade.cvol) : null,
+          closeMargin: trade.cmargin ? parseFloat(trade.cmargin) : null,
+          netPnl,
+          gain: netPnl,
+          closingTradeId,
+        },
+      });
+    }
     return { created: false };
   }
 

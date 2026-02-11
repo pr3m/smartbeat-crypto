@@ -466,6 +466,11 @@ export function TradeExecutionPanel({
     if (postOnly && orderType !== 'market') oflags.push('post');
     if (oflags.length > 0) params.oflags = oflags.join(',');
 
+    // Add reduce only flag (separate API parameter, NOT an oflag)
+    if (reduceOnly) {
+      params.reduce_only = true;
+    }
+
     // Add validate only flag
     if (validateOnly) {
       params.validate = true;

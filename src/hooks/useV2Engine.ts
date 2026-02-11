@@ -32,6 +32,7 @@ import { calculateKrakenLiquidationPrice } from '@/lib/trading/position-health';
 import { analyzeDCAOpportunity } from '@/lib/trading/dca-signals';
 import { analyzeExitConditions, getExitStatusSummary } from '@/lib/trading/exit-signals';
 import { detectReversal, type ReversalSignal } from '@/lib/trading/reversal-detector';
+import { detectMarketRegime } from '@/lib/trading/market-regime';
 
 // ============================================================================
 // BRIDGE: Kraken positions -> PositionState
@@ -456,6 +457,10 @@ export function useV2Engine(
     // Exit signal (only when position is open)
     let exitSignal = null;
     if (positionState.isOpen && ind15m && ind1h && ind5m) {
+      // Market regime detection for exit adjustments
+      const ind4h = tfData[240]?.indicators ?? null;
+      const exitRegimeAnalysis = detectMarketRegime(ind4h, ind1h, strategy.regime);
+
       exitSignal = analyzeExitConditions(
         positionState,
         ind15m,
@@ -464,13 +469,15 @@ export function useV2Engine(
         price,
         Date.now(),
         strategy,
-        positionReversalSignal
+        positionReversalSignal,
+        recommendation?.knifeStatus ?? null,
+        exitRegimeAnalysis
       );
     }
 
     // Position sizing (when no position, show what entry would look like)
     let sizing = null;
-    if (!positionState.isOpen && recommendation) {
+    if (!positionState.isOpen && recommendation && (recommendation.action === 'LONG' || recommendation.action === 'SHORT')) {
       sizing = calculateEntrySize(
         recommendation.confidence,
         price,

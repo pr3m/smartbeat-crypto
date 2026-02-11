@@ -99,15 +99,6 @@ function getTimeColor(hoursElapsed: number, maxHours: number): string {
   return 'text-green-400';                        // 0-12h
 }
 
-function getTimeBgColor(hoursElapsed: number, maxHours: number): string {
-  const ratio = hoursElapsed / maxHours;
-  if (ratio >= 1) return 'bg-red-500';
-  if (ratio >= 0.75) return 'bg-red-500';
-  if (ratio >= 0.5) return 'bg-orange-500';
-  if (ratio >= 0.25) return 'bg-yellow-500';
-  return 'bg-green-500';
-}
-
 function getTimeLabel(hoursElapsed: number, steps: TimeboxStep[]): string {
   // Walk steps in reverse to find the current step
   for (let i = steps.length - 1; i >= 0; i--) {
@@ -315,73 +306,6 @@ function DCACounter({
   );
 }
 
-/** Time-in-trade display with progress bar */
-function TimeInTrade({
-  timeInTradeMs,
-  hoursRemaining,
-  timeboxProgress,
-  config,
-}: {
-  timeInTradeMs: number;
-  hoursRemaining: number;
-  timeboxProgress: number;
-  config: TradingEngineConfig;
-}) {
-  const maxHours = config.timebox.maxHours;
-  const hoursElapsed = timeInTradeMs / (1000 * 60 * 60);
-  const isOverdue = hoursElapsed >= maxHours;
-  const timeColor = getTimeColor(hoursElapsed, maxHours);
-  const barColor = getTimeBgColor(hoursElapsed, maxHours);
-  const stepLabel = getTimeLabel(hoursElapsed, config.timebox.steps);
-
-  return (
-    <Tooltip
-      content={
-        <div className="text-xs max-w-xs">
-          <strong>Time in Trade</strong>
-          <div className="mt-1">
-            <div>Elapsed: {formatDuration(timeInTradeMs)}</div>
-            <div>Remaining: {hoursRemaining.toFixed(1)}h</div>
-            <div>Timebox: {maxHours}h max</div>
-            <div className="mt-1 font-semibold">{stepLabel}</div>
-          </div>
-          <div className="mt-2 space-y-0.5">
-            {config.timebox.steps.map((step, i) => (
-              <div
-                key={i}
-                className={`${hoursElapsed >= step.hours ? 'text-primary' : 'text-tertiary'}`}
-              >
-                {hoursElapsed >= step.hours ? '>' : ' '} {step.hours}h: {step.label}
-              </div>
-            ))}
-          </div>
-        </div>
-      }
-      position="bottom"
-    >
-      <div className="cursor-help">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-xs text-tertiary">Time</span>
-          <span className={`text-xs mono font-semibold ${timeColor} ${isOverdue ? 'animate-pulse' : ''}`}>
-            {formatDuration(timeInTradeMs)}
-            {isOverdue ? ' OVERDUE' : ''}
-          </span>
-        </div>
-        <div className="w-full h-1.5 bg-gray-700 rounded-full overflow-hidden">
-          <div
-            className={`h-full rounded-full transition-all duration-1000 ${barColor} ${isOverdue ? 'animate-pulse' : ''}`}
-            style={{ width: `${Math.min(timeboxProgress * 100, 100)}%` }}
-          />
-        </div>
-        <div className="flex items-center justify-between gap-2 mt-0.5">
-          <span className="text-[10px] text-tertiary truncate">{stepLabel}</span>
-          <span className="text-[10px] text-tertiary whitespace-nowrap">{hoursRemaining.toFixed(0)}h left</span>
-        </div>
-      </div>
-    </Tooltip>
-  );
-}
-
 /** Pressure bar color based on value */
 function getPressureBarColor(percent: number): string {
   if (percent >= 75) return 'bg-red-500';
@@ -390,13 +314,33 @@ function getPressureBarColor(percent: number): string {
   return 'bg-green-500';
 }
 
-/** Inline pressure breakdown - always visible, replaces tooltip-only display */
+/** Short readable label for pressure source */
+function pressureLabel(source: string): string {
+  switch (source) {
+    case 'timebox_expired': return 'Timebox';
+    case 'timebox_approaching': return 'Timebox';
+    case 'momentum_exhaustion': return 'Momentum';
+    case 'condition_deterioration': return 'Volume';
+    case 'anti_greed': return 'Anti-greed';
+    case 'trend_reversal': return 'Trend flip';
+    case 'reversal_detected': return 'Reversal';
+    case 'knife_detected': return 'Knife';
+    default: return source.replace(/_/g, ' ');
+  }
+}
+
+/** Inline pressure breakdown - only shows active pressures above threshold */
 function PressureBreakdown({ pressures }: { pressures: ExitPressure[] }) {
-  if (pressures.length === 0) return null;
+  // Only show pressures that matter (value > 0), sorted by weighted impact
+  const meaningful = pressures
+    .filter(p => p.value > 0)
+    .sort((a, b) => (b.value * b.weight) - (a.value * a.weight));
+
+  if (meaningful.length === 0) return null;
 
   return (
-    <div className="space-y-1.5 mt-2">
-      {pressures.map((p, i) => {
+    <div className="space-y-1 mt-2">
+      {meaningful.map((p, i) => {
         const pct = Math.min(Math.round(p.value), 100);
         const barColor = getPressureBarColor(pct);
         return (
@@ -406,15 +350,15 @@ function PressureBreakdown({ pressures }: { pressures: ExitPressure[] }) {
             position="bottom"
           >
             <div className="cursor-help">
-              <div className="flex items-center gap-2 text-[11px]">
-                <span className="text-tertiary w-[72px] truncate capitalize">{p.source.replace(/_/g, ' ')}</span>
+              <div className="flex items-center gap-1.5 text-[11px]">
+                <span className="text-tertiary w-[56px] truncate">{pressureLabel(p.source)}</span>
                 <div className="flex-1 h-1 bg-gray-700 rounded-full overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all duration-500 ${barColor}`}
                     style={{ width: `${pct}%` }}
                   />
                 </div>
-                <span className="mono text-tertiary w-8 text-right">{pct}%</span>
+                <span className="mono text-tertiary w-[28px] text-right">{pct}%</span>
               </div>
             </div>
           </Tooltip>
@@ -424,7 +368,7 @@ function PressureBreakdown({ pressures }: { pressures: ExitPressure[] }) {
   );
 }
 
-/** Exit urgency meter - now with inline pressure breakdown */
+/** Exit pressure meter with inline breakdown — no duplicate urgency label */
 function ExitUrgencyMeter({ exitSignal }: { exitSignal: ExitSignal }) {
   const style = URGENCY_STYLES[exitSignal.urgency];
   const pressurePercent = Math.min(exitSignal.totalPressure, 100);
@@ -432,21 +376,12 @@ function ExitUrgencyMeter({ exitSignal }: { exitSignal: ExitSignal }) {
 
   return (
     <div>
-      {/* Header: label + urgency badge with gap to prevent overlap */}
-      <div className="flex items-center justify-between gap-2 mb-1">
-        <span className="text-xs text-tertiary min-w-0">Exit Pressure</span>
-        <span className={`text-xs font-bold whitespace-nowrap ${style.text} ${style.pulse ? 'animate-pulse' : ''}`}>
-          {style.label}
-        </span>
-      </div>
-
       {/* Main pressure bar */}
       <Tooltip
         content={
           <div className="text-xs max-w-xs">
             <strong>Exit Analysis</strong>
             <div className="mt-1">
-              <div>Urgency: {exitSignal.urgency}</div>
               <div>Total Pressure: {Math.round(exitSignal.totalPressure)}%</div>
               <div>Confidence: {exitSignal.confidence}%</div>
               {exitSignal.suggestedExitPercent > 0 && (
@@ -461,7 +396,8 @@ function ExitUrgencyMeter({ exitSignal }: { exitSignal: ExitSignal }) {
         position="bottom"
       >
         <div className="cursor-help">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-xs text-tertiary">Pressure</span>
             <div className="flex-1 h-2 bg-gray-700 rounded-full overflow-hidden">
               <div
                 className={`h-full rounded-full transition-all duration-500 ${barColor} ${style.pulse ? 'animate-pulse' : ''}`}
@@ -475,74 +411,15 @@ function ExitUrgencyMeter({ exitSignal }: { exitSignal: ExitSignal }) {
         </div>
       </Tooltip>
 
-      {/* Inline pressure breakdown - always visible */}
+      {/* Inline pressure breakdown — sorted by impact */}
       <PressureBreakdown pressures={exitSignal.pressures} />
 
       {exitSignal.shouldExit && exitSignal.suggestedExitPercent > 0 && (
-        <div className={`text-[10px] mt-1.5 ${style.text}`}>
-          Suggest closing {exitSignal.suggestedExitPercent}% of position
+        <div className={`text-xs mt-1.5 font-semibold ${style.text}`}>
+          Close {exitSignal.suggestedExitPercent}% of position
         </div>
       )}
     </div>
-  );
-}
-
-/** Anti-greed HWM tracker */
-function AntiGreedTracker({
-  currentPnL,
-  highWaterMark,
-  drawdownPercent,
-  config,
-}: {
-  currentPnL: number;
-  highWaterMark: number;
-  drawdownPercent: number;
-  config: TradingEngineConfig;
-}) {
-  const isActive = config.antiGreed.enabled && highWaterMark >= config.antiGreed.minHWMToTrack;
-  const threshold = config.antiGreed.drawdownThresholdPercent;
-  const isTriggered = isActive && drawdownPercent >= threshold;
-  const drawdownRatio = isActive ? Math.min(drawdownPercent / threshold, 1) : 0;
-
-  if (!isActive && highWaterMark <= 0) return null;
-
-  return (
-    <Tooltip
-      content={
-        <div className="text-xs max-w-xs">
-          <strong>Anti-Greed Protection</strong>
-          <div className="mt-1">
-            <div>Peak P&L (HWM): {formatPnL(highWaterMark)}</div>
-            <div>Current P&L: {formatPnL(currentPnL)}</div>
-            <div>Drawdown from peak: {drawdownPercent.toFixed(1)}%</div>
-            <div>Trigger at: {threshold}% drawdown</div>
-            {isTriggered && (
-              <div className="mt-1 text-red-400 font-semibold">
-                Anti-greed triggered - consider exiting
-              </div>
-            )}
-          </div>
-        </div>
-      }
-      position="bottom"
-    >
-      <div className="cursor-help">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-xs text-tertiary">Peak P&L</span>
-          <span className="text-xs mono text-green-400">{formatPnL(highWaterMark)}</span>
-        </div>
-        {isActive && (
-          <div className="w-full h-1 bg-gray-700 rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all duration-500 ${
-                isTriggered ? 'bg-red-500 animate-pulse' : drawdownRatio > 0.5 ? 'bg-orange-500' : 'bg-green-500'
-              }`}
-              style={{ width: `${drawdownRatio * 100}%` }}
-            />
-          </div>
-        )}
-      </div>
-    </Tooltip>
   );
 }
 
@@ -702,64 +579,129 @@ export function PositionDashboard({
         </div>
 
         {/* ============================================================ */}
-        {/* EXIT MONITORING SECTION - grouped card                       */}
+        {/* EXIT MONITORING SECTION — decision-focused                  */}
         {/* ============================================================ */}
         {exitSignal && pos.phase !== 'idle' && (
-          <div className={`rounded-lg border p-3 space-y-2.5 ${
+          <div className={`rounded-lg border p-3 space-y-2 ${
             exitSignal.urgency === 'immediate' ? 'border-red-500/50 bg-red-500/5' :
             exitSignal.urgency === 'soon' ? 'border-orange-500/40 bg-orange-500/5' :
             exitSignal.urgency === 'consider' ? 'border-yellow-500/30 bg-yellow-500/5' :
             'border-primary/40 bg-tertiary/20'
           }`}>
-            {/* Section header */}
+            {/* Header: title + urgency badge */}
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-semibold text-secondary">Exit Monitoring</span>
+              <span className="text-xs font-semibold text-secondary">
+                {exitSignal.reason === 'knife_detected' ? 'Knife Exit' :
+                 exitSignal.reason === 'anti_greed' ? 'Anti-Greed Exit' :
+                 exitSignal.reason === 'reversal_detected' ? 'Reversal Exit' :
+                 exitSignal.reason === 'trend_reversal' ? 'Trend Reversal' :
+                 'Exit Monitor'}
+              </span>
               <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${URGENCY_STYLES[exitSignal.urgency].bg} ${URGENCY_STYLES[exitSignal.urgency].text} ${URGENCY_STYLES[exitSignal.urgency].pulse ? 'animate-pulse' : ''}`}>
                 {URGENCY_STYLES[exitSignal.urgency].label}
               </span>
             </div>
 
-            {/* Exit urgency meter with inline pressure breakdown */}
+            {/* Primary judgment: exit explanation */}
+            {exitSignal.explanation && (
+              <div className="text-[11px] text-secondary leading-snug">
+                {exitSignal.explanation}
+              </div>
+            )}
+
+            {/* Pressure bar + breakdown */}
             <ExitUrgencyMeter exitSignal={exitSignal} />
 
-            {/* Time in Trade - moved here as primary pressure driver */}
-            <div className="p-2 rounded bg-tertiary/30">
-              <TimeInTrade
-                timeInTradeMs={pos.timeInTradeMs}
-                hoursRemaining={pos.hoursRemaining}
-                timeboxProgress={pos.timeboxProgress}
-                config={config}
-              />
-            </div>
+            {/* Compact context row: time + regime + peak P&L — only what matters */}
+            <div className="flex items-center gap-3 text-[11px] pt-1 border-t border-primary/30">
+              {/* Time — compact, no progress bar */}
+              <Tooltip
+                content={
+                  <div className="text-xs max-w-xs">
+                    <strong>Time in Trade</strong>
+                    <div className="mt-1">
+                      <div>Elapsed: {formatDuration(pos.timeInTradeMs)}</div>
+                      <div>Max: {config.timebox.maxHours}h</div>
+                      <div>{getTimeLabel(hoursElapsed, config.timebox.steps)}</div>
+                    </div>
+                  </div>
+                }
+                position="bottom"
+              >
+                <span className={`cursor-help mono ${getTimeColor(hoursElapsed, config.timebox.maxHours)} ${isOverdue ? 'animate-pulse font-bold' : ''}`}>
+                  {formatDuration(pos.timeInTradeMs)}{isOverdue ? ' OD' : ''}/{config.timebox.maxHours}h
+                </span>
+              </Tooltip>
 
-            {/* Anti-Greed Tracker - moved here as exit-related */}
-            <AntiGreedTracker
-              currentPnL={pos.unrealizedPnL}
-              highWaterMark={pos.highWaterMarkPnL}
-              drawdownPercent={pos.drawdownFromHWMPercent}
-              config={config}
-            />
+              {/* Regime badge — if available from recommendation */}
+              {recommendation?.regimeStatus && (
+                <Tooltip
+                  content={
+                    <div className="text-xs max-w-xs">
+                      <strong>Market Regime</strong>
+                      <div className="mt-1">{recommendation.regimeStatus.description}</div>
+                      <div>Threshold: {recommendation.regimeStatus.adjustedActionThreshold}</div>
+                      <div>Timebox: {recommendation.regimeStatus.adjustedTimeboxMaxHours}h</div>
+                    </div>
+                  }
+                  position="bottom"
+                >
+                  <span className={`cursor-help px-1 py-0.5 rounded text-[10px] ${
+                    recommendation.regimeStatus.regime === 'strong_trend' ? 'bg-green-500/20 text-green-400' :
+                    recommendation.regimeStatus.regime === 'trending' ? 'bg-blue-500/20 text-blue-400' :
+                    recommendation.regimeStatus.regime === 'low_volatility' ? 'bg-gray-500/20 text-gray-400' :
+                    'bg-yellow-500/20 text-yellow-400'
+                  }`}>
+                    {recommendation.regimeStatus.regime === 'strong_trend' ? 'Trend' :
+                     recommendation.regimeStatus.regime === 'trending' ? 'Trend' :
+                     recommendation.regimeStatus.regime === 'low_volatility' ? 'Low vol' :
+                     'Range'}
+                    {recommendation.regimeStatus.adx > 0 && ` ${Math.round(recommendation.regimeStatus.adx)}`}
+                  </span>
+                </Tooltip>
+              )}
+
+              {/* Peak P&L — only show when HWM is meaningful */}
+              {pos.highWaterMarkPnL >= config.antiGreed.minHWMToTrack && (
+                <Tooltip
+                  content={
+                    <div className="text-xs max-w-xs">
+                      <strong>Anti-Greed</strong>
+                      <div className="mt-1">
+                        <div>Peak: {formatPnL(pos.highWaterMarkPnL)}</div>
+                        <div>Drawdown: {pos.drawdownFromHWMPercent.toFixed(1)}%</div>
+                        <div>Trigger: {config.antiGreed.drawdownThresholdPercent}%</div>
+                      </div>
+                    </div>
+                  }
+                  position="bottom"
+                >
+                  <span className="cursor-help text-tertiary">
+                    Peak <span className="mono text-green-400">{formatPnL(pos.highWaterMarkPnL)}</span>
+                    {pos.drawdownFromHWMPercent > 10 && (
+                      <span className="text-orange-400 ml-0.5">-{pos.drawdownFromHWMPercent.toFixed(0)}%</span>
+                    )}
+                  </span>
+                </Tooltip>
+              )}
+            </div>
           </div>
         )}
 
-        {/* Fallback: show time + anti-greed without exit section if no exitSignal */}
+        {/* Fallback: compact time display when no exit signal */}
         {(!exitSignal || pos.phase === 'idle') && (
-          <>
-            <div className="p-2 rounded bg-tertiary/30">
-              <TimeInTrade
-                timeInTradeMs={pos.timeInTradeMs}
-                hoursRemaining={pos.hoursRemaining}
-                timeboxProgress={pos.timeboxProgress}
-                config={config}
-              />
-            </div>
-            <AntiGreedTracker
-              currentPnL={pos.unrealizedPnL}
-              highWaterMark={pos.highWaterMarkPnL}
-              drawdownPercent={pos.drawdownFromHWMPercent}
-              config={config}
-            />
-          </>
+          <div className="flex items-center gap-3 text-xs px-1">
+            <span className="text-tertiary">Time:</span>
+            <span className={`mono ${getTimeColor(hoursElapsed, config.timebox.maxHours)}`}>
+              {formatDuration(pos.timeInTradeMs)} / {config.timebox.maxHours}h
+            </span>
+            {pos.highWaterMarkPnL >= config.antiGreed.minHWMToTrack && (
+              <>
+                <span className="text-tertiary">Peak:</span>
+                <span className="mono text-green-400">{formatPnL(pos.highWaterMarkPnL)}</span>
+              </>
+            )}
+          </div>
         )}
 
         {/* ============================================================ */}

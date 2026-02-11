@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { sendBrowserNotification } from '@/components/Toast';
 import type { TradingRecommendation, TimeframeData } from '@/lib/kraken/types';
-import type { SimulatedPosition, Position } from '@/components/TradingDataProvider';
+import type { SimulatedPosition, Position, OpenOrder } from '@/components/TradingDataProvider';
 import { getDefaultStrategy } from '@/lib/trading/strategies';
 import type { DCASignal, ExitSignal } from '@/lib/trading/v2-types';
 
@@ -13,6 +13,7 @@ interface UseTradeNotificationsProps {
   price: number;
   simulatedPositions: SimulatedPosition[];
   openPositions: Position[];
+  openOrders: OpenOrder[];
   testMode: boolean;
   notificationsEnabled: boolean;
   dcaSignal?: DCASignal | null;
@@ -74,6 +75,7 @@ export function useTradeNotifications({
   price,
   simulatedPositions,
   openPositions,
+  openOrders,
   testMode,
   notificationsEnabled,
   dcaSignal,
@@ -89,6 +91,11 @@ export function useTradeNotifications({
   const lastVolumeAlertRef = useRef<number>(0);
   const lastRsiAlertRef = useRef<number>(0);
   const lastExitSignalRef = useRef<string | null>(null);
+
+  // Order fill tracking
+  const prevOpenOrdersRef = useRef<Map<string, OpenOrder>>(new Map());
+  const orderFillInitializedRef = useRef(false);
+  const cancelledOrderIdsRef = useRef<Set<string>>(new Set());
 
   // P&L / DCA tracking: Map<positionId, Set<milestone>>
   const notifiedPnlLevelsRef = useRef<Map<string, Set<number>>>(new Map());
@@ -340,6 +347,56 @@ export function useTradeNotifications({
     );
   }, [exitSignal?.shouldExit, exitSignal?.urgency, exitSignal?.totalPressure, notificationsEnabled]);
 
+  // --- 7. Order Fill Detection ---
+  // Track open orders and detect when they disappear (filled/executed)
+  useEffect(() => {
+    if (!notificationsEnabled) return;
+
+    const currentOrderIds = new Set(openOrders.map(o => o.id));
+
+    // Skip the first load — just record initial state
+    if (!orderFillInitializedRef.current) {
+      const map = new Map<string, OpenOrder>();
+      for (const order of openOrders) {
+        map.set(order.id, order);
+      }
+      prevOpenOrdersRef.current = map;
+      orderFillInitializedRef.current = true;
+      return;
+    }
+
+    // Find orders that were open before but are no longer present
+    for (const [orderId, prevOrder] of prevOpenOrdersRef.current) {
+      if (!currentOrderIds.has(orderId)) {
+        // Skip if this order was just cancelled by the user
+        if (cancelledOrderIdsRef.current.has(orderId)) {
+          cancelledOrderIdsRef.current.delete(orderId);
+          continue;
+        }
+
+        // Order disappeared — it was filled/executed
+        const side = prevOrder.type === 'buy' ? 'BUY' : 'SELL';
+        const orderTypeLabel = (prevOrder.orderType || 'market').replace(/-/g, ' ');
+        const priceStr = prevOrder.price > 0 ? ` @ €${prevOrder.price.toFixed(4)}` : '';
+        const volumeStr = prevOrder.volume > 0 ? `${prevOrder.volume.toFixed(1)} XRP` : '';
+
+        notify(
+          `Order Filled: ${side} ${volumeStr}`,
+          `${orderTypeLabel.charAt(0).toUpperCase() + orderTypeLabel.slice(1)} order executed${priceStr}`,
+          `order-fill-${orderId}`,
+          'high',
+        );
+      }
+    }
+
+    // Update previous orders ref
+    const map = new Map<string, OpenOrder>();
+    for (const order of openOrders) {
+      map.set(order.id, order);
+    }
+    prevOpenOrdersRef.current = map;
+  }, [openOrders, notificationsEnabled]);
+
   // Clean up notified levels for closed positions
   useEffect(() => {
     const positions = testMode ? simulatedPositions : openPositions;
@@ -356,4 +413,11 @@ export function useTradeNotifications({
       }
     }
   }, [simulatedPositions, openPositions, testMode]);
+
+  // Return a function to mark an order as cancelled (prevents false fill notifications)
+  return {
+    markOrderCancelled: (orderId: string) => {
+      cancelledOrderIdsRef.current.add(orderId);
+    },
+  };
 }

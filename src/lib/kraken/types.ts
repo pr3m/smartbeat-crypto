@@ -214,7 +214,8 @@ export interface AddOrderParams {
   volume: string;
   displayvol?: string; // For iceberg orders - visible amount in order book
   leverage?: string;
-  oflags?: string; // e.g., 'fcib' (fee in quote currency), 'fciq' (fee in base currency), 'post' (post-only)
+  reduce_only?: boolean; // Reduce existing position only (won't open new position)
+  oflags?: string; // Comma-delimited: 'post' (post-only), 'fcib' (fee in base), 'fciq' (fee in quote), 'nompp' (no market price protection), 'viqc' (volume in quote)
   starttm?: string;
   expiretm?: string;
   userref?: number;
@@ -362,6 +363,14 @@ export interface Indicators {
   candlestickPatterns?: CandlestickPattern[];
   /** Extended patterns with reliability, type, and candle count from new pattern library */
   extendedPatterns?: import('@/lib/trading/candlestick-patterns').ExtendedCandlestickPattern[];
+  /** ADX trend strength (0-100) */
+  adx?: number;
+  /** +DI (positive directional indicator) */
+  plusDI?: number;
+  /** -DI (negative directional indicator) */
+  minusDI?: number;
+  /** Bollinger Band width as % of price */
+  bbWidth?: number;
 }
 
 export interface TimeframeData {
@@ -512,6 +521,16 @@ export interface TradingRecommendation {
     urgency: 'immediate' | 'developing' | 'early_warning';
     description: string;
     patterns: string[]; // Pattern names for display
+  };
+  // Market regime detection
+  regimeStatus?: {
+    regime: 'strong_trend' | 'trending' | 'ranging' | 'low_volatility';
+    confidence: number;
+    adx: number;
+    bbWidthPercent: number;
+    adjustedActionThreshold: number;
+    adjustedTimeboxMaxHours: number;
+    description: string;
   };
 }
 

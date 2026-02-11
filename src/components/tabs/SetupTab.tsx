@@ -67,6 +67,7 @@ interface SetupTabProps {
 
   // Order editing
   onEditOrder?: (order: OpenOrderData) => void;
+  onOrderCancelled?: (orderId: string) => void;
 
   // Toast
   addToast: (toast: { title: string; message: string; type: 'success' | 'error' | 'signal' | 'info' | 'warning'; duration?: number }) => void;
@@ -164,6 +165,7 @@ export function SetupTab({
   handleLiquidationData,
   handleOrderExecuted,
   onEditOrder,
+  onOrderCancelled,
   addToast,
 }: SetupTabProps) {
   // Memoize chartData to prevent new array reference on every render when data is missing
@@ -184,7 +186,7 @@ export function SetupTab({
   return (
     <div className="space-y-4">
       {/* Open Orders */}
-      <OpenOrders testMode={testMode} onEditOrder={onEditOrder} defaultCollapsed />
+      <OpenOrders testMode={testMode} onEditOrder={onEditOrder} onOrderCancelled={onOrderCancelled} defaultCollapsed />
 
       {/* Open Positions - Show real or simulated based on mode */}
       {testMode ? (

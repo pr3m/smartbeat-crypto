@@ -25,6 +25,7 @@ import type {
   RiskConfig,
   LiquidationStrategyConfig,
 } from '../v2-types';
+import type { MarketRegimeConfig } from '../market-regime';
 
 // Import strategy JSON files
 import aggressiveSwing10xJson from './aggressive-swing-10x.json';
@@ -64,6 +65,7 @@ function hydrateStrategy(raw: Record<string, unknown>): TradingStrategy {
     timebox: json.timebox as unknown as TimeboxConfig,
     risk: json.risk as unknown as RiskConfig,
     liquidation: json.liquidation ? json.liquidation as unknown as LiquidationStrategyConfig : undefined,
+    regime: json.regime ? json.regime as unknown as MarketRegimeConfig : undefined,
     aiInstructions: json.aiInstructions as unknown as TradingStrategy['aiInstructions'],
   };
 }

@@ -206,6 +206,78 @@ export function calculateVolumeRatio(volumes: number[], period = 20): number {
 }
 
 /**
+ * Calculate ADX (Average Directional Index) using Wilder's smoothing
+ * Measures trend strength regardless of direction.
+ * Default period: 14 (requires 2*period+1 = 29 candles minimum)
+ */
+export function calculateADX(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  period = 14
+): { adx: number; plusDI: number; minusDI: number } {
+  const minCandles = 2 * period + 1;
+  if (highs.length < minCandles) return { adx: 0, plusDI: 0, minusDI: 0 };
+
+  // Calculate +DM, -DM and TR for each bar
+  const plusDM: number[] = [];
+  const minusDM: number[] = [];
+  const trueRanges: number[] = [];
+
+  for (let i = 1; i < highs.length; i++) {
+    const upMove = highs[i] - highs[i - 1];
+    const downMove = lows[i - 1] - lows[i];
+
+    plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
+
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    );
+    trueRanges.push(tr);
+  }
+
+  // First smoothed values are simple sums over the period
+  let smoothedPlusDM = plusDM.slice(0, period).reduce((a, b) => a + b, 0);
+  let smoothedMinusDM = minusDM.slice(0, period).reduce((a, b) => a + b, 0);
+  let smoothedTR = trueRanges.slice(0, period).reduce((a, b) => a + b, 0);
+
+  // Calculate first +DI and -DI
+  let plusDI = smoothedTR > 0 ? (smoothedPlusDM / smoothedTR) * 100 : 0;
+  let minusDI = smoothedTR > 0 ? (smoothedMinusDM / smoothedTR) * 100 : 0;
+
+  // First DX
+  const dxValues: number[] = [];
+  const diSum = plusDI + minusDI;
+  dxValues.push(diSum > 0 ? (Math.abs(plusDI - minusDI) / diSum) * 100 : 0);
+
+  // Apply Wilder's smoothing for subsequent values
+  for (let i = period; i < trueRanges.length; i++) {
+    smoothedPlusDM = smoothedPlusDM - (smoothedPlusDM / period) + plusDM[i];
+    smoothedMinusDM = smoothedMinusDM - (smoothedMinusDM / period) + minusDM[i];
+    smoothedTR = smoothedTR - (smoothedTR / period) + trueRanges[i];
+
+    plusDI = smoothedTR > 0 ? (smoothedPlusDM / smoothedTR) * 100 : 0;
+    minusDI = smoothedTR > 0 ? (smoothedMinusDM / smoothedTR) * 100 : 0;
+
+    const diSumCurr = plusDI + minusDI;
+    dxValues.push(diSumCurr > 0 ? (Math.abs(plusDI - minusDI) / diSumCurr) * 100 : 0);
+  }
+
+  // ADX is the Wilder's smoothed average of DX values
+  if (dxValues.length < period) return { adx: 0, plusDI, minusDI };
+
+  let adx = dxValues.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dxValues.length; i++) {
+    adx = (adx * (period - 1) + dxValues[i]) / period;
+  }
+
+  return { adx, plusDI, minusDI };
+}
+
+/**
  * Calculate EMA slope (rate of change over lookback period)
  * Returns percentage change per candle
  */
@@ -550,8 +622,10 @@ export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
   const rsi = calculateRSI(closes);
   const { macd, signal: macdSignal, histogram } = calculateMACD(closes);
   const { position: bbPos, upper: bbUpper, lower: bbLower } = calculateBollingerBands(closes);
+  const bbWidthPercent = currentPrice > 0 ? ((bbUpper - bbLower) / currentPrice) * 100 : 0;
   const atr = calculateATR(highs, lows, closes);
   const volRatio = calculateVolumeRatio(volumes);
+  const adxResult = calculateADX(highs, lows, closes);
 
   // === TREND ANALYSIS (EMA-based - the CORRECT way) ===
   const ema20Values = ema(closes, 20);
@@ -644,6 +718,10 @@ export function calculateIndicators(ohlc: OHLCData[]): Indicators | null {
     trendScore: trendAnalysis.trendScore,
     candlestickPatterns,
     extendedPatterns,
+    adx: adxResult.adx,
+    plusDI: adxResult.plusDI,
+    minusDI: adxResult.minusDI,
+    bbWidth: bbWidthPercent,
   };
 }
 

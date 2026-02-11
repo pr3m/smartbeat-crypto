@@ -141,6 +141,22 @@
     }
   },
 
+  "regime": {
+    "strongTrendADX": 35,
+    "trendingADX": 20,
+    "lowVolBBWidth": 0.8,
+    "highVolBBWidth": 2.5,
+    "rangingActionThreshold": 75,
+    "strongTrendActionThreshold": 60,
+    "trendingActionThreshold": 68,
+    "strongTrendMaxHours": 72,
+    "trendingMaxHours": 48,
+    "rangingMaxHours": 36,
+    "strongTrendTimeboxWeight": 0.05,
+    "trendingTimeboxWeight": 0.10,
+    "rangingTimeboxWeight": 0.20
+  },
+
   "risk": {
     "useStopLoss": false,
     "useFixedTP": false,
@@ -160,7 +176,7 @@
       "Entry requires 68+ action threshold with 15+ direction lead"
     ],
     "dcaGuidance": "DCA is NOT about price dropping X%. It's about momentum exhaustion. The 5 signals are: (1) RSI divergence/extreme on 15m, (2) Volume drying up on 5m/15m, (3) MACD histogram contracting toward zero, (4) BB position returning to middle (volatility calming), (5) Price stabilizing (higher lows for long DCA, lower highs for short DCA). Need 3+ signals active + minimum drawdown of 3% + minimum time between DCAs.",
-    "exitGuidance": "Exits use a pressure-based system with threshold of 60. Seven pressure sources: timebox (step function over 48h), trend reversal (HTF flip), momentum exhaustion (favorable momentum dying), anti-greed (50% drawdown from HWM when HWM > 100 EUR), condition deterioration (3+ entry conditions flipped), knife detection (sharp move against position), manual override. Exit is NEVER recommended when P&L is negative.",
+    "exitGuidance": "Exits are PROFIT-SEEKING, not time-driven. Market regime (ADX + BB width) adjusts timebox dynamically: strong trends get 72h, ranging markets get 36h. Timebox is a backstop (weight 0.05-0.20), not the driver. Nine pressure sources: timebox (regime-aware), RSI exhaustion, MACD reversal, volume dry-up, momentum fading, trend reversal, anti-greed, candlestick reversal, and knife detection. Profitable trades get higher exit thresholds (+20% P&L needs 70 pressure, +10% needs 65). Knife impulse/capitulation against position triggers immediate exit pressure. Exit is NEVER recommended when P&L is negative.",
     "responseRules": [
       "Always reference actual strategy parameters, never guess thresholds",
       "When asked about DCA, call get_v2_engine_state to check momentum exhaustion signals",

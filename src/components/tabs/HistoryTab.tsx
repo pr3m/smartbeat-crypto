@@ -46,6 +46,7 @@ export function HistoryTab({ testMode }: HistoryTabProps) {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterType>('all');
   const [timeRange, setTimeRange] = useState<TimeRange>('all');
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     const fetchHistory = async () => {
@@ -72,7 +73,7 @@ export function HistoryTab({ testMode }: HistoryTabProps) {
     };
 
     fetchHistory();
-  }, [testMode]);
+  }, [testMode, refreshKey]);
 
   // Filter by time range
   const timeFilteredPositions = useMemo(() => {
@@ -204,12 +205,21 @@ export function HistoryTab({ testMode }: HistoryTabProps) {
             {filteredPositions.length} closed position{filteredPositions.length !== 1 ? 's' : ''}
           </p>
         </div>
-        <div className={`px-3 py-1 rounded-full text-sm font-semibold ${
-          testMode
-            ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30'
-            : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-        }`}>
-          {testMode ? 'Paper Trading' : 'Live Trades'}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setRefreshKey(k => k + 1)}
+            disabled={loading}
+            className="text-xs text-tertiary hover:text-secondary transition-colors px-2 py-1 rounded hover:bg-tertiary"
+          >
+            {loading ? 'Loading...' : 'Refresh'}
+          </button>
+          <div className={`px-3 py-1 rounded-full text-sm font-semibold ${
+            testMode
+              ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30'
+              : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+          }`}>
+            {testMode ? 'Paper Trading' : 'Live Trades'}
+          </div>
         </div>
       </div>
 

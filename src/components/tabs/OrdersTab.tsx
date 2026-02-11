@@ -8,12 +8,14 @@ interface OrdersTabProps {
   testMode: boolean;
   onEditOrder?: (order: OpenOrderData) => void;
   onEditDraft?: (draft: DraftOrder) => void;
+  onOrderCancelled?: (orderId: string) => void;
 }
 
 export function OrdersTab({
   testMode,
   onEditOrder,
   onEditDraft,
+  onOrderCancelled,
 }: OrdersTabProps) {
   const {
     openOrders,
@@ -90,7 +92,7 @@ export function OrdersTab({
               {testMode ? 'TEST' : 'LIVE'}
             </span>
           </h3>
-          <OpenOrders testMode={testMode} onEditOrder={onEditOrder} defaultCollapsed />
+          <OpenOrders testMode={testMode} onEditOrder={onEditOrder} onOrderCancelled={onOrderCancelled} defaultCollapsed />
         </div>
       )}
 

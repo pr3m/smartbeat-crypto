@@ -639,6 +639,8 @@ export interface TradingStrategy {
   risk: RiskConfig;
   /** Liquidation zone-aware scoring config */
   liquidation?: LiquidationStrategyConfig;
+  /** Market regime detection config */
+  regime?: import('./market-regime').MarketRegimeConfig;
   /** Optional AI instructions for strategy-aware assistant */
   aiInstructions?: AIInstructions;
 }

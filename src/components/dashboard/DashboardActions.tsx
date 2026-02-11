@@ -343,7 +343,9 @@ function IdleActions({
   }
 
   // Determine trade direction from recommendation
-  const direction = recommendation.action === 'SHORT' ? 'short' : 'long';
+  const direction = recommendation.action === 'SHORT' ? 'short'
+    : recommendation.action === 'LONG' ? 'long'
+    : (recommendation.short.strength > recommendation.long.strength ? 'short' : 'long');
 
   return (
     <div className="space-y-2">
