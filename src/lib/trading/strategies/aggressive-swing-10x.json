@@ -31,7 +31,9 @@
       "flow": 4,
       "liq": 6,
       "candlestick": 4,
-      "reversal": 12
+      "reversal": 12,
+      "marketStructure": 10,
+      "keyLevelProximity": 8
     },
 
     "gradeThresholds": {
@@ -155,6 +157,37 @@
     "strongTrendTimeboxWeight": 0.05,
     "trendingTimeboxWeight": 0.10,
     "rangingTimeboxWeight": 0.20
+  },
+
+  "keyLevels": {
+    "nearProximityPct": 1.0,
+    "strongProximityPct": 0.5,
+    "minTouches": 2,
+    "minStrength": "moderate",
+    "rrMinRatio": 1.5,
+    "rrWarningRatio": 1.0
+  },
+
+  "session": {
+    "enabled": true,
+    "asiaDiscount": -5,
+    "transitionDiscount": -3,
+    "weekendDiscount": -8,
+    "overlapBonus": 3
+  },
+
+  "spreadGuard": {
+    "enabled": true,
+    "warnMultiplier": 1.5,
+    "blockMultiplier": 3.0,
+    "blockPenalty": -15,
+    "warnPenalty": -5
+  },
+
+  "derivatives": {
+    "oiRisingThresholdPct": 5,
+    "oiFallingThresholdPct": -5,
+    "fundingExtremeThreshold": 0.01
   },
 
   "risk": {

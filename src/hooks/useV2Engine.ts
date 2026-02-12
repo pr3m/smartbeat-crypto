@@ -471,7 +471,9 @@ export function useV2Engine(
         strategy,
         positionReversalSignal,
         recommendation?.knifeStatus ?? null,
-        exitRegimeAnalysis
+        exitRegimeAnalysis,
+        null, // micro: not available from context yet
+        ind4h
       );
     }
 

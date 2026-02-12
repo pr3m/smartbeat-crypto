@@ -400,6 +400,8 @@ export interface DirectionRecommendation {
     macdMomentum: ChecklistItem;
     flowConfirm?: ChecklistItem;
     liqBias?: ChecklistItem;
+    marketStructure?: ChecklistItem; // HH/HL vs LH/LL structure
+    keyLevelProximity?: ChecklistItem; // S/R level proximity + RR
   };
   passedCount: number;
   totalCount: number;
@@ -470,6 +472,8 @@ export interface TradingRecommendation {
     flowConfirm?: ChecklistItem; // Option B: Flow confirmation
     liqBias?: ChecklistItem; // Liquidation bias alignment
     reversalSignal?: ChecklistItem; // Reversal pattern confluence
+    marketStructure?: ChecklistItem; // HH/HL vs LH/LL structure
+    keyLevelProximity?: ChecklistItem; // S/R level proximity + RR
   };
   // Option A: Flow analysis
   flowStatus?: {

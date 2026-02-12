@@ -317,14 +317,29 @@ function getPressureBarColor(percent: number): string {
 /** Short readable label for pressure source */
 function pressureLabel(source: string): string {
   switch (source) {
-    case 'timebox_expired': return 'Timebox';
-    case 'timebox_approaching': return 'Timebox';
-    case 'momentum_exhaustion': return 'Momentum';
-    case 'condition_deterioration': return 'Volume';
-    case 'anti_greed': return 'Anti-greed';
-    case 'trend_reversal': return 'Trend flip';
-    case 'reversal_detected': return 'Reversal';
+    case 'timebox_expired': return 'Time';
+    case 'timebox_approaching': return 'Time';
+    case 'momentum_exhaustion': return 'Mom';
+    case 'condition_deterioration': return 'Vol';
+    case 'anti_greed': return 'Greed';
+    case 'trend_reversal': return 'Trend';
+    case 'reversal_detected': return 'Rev';
     case 'knife_detected': return 'Knife';
+    default: return source.replace(/_/g, ' ').slice(0, 5);
+  }
+}
+
+/** Full label for tooltip */
+function pressureFullLabel(source: string): string {
+  switch (source) {
+    case 'timebox_expired': return 'Timebox expired';
+    case 'timebox_approaching': return 'Timebox approaching';
+    case 'momentum_exhaustion': return 'Momentum exhaustion';
+    case 'condition_deterioration': return 'Volume decline';
+    case 'anti_greed': return 'Anti-greed';
+    case 'trend_reversal': return 'Trend reversal';
+    case 'reversal_detected': return 'Reversal pattern';
+    case 'knife_detected': return 'Knife detected';
     default: return source.replace(/_/g, ' ');
   }
 }
@@ -339,26 +354,27 @@ function PressureBreakdown({ pressures }: { pressures: ExitPressure[] }) {
   if (meaningful.length === 0) return null;
 
   return (
-    <div className="space-y-1 mt-2">
+    <div className="space-y-1.5 mt-2">
       {meaningful.map((p, i) => {
         const pct = Math.min(Math.round(p.value), 100);
         const barColor = getPressureBarColor(pct);
         return (
           <Tooltip
             key={i}
-            content={<div className="text-xs max-w-xs">{p.detail}</div>}
+            content={<div className="text-xs max-w-xs"><strong>{pressureFullLabel(p.source)}</strong><p className="mt-0.5">{p.detail}</p></div>}
             position="bottom"
+            block
           >
             <div className="cursor-help">
-              <div className="flex items-center gap-1.5 text-[11px]">
-                <span className="text-tertiary w-[56px] truncate">{pressureLabel(p.source)}</span>
-                <div className="flex-1 h-1 bg-gray-700 rounded-full overflow-hidden">
+              <div className="flex items-center gap-2 text-[11px]">
+                <span className="text-tertiary shrink-0 w-[36px]">{pressureLabel(p.source)}</span>
+                <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden min-w-[40px]">
                   <div
                     className={`h-full rounded-full transition-all duration-500 ${barColor}`}
                     style={{ width: `${pct}%` }}
                   />
                 </div>
-                <span className="mono text-tertiary w-[28px] text-right">{pct}%</span>
+                <span className="mono text-tertiary shrink-0 w-[30px] text-right">{pct}%</span>
               </div>
             </div>
           </Tooltip>

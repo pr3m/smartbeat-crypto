@@ -6,6 +6,7 @@ import type { AIAnalysisResponse } from '@/lib/ai/types';
 import type { LiquidationAnalysis } from '@/lib/trading/liquidation';
 import { CandlestickChart } from '@/components/CandlestickChart';
 import { Tooltip, HelpIcon } from '@/components/Tooltip';
+import { getTradingSession } from '@/lib/trading/session';
 import { MarketMicrostructure } from '@/components/microstructure';
 import { LiquidationHeatmap } from '@/components/LiquidationHeatmap';
 import { AIAnalysisPanel } from '@/components/AIAnalysisPanel';
@@ -443,6 +444,34 @@ export function SetupTab({
             >
               {priceChange >= 0 ? '+' : ''}{priceChange.toFixed(2)}%
             </span>
+            {/* Session Badge */}
+            {(() => {
+              const session = getTradingSession();
+              const sessionColors: Record<string, string> = {
+                overlap_europe_us: 'bg-green-500/20 text-green-400 border-green-500/30',
+                europe: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+                us: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+                asia: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
+                transition: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
+              };
+              const sessionLabels: Record<string, string> = {
+                overlap_europe_us: 'EU+US',
+                europe: 'Europe',
+                us: 'US',
+                asia: 'Asia',
+                transition: 'Late',
+              };
+              return (
+                <Tooltip
+                  content={<div className="text-xs max-w-xs"><strong>Trading Session</strong><p className="mt-1">{session.description}</p><p className="mt-1 text-tertiary">{session.marketHours}</p></div>}
+                  position="bottom"
+                >
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] border ${sessionColors[session.phase] || 'bg-gray-500/20 text-gray-400 border-gray-500/30'}`}>
+                    {session.isWeekend ? '🔇 ' : ''}{sessionLabels[session.phase] || session.phase}
+                  </span>
+                </Tooltip>
+              );
+            })()}
           </div>
           <div className="flex gap-6 text-xs">
             <div className="text-center">
@@ -459,6 +488,20 @@ export function SetupTab({
             </div>
           </div>
         </div>
+        {/* Spread Warning Bar */}
+        {recommendation?.flowStatus?.spreadStatus === 'wide' && (
+          <div className="mt-2 px-3 py-1.5 rounded bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 text-xs flex items-center gap-2">
+            <span>⚠️</span>
+            <span>Wide spread detected — entry costs may be higher than normal</span>
+          </div>
+        )}
+        {/* Nearest S/R Levels */}
+        {recommendation?.checklist?.keyLevelProximity && (
+          <div className="mt-2 flex items-center gap-3 text-xs text-tertiary">
+            <span className="text-amber-400/80">S/R:</span>
+            <span className="mono">{recommendation.checklist.keyLevelProximity.value}</span>
+          </div>
+        )}
       </div>
 
       {/* MTF Analysis */}

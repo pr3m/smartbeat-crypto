@@ -24,6 +24,9 @@ import { DEFAULT_STRATEGY } from './v2-types';
 import { detectKnife, KNIFE_GATING_ENABLED, type KnifeAnalysis } from './knife-detection';
 import { detectReversal, type ReversalSignal, NO_REVERSAL } from './reversal-detector';
 import { detectMarketRegime, type MarketRegimeAnalysis } from './market-regime';
+import { analyzeTimeframe, buildChartContext, findSwingPoints, type TrendStructure, type PriceLevel } from './chart-context';
+import { getTradingSession } from './session';
+import type { KeyLevelConfig, SessionFilterConfig, SpreadGuardConfig, DerivativesConfig } from './v2-types';
 
 export interface TimeframeWeights {
   '1d': number;
@@ -1140,7 +1143,12 @@ export function formatChecklist(
   liq?: LiquidationInput | null,
   ind1d?: Indicators | null,
   liqConfig?: LiquidationStrategyConfig,
-  reversalSignal?: ReversalSignal | null
+  reversalSignal?: ReversalSignal | null,
+  ohlc4h?: OHLCData[],
+  ohlc1h?: OHLCData[],
+  confluentLevels?: PriceLevel[],
+  currentPrice?: number,
+  strategy?: TradingStrategy
 ): TradingRecommendation['checklist'] {
   const flowAnalysis = micro ? analyzeFlow(direction, micro) : null;
   const liqAnalysis = liq ? analyzeLiquidation(direction, liq, liqConfig) : null;
@@ -1222,7 +1230,219 @@ export function formatChecklist(
     };
   }
 
+  // Add market structure to checklist
+  if (ohlc4h || ohlc1h) {
+    const ms = evaluateMarketStructure(direction, ohlc4h, ohlc1h);
+    checklist.marketStructure = {
+      pass: ms.value >= 0.6,
+      value: ms.description,
+    };
+  }
+
+  // Add key level proximity to checklist
+  if (confluentLevels && confluentLevels.length > 0 && currentPrice && currentPrice > 0) {
+    const kl = evaluateKeyLevelProximity(direction, currentPrice, confluentLevels, strategy?.keyLevels);
+    checklist.keyLevelProximity = {
+      pass: kl.value >= 0.55,
+      value: kl.description + (kl.rrWarning ? ' ⚠' : ''),
+    };
+  }
+
   return checklist;
+}
+
+/**
+ * Evaluate market structure (HH/HL vs LH/LL) from swing points.
+ * Uses existing chart-context.ts TrendStructure analysis.
+ * 4H structure weighs 60%, 1H 40%.
+ */
+export function evaluateMarketStructure(
+  direction: 'long' | 'short',
+  ohlc4h: OHLCData[] | undefined,
+  ohlc1h: OHLCData[] | undefined
+): { value: number; description: string } {
+  let score4h = 0.5;
+  let score1h = 0.5;
+  let desc4h = '';
+  let desc1h = '';
+
+  if (ohlc4h && ohlc4h.length >= 20) {
+    const ctx4h = analyzeTimeframe(ohlc4h, 240, '4H');
+    if (ctx4h) {
+      const t = ctx4h.trend;
+      if (direction === 'long') {
+        if (t.direction === 'uptrend') {
+          score4h = t.strength === 'strong' ? 1.0 : t.strength === 'moderate' ? 0.85 : 0.7;
+        } else if (t.direction === 'sideways') {
+          score4h = 0.45;
+        } else {
+          score4h = t.strength === 'strong' ? 0.1 : t.strength === 'moderate' ? 0.2 : 0.3;
+        }
+      } else {
+        if (t.direction === 'downtrend') {
+          score4h = t.strength === 'strong' ? 1.0 : t.strength === 'moderate' ? 0.85 : 0.7;
+        } else if (t.direction === 'sideways') {
+          score4h = 0.45;
+        } else {
+          score4h = t.strength === 'strong' ? 0.1 : t.strength === 'moderate' ? 0.2 : 0.3;
+        }
+      }
+      desc4h = `4H ${t.direction}(${t.strength}) HH${t.higherHighs}/HL${t.higherLows}/LH${t.lowerHighs}/LL${t.lowerLows}`;
+    }
+  }
+
+  if (ohlc1h && ohlc1h.length >= 20) {
+    const ctx1h = analyzeTimeframe(ohlc1h, 60, '1H');
+    if (ctx1h) {
+      const t = ctx1h.trend;
+      if (direction === 'long') {
+        if (t.direction === 'uptrend') {
+          score1h = t.strength === 'strong' ? 1.0 : t.strength === 'moderate' ? 0.85 : 0.7;
+        } else if (t.direction === 'sideways') {
+          score1h = 0.45;
+        } else {
+          score1h = t.strength === 'strong' ? 0.1 : t.strength === 'moderate' ? 0.2 : 0.3;
+        }
+      } else {
+        if (t.direction === 'downtrend') {
+          score1h = t.strength === 'strong' ? 1.0 : t.strength === 'moderate' ? 0.85 : 0.7;
+        } else if (t.direction === 'sideways') {
+          score1h = 0.45;
+        } else {
+          score1h = t.strength === 'strong' ? 0.1 : t.strength === 'moderate' ? 0.2 : 0.3;
+        }
+      }
+      desc1h = `1H ${t.direction}(${t.strength})`;
+    }
+  }
+
+  // 4H weighs 60%, 1H weighs 40%
+  const value = score4h * 0.6 + score1h * 0.4;
+  const description = [desc4h, desc1h].filter(Boolean).join(' | ') || 'No structure data';
+
+  return { value: Math.max(0, Math.min(1, value)), description };
+}
+
+/**
+ * Evaluate key level proximity and risk/reward.
+ * Uses existing confluent levels from chart-context.ts.
+ * Scores higher when price is near support (for long) or resistance (for short).
+ */
+export function evaluateKeyLevelProximity(
+  direction: 'long' | 'short',
+  currentPrice: number,
+  confluentLevels: PriceLevel[],
+  config?: KeyLevelConfig
+): { value: number; description: string; rrRatio: number | null; rrWarning: boolean } {
+  const nearPct = config?.nearProximityPct ?? 1.0;
+  const strongPct = config?.strongProximityPct ?? 0.5;
+  const minTouches = config?.minTouches ?? 2;
+  const rrMinRatio = config?.rrMinRatio ?? 1.5;
+  const rrWarningRatio = config?.rrWarningRatio ?? 1.0;
+  const minStrength = config?.minStrength ?? 'moderate';
+  const strengthRank: Record<PriceLevel['strength'], number> = {
+    strong: 3,
+    moderate: 2,
+    weak: 1,
+  };
+
+  if (!confluentLevels || confluentLevels.length === 0 || currentPrice <= 0) {
+    return { value: 0.5, description: 'No key levels', rrRatio: null, rrWarning: false };
+  }
+
+  // Find nearest support and resistance
+  const supports = confluentLevels
+    .filter(l => l.type === 'support' && l.price < currentPrice && l.touches >= minTouches)
+    .filter(l => strengthRank[l.strength] >= strengthRank[minStrength])
+    .sort((a, b) => b.price - a.price); // closest first
+
+  const resistances = confluentLevels
+    .filter(l => l.type === 'resistance' && l.price > currentPrice && l.touches >= minTouches)
+    .filter(l => strengthRank[l.strength] >= strengthRank[minStrength])
+    .sort((a, b) => a.price - b.price); // closest first
+
+  const nearestSupport = supports[0];
+  const nearestResistance = resistances[0];
+
+  let value = 0.5; // neutral baseline
+  const descParts: string[] = [];
+
+  if (direction === 'long') {
+    // For longs: near support = good (bouncing off support), near resistance = bad (capped upside)
+    if (nearestSupport) {
+      const distPct = ((currentPrice - nearestSupport.price) / currentPrice) * 100;
+      if (distPct <= strongPct) {
+        value += 0.35;
+        descParts.push(`Near strong support ${nearestSupport.price.toFixed(5)} (${distPct.toFixed(1)}%)`);
+      } else if (distPct <= nearPct) {
+        value += 0.2;
+        descParts.push(`Near support ${nearestSupport.price.toFixed(5)} (${distPct.toFixed(1)}%)`);
+      }
+      // Strength bonus
+      if (nearestSupport.strength === 'strong') value += 0.05;
+    }
+    if (nearestResistance) {
+      const distPct = ((nearestResistance.price - currentPrice) / currentPrice) * 100;
+      if (distPct <= strongPct) {
+        value -= 0.2; // Very close to resistance = limited upside
+        descParts.push(`Resistance overhead ${nearestResistance.price.toFixed(5)} (${distPct.toFixed(1)}%)`);
+      }
+    }
+  } else {
+    // For shorts: near resistance = good (rejecting at resistance), near support = bad
+    if (nearestResistance) {
+      const distPct = ((nearestResistance.price - currentPrice) / currentPrice) * 100;
+      if (distPct <= strongPct) {
+        value += 0.35;
+        descParts.push(`Near strong resistance ${nearestResistance.price.toFixed(5)} (${distPct.toFixed(1)}%)`);
+      } else if (distPct <= nearPct) {
+        value += 0.2;
+        descParts.push(`Near resistance ${nearestResistance.price.toFixed(5)} (${distPct.toFixed(1)}%)`);
+      }
+      if (nearestResistance.strength === 'strong') value += 0.05;
+    }
+    if (nearestSupport) {
+      const distPct = ((currentPrice - nearestSupport.price) / currentPrice) * 100;
+      if (distPct <= strongPct) {
+        value -= 0.2;
+        descParts.push(`Support below ${nearestSupport.price.toFixed(5)} (${distPct.toFixed(1)}%)`);
+      }
+    }
+  }
+
+  // Calculate RR ratio
+  let rrRatio: number | null = null;
+  let rrWarning = false;
+  let rrBelowMin = false;
+  if (direction === 'long' && nearestSupport && nearestResistance) {
+    const risk = currentPrice - nearestSupport.price;
+    const reward = nearestResistance.price - currentPrice;
+    if (risk > 0) {
+      rrRatio = reward / risk;
+      rrWarning = rrRatio < rrWarningRatio;
+      rrBelowMin = rrRatio < rrMinRatio;
+      descParts.push(`RR ${rrRatio.toFixed(1)}:1`);
+    }
+  } else if (direction === 'short' && nearestSupport && nearestResistance) {
+    const risk = nearestResistance.price - currentPrice;
+    const reward = currentPrice - nearestSupport.price;
+    if (risk > 0) {
+      rrRatio = reward / risk;
+      rrWarning = rrRatio < rrWarningRatio;
+      rrBelowMin = rrRatio < rrMinRatio;
+      descParts.push(`RR ${rrRatio.toFixed(1)}:1`);
+    }
+  }
+
+  if (rrBelowMin) {
+    value -= 0.2;
+    descParts.push(`RR below min ${rrMinRatio.toFixed(1)}:1`);
+  }
+
+  value = Math.max(0, Math.min(1, value));
+  const description = descParts.length > 0 ? descParts.join(', ') : 'No nearby levels';
+
+  return { value, description, rrRatio, rrWarning };
 }
 
 /**
@@ -1256,7 +1476,12 @@ export function calculateDirectionStrength(
   micro: MicrostructureInput | null,
   liq: LiquidationInput | null,
   signalConfig: SignalEvaluationConfig = DEFAULT_STRATEGY.signals,
-  reversalSignal?: ReversalSignal | null
+  reversalSignal?: ReversalSignal | null,
+  ohlc4h?: OHLCData[],
+  ohlc1h?: OHLCData[],
+  confluentLevels?: PriceLevel[],
+  currentPrice?: number,
+  strategy?: TradingStrategy
 ): { strength: number; signals: SignalWeight[]; reasons: string[]; warnings: string[] } {
   const signals: SignalWeight[] = [];
   const reasons: string[] = [];
@@ -1447,7 +1672,8 @@ export function calculateDirectionStrength(
     }
   }
 
-  // 9. Liquidation zones (weight: liq, default 6) - When available
+  // 9. Liquidation zones + derivatives (weight: liq, default 6) - When available
+  // Enhanced with OI trend and funding extreme detection (Phase 2)
   if (liq && liq.currentPrice > 0) {
     const liqAnalysis = analyzeLiquidation(direction, liq);
     let liqValue = 0.5; // Neutral baseline
@@ -1464,6 +1690,27 @@ export function calculateDirectionStrength(
     if (liqAnalysis.asymmetry === 'strong_aligned') liqValue += 0.15;
     else if (liqAnalysis.asymmetry === 'mild_aligned') liqValue += 0.08;
     else if (liqAnalysis.asymmetry === 'opposing') liqValue -= 0.1;
+
+    // Funding extreme detection (derivatives enhancement)
+    const derivConfig = strategy?.derivatives;
+    const fundingThreshold = derivConfig?.fundingExtremeThreshold ?? 0.01;
+    if (liq.fundingRate !== null) {
+      const fr = liq.fundingRate;
+      if (direction === 'long' && fr < -fundingThreshold) {
+        // Extremely negative funding = shorts paying longs = bullish
+        liqValue += 0.1;
+        reasons.push(`Funding extreme: ${(fr * 100).toFixed(3)}% (bullish)`);
+      } else if (direction === 'long' && fr > fundingThreshold) {
+        // Extremely positive funding = longs paying shorts = crowded long = bearish for longs
+        liqValue -= 0.1;
+      } else if (direction === 'short' && fr > fundingThreshold) {
+        // Extremely positive funding = crowded long = good for shorts
+        liqValue += 0.1;
+        reasons.push(`Funding extreme: +${(fr * 100).toFixed(3)}% (bearish)`);
+      } else if (direction === 'short' && fr < -fundingThreshold) {
+        liqValue -= 0.1;
+      }
+    }
 
     liqValue = Math.max(0, Math.min(1, liqValue));
 
@@ -1552,6 +1799,25 @@ export function calculateDirectionStrength(
   } else {
     // No reversal detected — neutral contribution (doesn't help or hurt)
     signals.push({ name: 'Reversal', weight: reversalWeight, value: 0.5 });
+  }
+
+  // 12. Market Structure (weight: configurable, default 10) — HH/HL vs LH/LL swing analysis
+  const marketStructureWeight = w.marketStructure ?? 10;
+  if (marketStructureWeight > 0 && (ohlc4h || ohlc1h)) {
+    const ms = evaluateMarketStructure(direction, ohlc4h, ohlc1h);
+    signals.push({ name: 'Structure', weight: marketStructureWeight, value: ms.value });
+    if (ms.value >= 0.75) reasons.push(`Structure: ${ms.description}`);
+    if (ms.value < 0.3) warnings.push(`⚠️ Structure opposes: ${ms.description}`);
+  }
+
+  // 13. Key Level Proximity (weight: configurable, default 8) — S/R distance + RR check
+  const keyLevelWeight = w.keyLevelProximity ?? 8;
+  if (keyLevelWeight > 0 && confluentLevels && confluentLevels.length > 0 && currentPrice && currentPrice > 0) {
+    const klConfig = strategy?.keyLevels;
+    const kl = evaluateKeyLevelProximity(direction, currentPrice, confluentLevels, klConfig);
+    signals.push({ name: 'Key Levels', weight: keyLevelWeight, value: kl.value });
+    if (kl.value >= 0.7) reasons.push(`Levels: ${kl.description}`);
+    if (kl.rrWarning) warnings.push(`⚠️ Poor RR: ${kl.description}`);
   }
 
   // Calculate weighted strength
@@ -1761,13 +2027,25 @@ export function generateRecommendation(
     });
   }
 
+  // Build chart context for market structure + key level analysis
+  const ohlcMap: Record<number, OHLCData[]> = {};
+  if (tf4h.ohlc) ohlcMap[240] = tf4h.ohlc;
+  if (tf1h.ohlc) ohlcMap[60] = tf1h.ohlc;
+  if (tf15m.ohlc) ohlcMap[15] = tf15m.ohlc;
+  if (tf5m.ohlc) ohlcMap[5] = tf5m.ohlc;
+  const chartContext = Object.keys(ohlcMap).length > 0
+    ? buildChartContext(ohlcMap, pair || 'XRPEUR')
+    : null;
+  const confluentLevels = chartContext?.confluentLevels ?? [];
+  const effectivePrice = currentPrice ?? (tf15m.ohlc?.[tf15m.ohlc.length - 1]?.close) ?? 0;
+
   // Evaluate both directions (with microstructure, liquidation, and daily data)
   const longChecks = evaluateLongConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d);
   const shortChecks = evaluateShortConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d);
 
-  // Calculate weighted strength scores for BOTH directions (with reversal intelligence)
-  const longStrengthResult = calculateDirectionStrength('long', longChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal);
-  const shortStrengthResult = calculateDirectionStrength('short', shortChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal);
+  // Calculate weighted strength scores for BOTH directions (with reversal + structure + levels)
+  const longStrengthResult = calculateDirectionStrength('long', longChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat);
+  const shortStrengthResult = calculateDirectionStrength('short', shortChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat);
 
   // Base score (6-7 conditions depending on daily availability, excluding flowConfirm and liqBias)
   const longPassed = countPassed(longChecks, false);
@@ -1781,11 +2059,13 @@ export function generateRecommendation(
   let totalItems = getTotalBaseConditions(longChecks);
   if (micro) totalItems++;
   if (liq) totalItems++;
+  if (tf4h.ohlc || tf1h.ohlc) totalItems++;
+  if (confluentLevels.length > 0 && effectivePrice > 0) totalItems++;
 
   // Format checklists for BOTH directions
   const liqConfig = strat.liquidation;
-  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal);
-  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal);
+  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat);
+  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat);
 
   // Determine which setup is stronger (based on weighted strength)
   const bestSetup = longStrengthResult.strength >= shortStrengthResult.strength ? 'long' : 'short';
@@ -1961,6 +2241,46 @@ export function generateRecommendation(
       confidence += Math.round(reversalSignal.confidence / 10); // +5 to +10
     } else if (!recAligns && reversalSignal.confidence >= 40) {
       confidence -= Math.round(reversalSignal.confidence / 8); // -5 to -12
+    }
+  }
+
+  // Session filter — adjust confidence based on trading session
+  const sessionConfig = strat.session;
+  if (sessionConfig?.enabled) {
+    const session = getTradingSession();
+    if (session.isWeekend) {
+      confidence += sessionConfig.weekendDiscount;
+      allWarnings.push(`Weekend session (${sessionConfig.weekendDiscount})`);
+    } else if (session.phase === 'asia') {
+      confidence += sessionConfig.asiaDiscount;
+    } else if (session.phase === 'transition') {
+      confidence += sessionConfig.transitionDiscount;
+    } else if (session.phase === 'overlap_europe_us') {
+      confidence += sessionConfig.overlapBonus;
+    }
+  }
+
+  // Spread guardrail — penalize/block when spread is abnormally wide
+  const spreadConfig = strat.spreadGuard;
+  if (spreadConfig?.enabled && micro && micro.avgSpreadPercent > 0) {
+    const spreadRatio = micro.spreadPercent / micro.avgSpreadPercent;
+    if (spreadRatio >= spreadConfig.blockMultiplier) {
+      confidence += spreadConfig.blockPenalty;
+      allWarnings.push(`⚠️ Wide spread ${spreadRatio.toFixed(1)}x avg (${spreadConfig.blockPenalty})`);
+    } else if (spreadRatio >= spreadConfig.warnMultiplier) {
+      confidence += spreadConfig.warnPenalty;
+      allWarnings.push(`Spread ${spreadRatio.toFixed(1)}x avg (${spreadConfig.warnPenalty})`);
+    }
+  }
+
+  // RR warning from key level analysis
+  if (confluentLevels.length > 0 && effectivePrice > 0 && action !== 'WAIT') {
+    const rrDir = action === 'LONG' ? 'long' : action === 'SHORT' ? 'short' : null;
+    if (rrDir) {
+      const rrCheck = evaluateKeyLevelProximity(rrDir, effectivePrice, confluentLevels, strat.keyLevels);
+      if (rrCheck.rrWarning && rrCheck.rrRatio !== null) {
+        allWarnings.push(`⚠️ Low RR ratio ${rrCheck.rrRatio.toFixed(1)}:1 (min ${strat.keyLevels?.rrWarningRatio ?? 1.0}:1)`);
+      }
     }
   }
 

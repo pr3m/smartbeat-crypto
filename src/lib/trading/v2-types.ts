@@ -469,6 +469,8 @@ export interface DirectionWeightMap {
   liq: number;
   candlestick: number;
   reversal: number;
+  marketStructure?: number;
+  keyLevelProximity?: number;
 }
 
 /** Liquidation zone-aware strategy config */
@@ -500,6 +502,60 @@ export interface LiquidationStrategyConfig {
     fundingConfirm: number;
     proximityBonus: number;
   };
+}
+
+/** Key level proximity config for S/R scoring and RR checks */
+export interface KeyLevelConfig {
+  /** Proximity threshold (%) for "near a level" */
+  nearProximityPct: number;
+  /** Proximity threshold (%) for "strong proximity" (very close) */
+  strongProximityPct: number;
+  /** Minimum touches for a level to count */
+  minTouches: number;
+  /** Minimum level strength */
+  minStrength: 'strong' | 'moderate' | 'weak';
+  /** Minimum risk/reward ratio for entry */
+  rrMinRatio: number;
+  /** RR below this triggers a warning */
+  rrWarningRatio: number;
+}
+
+/** Session filter config - confidence adjustments based on trading session */
+export interface SessionFilterConfig {
+  /** Enable session-based confidence adjustments */
+  enabled: boolean;
+  /** Confidence penalty during Asia session (00:00-07:00 UTC) */
+  asiaDiscount: number;
+  /** Confidence penalty during transition period (21:00-00:00 UTC) */
+  transitionDiscount: number;
+  /** Confidence penalty during weekend */
+  weekendDiscount: number;
+  /** Confidence bonus during Europe-US overlap (13:00-16:00 UTC) */
+  overlapBonus: number;
+}
+
+/** Spread guardrail config - gates/penalizes entry when spread is abnormally wide */
+export interface SpreadGuardConfig {
+  /** Enable spread guardrail */
+  enabled: boolean;
+  /** Spread ratio (current/avg) above this triggers a warning */
+  warnMultiplier: number;
+  /** Spread ratio above this triggers a hard block */
+  blockMultiplier: number;
+  /** Confidence penalty for block-level spread */
+  blockPenalty: number;
+  /** Confidence penalty for warn-level spread */
+  warnPenalty: number;
+}
+
+/** Derivatives config - OI trend + funding extreme enhancements for liq signal */
+export interface DerivativesConfig {
+  /** OI rising threshold (%) - OI up this much = rising trend */
+  oiRisingThresholdPct: number;
+  /** OI falling threshold (%) - OI down this much = falling trend */
+  oiFallingThresholdPct: number;
+  /** Funding rate beyond this = extreme (triggers signal adjustment) */
+  fundingExtremeThreshold: number;
 }
 
 /** Spike detection config for 5m timeframe */
@@ -641,6 +697,14 @@ export interface TradingStrategy {
   liquidation?: LiquidationStrategyConfig;
   /** Market regime detection config */
   regime?: import('./market-regime').MarketRegimeConfig;
+  /** Key level proximity and RR check config */
+  keyLevels?: KeyLevelConfig;
+  /** Session-based confidence adjustments */
+  session?: SessionFilterConfig;
+  /** Spread guardrail config */
+  spreadGuard?: SpreadGuardConfig;
+  /** Derivatives (OI/funding) enhancement config */
+  derivatives?: DerivativesConfig;
   /** Optional AI instructions for strategy-aware assistant */
   aiInstructions?: AIInstructions;
 }

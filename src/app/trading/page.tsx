@@ -1136,6 +1136,14 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
                       title: 'Reversal Detection',
                       desc: 'Multi-timeframe candlestick pattern confluence detecting direction reversals. Phases: exhaustion → indecision → initiation → confirmation. Boosts reversal direction, penalizes exhausted direction. Weight: 12.',
                     },
+                    marketStructure: {
+                      title: 'Market Structure',
+                      desc: 'Swing point analysis (HH/HL vs LH/LL) from 4H (60%) and 1H (40%). Uptrend near swing low = strong long. Downtrend with lower lows = strong short. Weight: 10.',
+                    },
+                    keyLevelProximity: {
+                      title: 'Key Level Proximity',
+                      desc: 'How close price is to confluent S/R levels from multiple timeframes. Includes risk/reward ratio calculation. Near support for longs = good. Near resistance for shorts = good. Weight: 8.',
+                    },
                   };
                   const tip = tooltips[key] || { title: key, desc: '' };
 
@@ -1151,6 +1159,8 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
                     flowConfirm: 'Flow confirm',
                     liqBias: 'Liq bias',
                     reversalSignal: 'Reversal',
+                    marketStructure: 'Structure',
+                    keyLevelProximity: 'Key Levels',
                   };
 
                   return (
@@ -1165,7 +1175,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
                       position="left"
                       block
                     >
-                      <div className={`flex items-center gap-2 py-1.5 border-b border-primary/50 text-sm ${key === 'reversalSignal' ? 'bg-orange-500/5' : key === 'flowConfirm' ? 'bg-blue-500/5' : key === 'liqBias' ? 'bg-purple-500/5' : ''}`}>
+                      <div className={`flex items-center gap-2 py-1.5 border-b border-primary/50 text-sm ${key === 'reversalSignal' ? 'bg-orange-500/5' : key === 'flowConfirm' ? 'bg-blue-500/5' : key === 'liqBias' ? 'bg-purple-500/5' : key === 'marketStructure' ? 'bg-cyan-500/5' : key === 'keyLevelProximity' ? 'bg-amber-500/5' : ''}`}>
                         <div
                           className={`w-5 h-5 rounded-full flex items-center justify-center text-xs flex-shrink-0 ${
                             item.pass ? 'bg-green-500 text-black' : 'bg-red-500/80 text-white'

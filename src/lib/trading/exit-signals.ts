@@ -28,7 +28,7 @@
  * CRITICAL: shouldExit is NEVER true when at a loss (unrealizedPnL < 0)
  */
 
-import type { Indicators, KnifeStatus } from '@/lib/kraken/types';
+import type { Indicators, KnifeStatus, MicrostructureInput } from '@/lib/kraken/types';
 import type {
   PositionState,
   ExitSignal,
@@ -356,7 +356,9 @@ export function analyzeExitConditions(
   strategy: TradingStrategy = DEFAULT_STRATEGY,
   reversalSignal?: ReversalSignal | null,
   knifeStatus?: KnifeStatus | null,
-  regimeAnalysis?: MarketRegimeAnalysis | null
+  regimeAnalysis?: MarketRegimeAnalysis | null,
+  micro?: MicrostructureInput | null,
+  ind4h?: Indicators | null
 ): ExitSignal {
   const antiGreedConfig = strategy.antiGreed;
   const timeboxConfig = strategy.timebox;
@@ -552,6 +554,58 @@ export function analyzeExitConditions(
           detail: `🔪 ${knifeStatus.direction} knife ${knifeStatus.phase} (score ${knifeStatus.knifeScore.toFixed(0)}) against ${position.direction}`,
         });
       }
+    }
+  }
+
+  // 10. Whale activity pressure — large opposing orders (weight 0.12)
+  if (micro) {
+    const opposingWhales = position.direction === 'long'
+      ? micro.recentLargeSells - micro.recentLargeBuys
+      : micro.recentLargeBuys - micro.recentLargeSells;
+
+    if (opposingWhales >= 3) {
+      pressures.push({
+        source: 'condition_deterioration',
+        value: Math.min(80, 40 + opposingWhales * 10),
+        weight: 0.12,
+        detail: `Whale ${position.direction === 'long' ? 'selling' : 'buying'} pressure (${opposingWhales} opposing large orders)`,
+      });
+    }
+  }
+
+  // 11. Trend exhaustion — parabolic/overextended move (weight 0.15)
+  if (ind4h) {
+    let exhaustionSignals = 0;
+    const exhaustionDetails: string[] = [];
+
+    // Multi-TF RSI overbought/oversold
+    if (position.direction === 'long') {
+      if (ind1h.rsi > 75) { exhaustionSignals++; exhaustionDetails.push(`1H RSI ${ind1h.rsi.toFixed(0)}`); }
+      if (ind4h.rsi > 70) { exhaustionSignals++; exhaustionDetails.push(`4H RSI ${ind4h.rsi.toFixed(0)}`); }
+    } else {
+      if (ind1h.rsi < 25) { exhaustionSignals++; exhaustionDetails.push(`1H RSI ${ind1h.rsi.toFixed(0)}`); }
+      if (ind4h.rsi < 30) { exhaustionSignals++; exhaustionDetails.push(`4H RSI ${ind4h.rsi.toFixed(0)}`); }
+    }
+
+    // Price far from EMA20
+    const priceDistFromEma = Math.abs(ind4h.priceVsEma20);
+    if (priceDistFromEma > 5) { exhaustionSignals++; exhaustionDetails.push(`Price ${priceDistFromEma.toFixed(1)}% from 4H EMA20`); }
+
+    // BB extreme
+    if (position.direction === 'long' && ind4h.bbPos > 0.95) {
+      exhaustionSignals++; exhaustionDetails.push(`4H BB ${(ind4h.bbPos * 100).toFixed(0)}%`);
+    } else if (position.direction === 'short' && ind4h.bbPos < 0.05) {
+      exhaustionSignals++; exhaustionDetails.push(`4H BB ${(ind4h.bbPos * 100).toFixed(0)}%`);
+    }
+
+    // Require 2+ of 4 conditions
+    if (exhaustionSignals >= 2) {
+      pressures.push({
+        source: 'momentum_exhaustion',
+        value: Math.min(85, 30 + exhaustionSignals * 20),
+        weight: 0.15,
+        detail: `Trend exhaustion (${exhaustionSignals}/4): ${exhaustionDetails.join(', ')}`,
+      });
     }
   }
 
