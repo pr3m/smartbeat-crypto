@@ -177,13 +177,41 @@ export function NotificationBell() {
   const dropdownRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
+  // Session-only notifications (not persisted to DB, lost on refresh)
+  const sessionNotificationsRef = useRef<Notification[]>([]);
+
+  // Listen for session-only notification events from useTradeNotifications
+  useEffect(() => {
+    function handleSessionNotification(e: Event) {
+      const { title, body, type, tag, priority } = (e as CustomEvent).detail;
+      const notif: Notification = {
+        id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        title,
+        body,
+        type,
+        tag,
+        priority,
+        read: false,
+        createdAt: new Date().toISOString(),
+      };
+      sessionNotificationsRef.current = [notif, ...sessionNotificationsRef.current];
+      // Merge into visible list
+      setNotifications(prev => [notif, ...prev]);
+      setUnreadCount(prev => prev + 1);
+    }
+
+    window.addEventListener('session-notification', handleSessionNotification);
+    return () => window.removeEventListener('session-notification', handleSessionNotification);
+  }, []);
+
   // Fetch unread count (lightweight poll)
   const fetchUnreadCount = useCallback(async () => {
     try {
       const res = await fetch('/api/notifications?unread=true&limit=0');
       if (res.ok) {
         const data = await res.json();
-        setUnreadCount(data.unreadCount ?? 0);
+        const sessionUnread = sessionNotificationsRef.current.filter(n => !n.read).length;
+        setUnreadCount((data.unreadCount ?? 0) + sessionUnread);
       }
     } catch {
       // Silent fail
@@ -197,8 +225,14 @@ export function NotificationBell() {
       const res = await fetch('/api/notifications?limit=30');
       if (res.ok) {
         const data = await res.json();
-        setNotifications(data.notifications ?? []);
-        setUnreadCount(data.unreadCount ?? 0);
+        const dbNotifs: Notification[] = data.notifications ?? [];
+        // Merge session-only notifications at the top, sorted by time
+        const merged = [...sessionNotificationsRef.current, ...dbNotifs]
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+          .slice(0, 30);
+        setNotifications(merged);
+        const sessionUnread = sessionNotificationsRef.current.filter(n => !n.read).length;
+        setUnreadCount((data.unreadCount ?? 0) + sessionUnread);
       }
     } catch {
       // Silent fail
@@ -248,6 +282,14 @@ export function NotificationBell() {
     );
     setUnreadCount(prev => Math.max(0, prev - 1));
 
+    // Session-only notifications — just update in-memory ref
+    if (id.startsWith('session-')) {
+      sessionNotificationsRef.current = sessionNotificationsRef.current.map(n =>
+        n.id === id ? { ...n, read: true } : n
+      );
+      return;
+    }
+
     try {
       await fetch('/api/notifications', {
         method: 'PATCH',
@@ -263,6 +305,9 @@ export function NotificationBell() {
   const markAllRead = async () => {
     setNotifications(prev => prev.map(n => ({ ...n, read: true })));
     setUnreadCount(0);
+
+    // Mark session notifications as read in-memory
+    sessionNotificationsRef.current = sessionNotificationsRef.current.map(n => ({ ...n, read: true }));
 
     try {
       await fetch('/api/notifications', {

@@ -737,7 +737,10 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
       microData, // Pass microstructure data for flow analysis
       liqData, // Pass liquidation data for liq bias analysis
       tfData[1440], // Daily timeframe for trend filter (NEW)
-      priceForRecRef.current // Current price for ATR volatility calculation
+      priceForRecRef.current, // Current price for ATR volatility calculation
+      undefined, // exchange
+      'XRPEUR', // pair
+      strategy // Selected strategy — drives evaluators, weights, and thresholds
     );
 
     console.log('Generated recommendation:', rec?.action, 'Long:', rec?.longScore, 'Short:', rec?.shortScore, 'Flow:', rec?.flowStatus?.status, 'Liq:', rec?.liquidationStatus?.bias);
@@ -755,7 +758,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     }
 
     lastRecommendationRef.current = rec?.action || null;
-  }, [tfData, btcTrend, btcChange, microData, liqData, addToast]);
+  }, [tfData, btcTrend, btcChange, microData, liqData, addToast, strategy]);
 
   // Request notification permission on mount
   useEffect(() => {
@@ -1087,62 +1090,83 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
                 : '⚪ No clear setup'}
             </div>
 
-            {/* Checklist Items */}
+            {/* Checklist Items — pick the correct direction's checklist to match the header */}
             <div className="space-y-1">
-              {recommendation && recommendation.checklist ? (
-                Object.entries(recommendation.checklist).map(([key, item]) => {
+              {recommendation && (() => {
+                // Determine which direction the header is showing
+                const showLong = recommendation.longScore >= 4 && recommendation.longScore > recommendation.shortScore;
+                const showShort = recommendation.shortScore >= 4 && recommendation.shortScore > recommendation.longScore;
+                const displayDir = showLong ? 'long' : showShort ? 'short' : (recommendation.long.strength >= recommendation.short.strength ? 'long' : 'short');
+                // Use the per-direction checklist so pass/fail matches the displayed direction
+                const dirChecklist = displayDir === 'long' ? recommendation.long.checklist : recommendation.short.checklist;
+                const isBreakout = strategy.meta.type === 'breakout';
+                return dirChecklist ? Object.entries(dirChecklist) : [];
+              })().map(([key, item]) => {
+                  const isBreakout = strategy.meta.type === 'breakout';
                   const tooltips: Record<string, { title: string; desc: string }> = {
                     trend1d: {
                       title: 'Daily Trend Filter',
-                      desc: 'The daily timeframe provides macro context. Counter-trend entries on the daily are higher risk. Weight: 10.',
+                      desc: 'The daily timeframe provides macro context. Counter-trend entries on the daily are higher risk.',
                     },
                     trend4h: {
                       title: '4H Trend Direction',
-                      desc: 'The 4-hour timeframe sets the overall trend. For LONG: need bullish bias. For SHORT: need bearish bias. Weight: 18.',
+                      desc: 'The 4-hour timeframe sets the overall trend. For LONG: need bullish bias. For SHORT: need bearish bias.',
                     },
                     setup1h: {
-                      title: '1H Setup Confirmation',
-                      desc: 'The 1-hour timeframe confirms the setup. Should align with 4H trend direction. Weight: 38.',
+                      title: isBreakout ? '1H Bias' : '1H Setup Confirmation',
+                      desc: isBreakout
+                        ? '1H trend direction should not oppose the breakout. More permissive than swing — just needs alignment, not pullback quality.'
+                        : 'The 1-hour timeframe confirms the setup. Should align with 4H trend direction.',
                     },
                     entry15m: {
-                      title: '15m Entry Timing',
-                      desc: 'Multi-signal entry timing (RSI + BB + MACD + EMA20 confluence). Catches the entry point. Weight: 18.',
+                      title: isBreakout ? '5m Breakout Entry' : '15m Entry Timing',
+                      desc: isBreakout
+                        ? 'Checks level break, 2x volume confirmation, retest proximity, and MACD alignment on 5m.'
+                        : 'Multi-signal entry timing (RSI + BB + MACD + EMA20 confluence). Catches the entry point.',
                     },
                     volume: {
                       title: 'Volume Confirmation',
-                      desc: 'Context-aware volume: pullbacks need low vol (0.5-1.3x), breakouts need high vol (>1.3x). Weight: 6.',
+                      desc: isBreakout
+                        ? 'Breakouts need >= 2.0x average volume for confirmation. No volume = no entry.'
+                        : 'Context-aware volume: pullbacks need low vol (0.5-1.3x), breakouts need high vol (>1.3x).',
                     },
                     btcAlign: {
                       title: 'BTC Correlation',
-                      desc: 'Bitcoin trend should not oppose your trade. XRP often follows BTC direction. Weight: 8.',
+                      desc: 'Bitcoin trend should not oppose your trade. XRP often follows BTC direction.',
                     },
                     macdMomentum: {
                       title: 'MACD Momentum',
-                      desc: 'MACD histogram confirms momentum direction. Dead zone (near zero) = neutral. Weight: 6.',
+                      desc: 'MACD histogram confirms momentum direction. Dead zone (near zero) = neutral.',
                     },
                     rsiExtreme: {
                       title: 'RSI Extreme Level',
-                      desc: 'RSI should be at an extreme level for high-probability reversals. LONG needs RSI <35 (oversold). SHORT needs RSI >65 (overbought).',
+                      desc: 'RSI should be at an extreme level for high-probability reversals.',
                     },
                     flowConfirm: {
                       title: 'Flow Confirmation',
-                      desc: 'Real-time order flow should support your trade direction. Expand Market Microstructure section to enable. Weight: 4.',
+                      desc: 'Real-time order flow should support your trade direction. Expand Market Microstructure section to enable.',
                     },
                     liqBias: {
                       title: 'Liquidation Bias',
-                      desc: 'Liquidation structure should align with trade direction. Expand Liquidation Analysis to enable. Weight: 6.',
+                      desc: 'Liquidation structure should align with trade direction. Expand Liquidation Analysis to enable.',
                     },
                     reversalSignal: {
                       title: 'Reversal Detection',
-                      desc: 'Multi-timeframe candlestick pattern confluence detecting direction reversals. Phases: exhaustion → indecision → initiation → confirmation. Boosts reversal direction, penalizes exhausted direction. Weight: 12.',
+                      desc: 'Multi-timeframe candlestick pattern confluence detecting direction reversals.',
                     },
                     marketStructure: {
                       title: 'Market Structure',
-                      desc: 'Swing point analysis (HH/HL vs LH/LL) from 4H (60%) and 1H (40%). Uptrend near swing low = strong long. Downtrend with lower lows = strong short. Weight: 10.',
+                      desc: 'Swing point analysis (HH/HL vs LH/LL) from 4H (60%) and 1H (40%).',
                     },
                     keyLevelProximity: {
-                      title: 'Key Level Proximity',
-                      desc: 'How close price is to confluent S/R levels from multiple timeframes. Includes risk/reward ratio calculation. Near support for longs = good. Near resistance for shorts = good. Weight: 8.',
+                      title: isBreakout ? 'Level Break' : 'Key Level Proximity',
+                      desc: isBreakout
+                        ? 'Which level was broken and whether price is retesting it. Core breakout condition.'
+                        : 'How close price is to confluent S/R levels. Includes risk/reward ratio calculation.',
+                    },
+                    rejection: {
+                      title: 'Rejection Signal',
+                      desc: 'Composite S/R rejection: price near key level + reversal candle + MACD confirms + volume. Fires only when ALL four conditions align.',
                     },
                   };
                   const tip = tooltips[key] || { title: key, desc: '' };
@@ -1150,8 +1174,8 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
                   const labels: Record<string, string> = {
                     trend1d: '1D trend',
                     trend4h: '4H trend',
-                    setup1h: '1H setup',
-                    entry15m: '15m entry',
+                    setup1h: isBreakout ? '1H bias' : '1H setup',
+                    entry15m: isBreakout ? '5m breakout' : '15m entry',
                     volume: 'Volume',
                     btcAlign: 'BTC aligned',
                     macdMomentum: 'MACD momentum',
@@ -1160,7 +1184,8 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
                     liqBias: 'Liq bias',
                     reversalSignal: 'Reversal',
                     marketStructure: 'Structure',
-                    keyLevelProximity: 'Key Levels',
+                    keyLevelProximity: isBreakout ? 'Level Break' : 'Key Levels',
+                    rejection: 'Rejection',
                   };
 
                   return (
@@ -1190,8 +1215,8 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
                       </div>
                     </Tooltip>
                   );
-                })
-              ) : (
+                })}
+              {!recommendation && (
                 <div className="text-center text-secondary text-sm py-4">
                   Loading checklist...
                 </div>

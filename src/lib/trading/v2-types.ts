@@ -471,6 +471,7 @@ export interface DirectionWeightMap {
   reversal: number;
   marketStructure?: number;
   keyLevelProximity?: number;
+  rejection?: number;
 }
 
 /** Liquidation zone-aware strategy config */
@@ -518,6 +519,52 @@ export interface KeyLevelConfig {
   rrMinRatio: number;
   /** RR below this triggers a warning */
   rrWarningRatio: number;
+  /** Multiplier for reversal signal value when reversal occurs at a key S/R level */
+  reversalAtLevelMultiplier?: number;
+  /** Proximity % for reversal-at-level detection (defaults to nearProximityPct) */
+  reversalAtLevelProximityPct?: number;
+}
+
+/** Composite S/R rejection config — hard AND gate across level + candle + MACD + volume */
+export interface RejectionConfig {
+  enabled: boolean;
+  /** Within X% of key level (default 1.0) */
+  proximityPct: number;
+  /** Volume must be >= Nx avg (default 1.2) */
+  minVolumeRatio: number;
+  /** Min extended pattern strength 0-1 (default 0.3) */
+  minCandleStrength: number;
+  /** Min |histogram| for confirmation (default 0.00005) */
+  minMacdHistMagnitude: number;
+  /** Histogram direction must match (default true) */
+  requireMacdAlignment: boolean;
+  /** Level strength filter */
+  minLevelStrength: 'strong' | 'moderate' | 'weak';
+  /** Level must have N+ touches (default 2) */
+  minLevelTouches: number;
+  /** Multiplier when reversal detector also fires (default 1.2) */
+  reversalConfluenceBonus: number;
+}
+
+/** Fibonacci level configuration */
+export interface FibonacciConfig {
+  /** Enable Fibonacci level calculation */
+  enabled: boolean;
+  /** Retracement ratios to calculate */
+  ratios: number[];
+  /** Extension ratios (for RR estimation, not S/R scoring) */
+  extensions: number[];
+  /** Which timeframe intervals to compute Fibs on */
+  timeframes: number[];
+  /** Minimum swing range as multiple of ATR to calculate Fibs */
+  minSwingRangeATRMultiple: number;
+  /** Regime-based multipliers for Fib touch contribution */
+  regimeMultipliers: {
+    strong_trend: number;
+    trending: number;
+    ranging: number;
+    low_volatility: number;
+  };
 }
 
 /** Session filter config - confidence adjustments based on trading session */
@@ -664,6 +711,8 @@ export interface TradingStrategy {
   meta: {
     /** Unique strategy name */
     name: string;
+    /** Strategy type — determines which evaluators the engine uses */
+    type?: 'swing' | 'breakout';
     /** Human-readable description */
     description: string;
     /** Version for tracking changes */
@@ -699,12 +748,16 @@ export interface TradingStrategy {
   regime?: import('./market-regime').MarketRegimeConfig;
   /** Key level proximity and RR check config */
   keyLevels?: KeyLevelConfig;
+  /** Fibonacci level config (feeds into confluent S/R, not a standalone signal) */
+  fibonacci?: FibonacciConfig;
   /** Session-based confidence adjustments */
   session?: SessionFilterConfig;
   /** Spread guardrail config */
   spreadGuard?: SpreadGuardConfig;
   /** Derivatives (OI/funding) enhancement config */
   derivatives?: DerivativesConfig;
+  /** Composite S/R rejection detection config */
+  rejection?: RejectionConfig;
   /** Optional AI instructions for strategy-aware assistant */
   aiInstructions?: AIInstructions;
 }

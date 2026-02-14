@@ -14,6 +14,8 @@ import { calculateEntrySize, calculateLiquidationPrice } from '@/lib/trading/pos
 import { analyzeDCAOpportunity } from '@/lib/trading/dca-signals';
 import { analyzeExitConditions, getExitStatusSummary, calculateTimeboxPressure, getTimePhase } from '@/lib/trading/exit-signals';
 import { detectReversal5m15m } from '@/lib/trading/reversal-detector';
+import { buildChartContext } from '@/lib/trading/chart-context';
+import { detectMarketRegime } from '@/lib/trading/market-regime';
 import type { PositionState, TradeDirection } from '@/lib/trading/v2-types';
 import { EMPTY_POSITION_STATE } from '@/lib/trading/v2-types';
 
@@ -62,6 +64,8 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>)
         return await analyzePosition(args);
       case 'get_strategy_config':
         return await getStrategyConfig(args);
+      case 'get_chart_analysis':
+        return await getChartAnalysis(args);
       case 'get_v2_engine_state':
         return await getV2EngineState(args);
       default:
@@ -93,8 +97,10 @@ async function fetchWithTimeout(url: string, timeoutMs = 10000): Promise<Respons
 /**
  * Helper: Fetch OHLC data from internal API
  */
-async function fetchOHLC(pair: string, interval: number): Promise<OHLCData[]> {
-  const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/public/ohlc?pair=${pair}&interval=${interval}`);
+async function fetchOHLC(pair: string, interval: number, since?: number): Promise<OHLCData[]> {
+  let url = `${BASE_URL}/api/kraken/public/ohlc?pair=${pair}&interval=${interval}`;
+  if (since) url += `&since=${since}`;
+  const res = await fetchWithTimeout(url);
   if (!res.ok) throw new Error(`Failed to fetch OHLC for ${pair} ${interval}m`);
   const json = await res.json();
   return json.data || [];
@@ -480,6 +486,18 @@ async function getTradingRecommendation(args: Record<string, unknown>): Promise<
       return { success: false, error: 'Failed to generate recommendation' };
     }
 
+    // Build chart context for confluent levels
+    const strategy = getDefaultStrategy();
+    const ohlcMap: Record<number, OHLCData[]> = {};
+    if (ohlc1d.length > 0) ohlcMap[1440] = ohlc1d;
+    if (ohlc4h.length > 0) ohlcMap[240] = ohlc4h;
+    if (ohlc1h.length > 0) ohlcMap[60] = ohlc1h;
+    if (ohlc15m.length > 0) ohlcMap[15] = ohlc15m;
+    if (ohlc5m.length > 0) ohlcMap[5] = ohlc5m;
+
+    const regimeAnalysis = detectMarketRegime(ind4h, ind1h);
+    const chartCtx = buildChartContext(ohlcMap, pair, strategy.fibonacci, regimeAnalysis.regime);
+
     return {
       success: true,
       data: {
@@ -499,6 +517,7 @@ async function getTradingRecommendation(args: Record<string, unknown>): Promise<
           change24h: btcChange.toFixed(2) + '%',
         } : undefined,
         reversalStatus: recommendation.reversalStatus || undefined,
+        rejectionStatus: recommendation.rejectionStatus || undefined,
         candlestickPatterns: (() => {
           const patterns: Record<string, Array<{ name: string; type: string; reliability: number; strength: number }>> = {};
           const tfIndicators: Record<string, typeof ind5m> = { '5m': ind5m, '15m': ind15m };
@@ -512,6 +531,14 @@ async function getTradingRecommendation(args: Record<string, unknown>): Promise<
           }
           return Object.keys(patterns).length > 0 ? patterns : undefined;
         })(),
+        confluentLevels: chartCtx.confluentLevels.map(l => ({
+          price: l.price.toFixed(5),
+          type: l.type,
+          touches: l.touches,
+          strength: l.strength,
+          sources: l.sources,
+        })),
+        mtfAlignment: chartCtx.mtfAlignment,
         timeframeIndicators: {
           '4h': {
             rsi: ind4h.rsi.toFixed(1),
@@ -549,7 +576,7 @@ async function getTradingRecommendation(args: Record<string, unknown>): Promise<
  * Get OHLC data with optional indicators
  */
 async function getOhlcData(args: Record<string, unknown>): Promise<ToolResult> {
-  const { pair = 'XRPEUR', interval, limit = 50, includeIndicators = true } = args;
+  const { pair = 'XRPEUR', interval, limit = 50, since, includeIndicators = true } = args;
 
   if (!interval) {
     return { success: false, error: 'interval is required' };
@@ -559,8 +586,17 @@ async function getOhlcData(args: Record<string, unknown>): Promise<ToolResult> {
   const intervalNum = Number(interval);
   const limitNum = Math.min(Number(limit), 200);
 
+  // Parse since parameter (ISO date string -> Unix timestamp in seconds)
+  let sinceTs: number | undefined;
+  if (since) {
+    const parsed = new Date(String(since));
+    if (!isNaN(parsed.getTime())) {
+      sinceTs = Math.floor(parsed.getTime() / 1000);
+    }
+  }
+
   try {
-    const ohlc = await fetchOHLC(pairStr, intervalNum);
+    const ohlc = await fetchOHLC(pairStr, intervalNum, sinceTs);
 
     // Limit results
     const limitedOhlc = ohlc.slice(-limitNum);
@@ -1309,6 +1345,15 @@ async function getCurrentSetup(args: Record<string, unknown>): Promise<ToolResul
       };
     }
 
+    // Add rejection if available in checklist
+    if (recommendation.checklist.rejection) {
+      (data.checklist as Record<string, unknown>).rejection = {
+        pass: recommendation.checklist.rejection.pass,
+        value: recommendation.checklist.rejection.value,
+        requirement: 'All four conditions: near S/R + reversal candle + MACD confirms + volume',
+      };
+    }
+
     // Add detailed indicators if requested
     if (detailed) {
       data.detailedIndicators = {
@@ -1550,6 +1595,107 @@ async function analyzePosition(args: Record<string, unknown>): Promise<ToolResul
     return {
       success: false,
       error: `Failed to analyze position: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+/**
+ * Get detailed chart structure analysis
+ */
+async function getChartAnalysis(args: Record<string, unknown>): Promise<ToolResult> {
+  const pair = String(args.pair || 'XRPEUR').toUpperCase();
+  const requestedTimeframes = (Array.isArray(args.timeframes) ? args.timeframes : [15, 60, 240, 1440]) as number[];
+
+  try {
+    // Fetch OHLC for requested timeframes
+    const ohlcEntries = await Promise.all(
+      requestedTimeframes.map(async (tf) => {
+        const ohlc = await fetchOHLC(pair, tf);
+        return [tf, ohlc] as [number, OHLCData[]];
+      })
+    );
+
+    const ohlcMap: Record<number, OHLCData[]> = {};
+    for (const [tf, ohlc] of ohlcEntries) {
+      if (ohlc.length > 0) ohlcMap[tf] = ohlc;
+    }
+
+    if (Object.keys(ohlcMap).length === 0) {
+      return { success: false, error: 'No OHLC data available for any requested timeframe' };
+    }
+
+    // Get strategy for fibonacci config
+    const strategy = getDefaultStrategy();
+
+    // Detect market regime if we have 4H and 1H data
+    let regime: import('@/lib/trading/market-regime').MarketRegime | undefined;
+    if (ohlcMap[240] && ohlcMap[60]) {
+      const ind4h = calculateIndicators(ohlcMap[240]);
+      const ind1h = calculateIndicators(ohlcMap[60]);
+      if (ind4h && ind1h) {
+        const regimeAnalysis = detectMarketRegime(ind4h, ind1h);
+        regime = regimeAnalysis.regime;
+      }
+    }
+
+    // Build chart context
+    const chartCtx = buildChartContext(ohlcMap, pair, strategy.fibonacci, regime);
+
+    // Format per-timeframe data for response
+    const timeframeAnalysis: Record<string, unknown> = {};
+    for (const [label, tf] of Object.entries(chartCtx.timeframes)) {
+      timeframeAnalysis[label] = {
+        trend: tf.trend,
+        keyLevels: tf.keyLevels.map(l => ({
+          price: l.price.toFixed(5),
+          type: l.type,
+          touches: l.touches,
+          strength: l.strength,
+          sources: l.sources,
+        })),
+        recentSwings: tf.recentSwings.map(s => ({
+          price: s.price.toFixed(5),
+          type: s.type,
+          strength: s.strength,
+          time: new Date(s.timestamp * 1000).toISOString(),
+        })),
+        patterns: tf.patterns.map(p => ({
+          name: p.name,
+          type: p.type,
+          significance: p.significance,
+        })),
+        priceActionSummary: tf.priceActionSummary,
+        range: {
+          high: tf.rangeHigh.toFixed(5),
+          low: tf.rangeLow.toFixed(5),
+          percent: tf.rangePercent.toFixed(2) + '%',
+        },
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        pair,
+        currentPrice: (chartCtx.timeframes['5m']?.currentPrice || chartCtx.timeframes['15m']?.currentPrice || 0).toFixed(5),
+        timeframes: timeframeAnalysis,
+        confluentLevels: chartCtx.confluentLevels.map(l => ({
+          price: l.price.toFixed(5),
+          type: l.type,
+          touches: l.touches,
+          strength: l.strength,
+          sources: l.sources,
+        })),
+        mtfAlignment: chartCtx.mtfAlignment,
+        mtfSummary: chartCtx.mtfSummary,
+        regime: regime || 'unknown',
+        timestamp: chartCtx.timestamp,
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to get chart analysis: ${error instanceof Error ? error.message : 'Unknown error'}`,
     };
   }
 }

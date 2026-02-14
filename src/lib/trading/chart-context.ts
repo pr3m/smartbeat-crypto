@@ -7,6 +7,9 @@
  */
 
 import type { OHLCData } from '@/lib/kraken/types';
+import type { FibonacciConfig } from './v2-types';
+import type { MarketRegime } from './market-regime';
+import { calculateFibonacciLevels } from './fibonacci';
 
 export interface SwingPoint {
   index: number;
@@ -39,7 +42,7 @@ export interface PriceLevel {
   type: 'support' | 'resistance';
   touches: number;
   strength: 'strong' | 'moderate' | 'weak';
-  source: string; // e.g., "swing_low", "consolidation", "round_number"
+  sources: string[]; // e.g., ["swing_low"], ["fib_0.618", "swing_high"]
 }
 
 export interface CompactCandle {
@@ -220,7 +223,7 @@ function findKeyLevels(ohlc: OHLCData[], swings: SwingPoint[]): PriceLevel[] {
   const swingPrices = swings.map(s => ({ price: s.price, type: s.type }));
 
   // Cluster similar price levels
-  const clusters: { price: number; type: 'support' | 'resistance'; touches: number; source: string }[] = [];
+  const clusters: { price: number; type: 'support' | 'resistance'; touches: number; sources: string[] }[] = [];
 
   for (const sp of swingPrices) {
     const existing = clusters.find(c =>
@@ -236,7 +239,7 @@ function findKeyLevels(ohlc: OHLCData[], swings: SwingPoint[]): PriceLevel[] {
         price: sp.price,
         type: sp.type === 'low' ? 'support' : 'resistance',
         touches: 1,
-        source: 'swing_' + sp.type,
+        sources: ['swing_' + sp.type],
       });
     }
   }
@@ -253,7 +256,7 @@ function findKeyLevels(ohlc: OHLCData[], swings: SwingPoint[]): PriceLevel[] {
         price: roundLevel,
         type: roundLevel > currentPrice ? 'resistance' : 'support',
         touches: 1,
-        source: 'round_number',
+        sources: ['round_number'],
       });
     }
   }
@@ -265,7 +268,7 @@ function findKeyLevels(ohlc: OHLCData[], swings: SwingPoint[]): PriceLevel[] {
       type: cluster.type,
       touches: cluster.touches,
       strength: cluster.touches >= 3 ? 'strong' : cluster.touches >= 2 ? 'moderate' : 'weak',
-      source: cluster.source,
+      sources: cluster.sources,
     });
   }
 
@@ -437,7 +440,7 @@ function generatePriceActionSummary(
   const recentVolume = recent.reduce((sum, c) => sum + c.volume, 0) / recent.length;
   const volumeRatio = avgVolume > 0 ? recentVolume / avgVolume : 1;
 
-  const tfLabel = interval >= 60 ? `${interval / 60}H` : `${interval}m`;
+  const tfLabel = interval >= 1440 ? '1D' : interval >= 60 ? `${interval / 60}H` : `${interval}m`;
 
   let summary = `${tfLabel}: ${trend.direction} (${trend.strength})`;
   summary += `, ${change >= 0 ? '+' : ''}${change.toFixed(2)}% last 5 candles`;
@@ -514,7 +517,9 @@ export function analyzeTimeframe(
  */
 export function buildChartContext(
   timeframeData: Record<number, OHLCData[]>,
-  pair: string
+  pair: string,
+  fibConfig?: FibonacciConfig,
+  regime?: MarketRegime
 ): ChartContext {
   const timeframes: Record<string, TimeframeChartContext> = {};
   const tfLabels: Record<number, string> = {
@@ -522,6 +527,7 @@ export function buildChartContext(
     15: '15m',
     60: '1H',
     240: '4H',
+    1440: '1D',
   };
 
   // Analyze each timeframe
@@ -558,8 +564,55 @@ export function buildChartContext(
 
   // Find confluent levels (levels that appear in multiple timeframes)
   const allLevels: PriceLevel[] = [];
+  const currentPrice = timeframes['5m']?.currentPrice || timeframes['15m']?.currentPrice || 0;
+
   for (const tf of Object.values(timeframes)) {
-    allLevels.push(...tf.keyLevels);
+    // Daily S/R levels get a touch bonus (+2) — a single daily swing high
+    // is structurally significant even without lower-TF corroboration
+    if (tf.interval === 1440) {
+      allLevels.push(...tf.keyLevels.map(l => ({
+        ...l,
+        touches: l.touches + 2,
+        strength: l.strength === 'weak' ? 'moderate' as const : l.strength,
+      })));
+    } else {
+      allLevels.push(...tf.keyLevels);
+    }
+  }
+
+  // Add Fibonacci levels from qualifying timeframes
+  if (fibConfig?.enabled && currentPrice > 0) {
+    const regimeMultiplier = regime
+      ? (fibConfig.regimeMultipliers[regime] ?? 1.0)
+      : 1.0;
+
+    for (const [intervalStr, ohlc] of Object.entries(timeframeData)) {
+      const interval = parseInt(intervalStr);
+      if (!fibConfig.timeframes.includes(interval)) continue;
+
+      const swings = findSwingPoints(ohlc, 2);
+      // Compute a simple ATR from the last 14 candles for range validation
+      let atr: number | undefined;
+      if (ohlc.length >= 14) {
+        const recent14 = ohlc.slice(-14);
+        const trueRanges = recent14.map(c => c.high - c.low);
+        atr = trueRanges.reduce((a, b) => a + b, 0) / trueRanges.length;
+      }
+
+      const fibResult = calculateFibonacciLevels(swings, currentPrice, fibConfig, atr, interval);
+      if (!fibResult) continue;
+
+      // Apply regime multiplier: effective touches = round(1 * multiplier)
+      const effectiveTouches = Math.round(1 * regimeMultiplier);
+      if (effectiveTouches <= 0) continue;
+
+      for (const level of fibResult.levels) {
+        allLevels.push({
+          ...level,
+          touches: effectiveTouches,
+        });
+      }
+    }
   }
 
   // Cluster similar levels
@@ -573,16 +626,37 @@ export function buildChartContext(
 
     if (existing) {
       existing.touches += level.touches;
+      existing.sources = [...new Set([...existing.sources, ...level.sources])];
       if (level.strength === 'strong') existing.strength = 'strong';
     } else {
-      confluentLevels.push({ ...level });
+      confluentLevels.push({ ...level, sources: [...level.sources] });
     }
   }
 
+  // Standalone Fib filtering: Fib-only levels from sub-4H timeframes are removed.
+  // Only Fib levels that overlap with swing S/R OR come from 4H+ survive.
+  const highTfIntervals = [240, 1440]; // 4H and 1D
+  const fibOnlyFilter = (level: PriceLevel): boolean => {
+    const allFib = level.sources.every(s => s.startsWith('fib_'));
+    if (!allFib) return true; // Has non-Fib sources — keep
+
+    const fibTfMatches = level.sources
+      .map(source => source.match(/@tf(\d+)/))
+      .filter((match): match is RegExpMatchArray => !!match)
+      .map(match => Number(match[1]))
+      .filter(tf => Number.isFinite(tf));
+
+    if (fibTfMatches.length === 0) {
+      return false; // Fib-only without timeframe tags — discard
+    }
+
+    return fibTfMatches.some(tf => highTfIntervals.includes(tf));
+  };
+
   // Only keep levels with multiple timeframe confluence
-  const currentPrice = timeframes['5m']?.currentPrice || timeframes['15m']?.currentPrice || 0;
   const strongConfluentLevels = confluentLevels
     .filter(l => l.touches >= 2)
+    .filter(fibOnlyFilter)
     .sort((a, b) => Math.abs(a.price - currentPrice) - Math.abs(b.price - currentPrice))
     .slice(0, 6);
 
@@ -651,7 +725,7 @@ export function formatChartContextForAI(context: ChartContext): string {
   if (context.confluentLevels.length > 0) {
     sections.push('### Multi-TF Confluent Levels');
     for (const level of context.confluentLevels) {
-      sections.push(`${level.type.toUpperCase()}: ${level.price.toFixed(5)} (${level.strength}, ${level.touches} touches)`);
+      sections.push(`${level.type.toUpperCase()}: ${level.price.toFixed(5)} (${level.strength}, ${level.touches} touches, ${level.sources.join('+')})`);
     }
     sections.push('');
   }

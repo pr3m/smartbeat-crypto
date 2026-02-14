@@ -26,7 +26,7 @@ import { detectReversal, type ReversalSignal, NO_REVERSAL } from './reversal-det
 import { detectMarketRegime, type MarketRegimeAnalysis } from './market-regime';
 import { analyzeTimeframe, buildChartContext, findSwingPoints, type TrendStructure, type PriceLevel } from './chart-context';
 import { getTradingSession } from './session';
-import type { KeyLevelConfig, SessionFilterConfig, SpreadGuardConfig, DerivativesConfig } from './v2-types';
+import type { KeyLevelConfig, SessionFilterConfig, SpreadGuardConfig, DerivativesConfig, RejectionConfig } from './v2-types';
 
 export interface TimeframeWeights {
   '1d': number;
@@ -37,11 +37,11 @@ export interface TimeframeWeights {
 }
 
 export const DEFAULT_WEIGHTS: TimeframeWeights = {
-  '1d': 10,  // Macro trend filter
-  '4h': 18,  // Trend context
-  '1h': 24,  // Setup confirmation
-  '15m': 40, // Primary entry timing (trader trusts this most)
-  '5m': 8,   // Candlestick patterns only
+  '1d': 5,   // Advisory macro context (not a veto)
+  '4h': 10,  // Trend context
+  '1h': 30,  // Setup confirmation
+  '15m': 42, // Primary decision maker
+  '5m': 13,  // Volume spikes + candlestick patterns
 };
 
 export interface LongChecks {
@@ -702,6 +702,266 @@ export function evaluate15mShortEntry(ind15m: Indicators): {
   };
 }
 
+// ============================================================================
+// BREAKOUT-PULLBACK EVALUATORS
+// ============================================================================
+
+/**
+ * Evaluate 5m breakout entry conditions.
+ * For breakout-pullback strategy: checks if price has broken a key level,
+ * volume confirmed the break, and we're retesting the broken level.
+ *
+ * Scoring (max ~8):
+ * - Level break detected: +3
+ * - Volume >= 2.0x on breakout: +2 (scored separately; not a hard gate)
+ * - Price retesting broken level (within 0.3%): +2
+ * - MACD histogram in breakout direction: +1
+ */
+export function evaluate5mBreakoutEntry(
+  ind5m: Indicators,
+  confluentLevels: PriceLevel[],
+  direction: 'long' | 'short',
+  currentPrice: number,
+  ohlc5m?: OHLCData[]
+): {
+  pass: boolean;
+  score: number;
+  signals: string[];
+  brokenLevel?: PriceLevel;
+} {
+  let score = 0;
+  const signals: string[] = [];
+  let brokenLevel: PriceLevel | undefined;
+  let retestMet = false;
+
+  if (!confluentLevels || confluentLevels.length === 0 || currentPrice <= 0) {
+    return { pass: false, score: 0, signals: ['No key levels available'] };
+  }
+
+  // 1. Check if price has broken a key level (within last 6 candles)
+  // For long: price above a resistance level = breakout
+  // For short: price below a support level = breakdown
+  if (direction === 'long') {
+    // Find resistance levels that price has broken above
+    const brokenResistances = confluentLevels
+      .filter(l => l.type === 'resistance' && currentPrice > l.price)
+      .filter(l => {
+        const distPct = ((currentPrice - l.price) / l.price) * 100;
+        return distPct <= 1.5; // Within 1.5% above = recent break
+      })
+      .sort((a, b) => b.price - a.price); // Closest broken level first
+
+    if (brokenResistances.length > 0) {
+      brokenLevel = brokenResistances[0];
+      const distPct = ((currentPrice - brokenLevel.price) / brokenLevel.price) * 100;
+      score += 3;
+      signals.push(`Broke resistance ${brokenLevel.price.toFixed(5)} (${distPct.toFixed(2)}% above)`);
+
+      // 3. Check if retesting (within 0.3% of broken level)
+      if (distPct <= 0.3) {
+        score += 2;
+        signals.push(`Retesting level (${distPct.toFixed(2)}%)`);
+        retestMet = true;
+      } else if (distPct <= 0.6) {
+        score += 1;
+        signals.push(`Near retest (${distPct.toFixed(2)}%)`);
+        retestMet = true;
+      }
+    }
+  } else {
+    // Short: find support levels broken below
+    const brokenSupports = confluentLevels
+      .filter(l => l.type === 'support' && currentPrice < l.price)
+      .filter(l => {
+        const distPct = ((l.price - currentPrice) / l.price) * 100;
+        return distPct <= 1.5;
+      })
+      .sort((a, b) => a.price - b.price);
+
+    if (brokenSupports.length > 0) {
+      brokenLevel = brokenSupports[0];
+      const distPct = ((brokenLevel.price - currentPrice) / brokenLevel.price) * 100;
+      score += 3;
+      signals.push(`Broke support ${brokenLevel.price.toFixed(5)} (${distPct.toFixed(2)}% below)`);
+
+      if (distPct <= 0.3) {
+        score += 2;
+        signals.push(`Retesting level (${distPct.toFixed(2)}%)`);
+        retestMet = true;
+      } else if (distPct <= 0.6) {
+        score += 1;
+        signals.push(`Near retest (${distPct.toFixed(2)}%)`);
+        retestMet = true;
+      }
+    }
+  }
+
+  // 2. Volume confirmation — breakout needs >= 2.0x average volume
+  // Check recent candles for volume spike if OHLC available
+  let breakoutVolumeConfirmed = false;
+  if (ohlc5m && ohlc5m.length >= 6) {
+    const recentCandles = ohlc5m.slice(-6);
+    const olderCandles = ohlc5m.slice(-26, -6);
+    const avgVol = olderCandles.length > 0
+      ? olderCandles.reduce((s, c) => s + c.volume, 0) / olderCandles.length
+      : 1;
+
+    // Find candle with highest volume in recent 6
+    const maxVolCandle = recentCandles.reduce((max, c) => c.volume > max.volume ? c : max, recentCandles[0]);
+    const breakoutVolRatio = avgVol > 0 ? maxVolCandle.volume / avgVol : 0;
+
+    if (breakoutVolRatio >= 2.0) {
+      score += 2;
+      signals.push(`Breakout vol ${breakoutVolRatio.toFixed(1)}x avg`);
+      breakoutVolumeConfirmed = true;
+    } else if (breakoutVolRatio >= 1.5) {
+      score += 1;
+      signals.push(`Vol ${breakoutVolRatio.toFixed(1)}x (needs 2.0x)`);
+    }
+  } else {
+    // Fallback to indicator volRatio
+    if (ind5m.volRatio >= 2.0) {
+      score += 2;
+      signals.push(`Vol ${ind5m.volRatio.toFixed(1)}x avg — confirmed`);
+      breakoutVolumeConfirmed = true;
+    } else if (ind5m.volRatio >= 1.5) {
+      score += 1;
+      signals.push(`Vol ${ind5m.volRatio.toFixed(1)}x (needs 2.0x)`);
+    }
+  }
+
+  if (!breakoutVolumeConfirmed && brokenLevel) {
+    signals.push('Volume too low for confirmed breakout');
+  }
+
+  // 4. MACD histogram in breakout direction
+  const hist = ind5m.histogram ?? 0;
+  if (direction === 'long' && hist > 0) {
+    score += 1;
+    signals.push(`MACD hist +${hist.toFixed(5)}`);
+  } else if (direction === 'short' && hist < 0) {
+    score += 1;
+    signals.push(`MACD hist ${hist.toFixed(5)}`);
+  }
+
+  return {
+    pass: score >= 4 && brokenLevel !== undefined && retestMet,
+    score,
+    signals,
+    brokenLevel,
+  };
+}
+
+/**
+ * Evaluate 1H bias for breakout direction.
+ * Simplified version of evaluate1hLongSetup/evaluate1hShortSetup.
+ * Only checks trend direction and EMA alignment — does NOT penalize
+ * extended price (which is normal for breakouts).
+ *
+ * Scoring (max ~8):
+ * - Trend aligned: +3
+ * - EMA alignment: +2
+ * - MACD momentum: +2
+ * - EMA slope: +1
+ */
+export function evaluate1hBreakoutBias(
+  ind1h: Indicators,
+  direction: 'long' | 'short'
+): {
+  pass: boolean;
+  score: number;
+  quality: 'strong' | 'moderate' | 'weak';
+  signals: string[];
+} {
+  let score = 0;
+  const signals: string[] = [];
+
+  if (direction === 'long') {
+    // 1. Trend direction (most important)
+    if (ind1h.trend === 'bullish') {
+      score += 3;
+      signals.push('1H trend bullish');
+    } else if (ind1h.trend === 'neutral') {
+      score += 1.5; // Neutral is acceptable for breakouts
+      signals.push('1H trend neutral');
+    }
+    // Bearish = 0 points but NOT blocking
+
+    // 2. EMA alignment
+    if (ind1h.emaAlignment === 'bullish') {
+      score += 2;
+      signals.push('EMA stack bullish');
+    } else if (ind1h.emaAlignment === 'mixed') {
+      score += 1;
+      signals.push('EMA mixed');
+    }
+
+    // 3. MACD in breakout direction — no pullback requirement
+    const hist = ind1h.histogram ?? 0;
+    if (hist > 0 && ind1h.macd > 0) {
+      score += 2;
+      signals.push('MACD bullish');
+    } else if (hist > 0 || ind1h.macd > 0) {
+      score += 1;
+      signals.push('MACD turning');
+    }
+
+    // 4. EMA slope rising
+    if (ind1h.ema20Slope > 0.05) {
+      score += 1;
+      signals.push('EMA rising');
+    }
+  } else {
+    // Short direction
+    if (ind1h.trend === 'bearish') {
+      score += 3;
+      signals.push('1H trend bearish');
+    } else if (ind1h.trend === 'neutral') {
+      score += 1.5;
+      signals.push('1H trend neutral');
+    }
+
+    if (ind1h.emaAlignment === 'bearish') {
+      score += 2;
+      signals.push('EMA stack bearish');
+    } else if (ind1h.emaAlignment === 'mixed') {
+      score += 1;
+      signals.push('EMA mixed');
+    }
+
+    const hist = ind1h.histogram ?? 0;
+    if (hist < 0 && ind1h.macd < 0) {
+      score += 2;
+      signals.push('MACD bearish');
+    } else if (hist < 0 || ind1h.macd < 0) {
+      score += 1;
+      signals.push('MACD turning');
+    }
+
+    if (ind1h.ema20Slope < -0.05) {
+      score += 1;
+      signals.push('EMA falling');
+    }
+  }
+
+  // More permissive pass threshold than swing (3 vs 4)
+  // Breakouts just need 1H to not actively oppose
+  const quality: 'strong' | 'moderate' | 'weak' =
+    score >= 7 ? 'strong' :
+    score >= 4 ? 'moderate' : 'weak';
+
+  return {
+    pass: score >= 3,
+    score,
+    quality,
+    signals,
+  };
+}
+
+// ============================================================================
+// VOLUME EVALUATION
+// ============================================================================
+
 /**
  * Evaluate volume conditions for swing trading
  *
@@ -889,21 +1149,44 @@ export function evaluateLongConditions(
   btcTrend: 'bull' | 'bear' | 'neut',
   micro?: MicrostructureInput | null,
   liq?: LiquidationInput | null,
-  ind1d?: Indicators | null
+  ind1d?: Indicators | null,
+  strategy?: TradingStrategy,
+  ind5m?: Indicators | null,
+  confluentLevels?: PriceLevel[],
+  currentPrice?: number,
+  ohlc5m?: OHLCData[]
 ): LongChecks {
   const flowAnalysis = analyzeFlow('long', micro || null);
   const liqAnalysis = analyzeLiquidation('long', liq || null);
+
+  if (strategy?.meta.type === 'breakout' && ind5m) {
+    // Breakout strategy: use 5m breakout entry + 1H bias
+    const entry5m = evaluate5mBreakoutEntry(ind5m, confluentLevels || [], 'long', currentPrice || 0, ohlc5m);
+    const bias1h = evaluate1hBreakoutBias(ind1h, 'long');
+    // Volume always in 'breakout' context for this strategy
+    const volumeEval = evaluateVolume(ind5m.volRatio, 'breakout');
+    const macdEval = evaluateMACDMomentum('long', ind5m.histogram, ind5m.macd);
+    const btcEval = evaluateBTCAlignment('long', btcTrend, 0, bias1h.quality);
+
+    return {
+      trend1d: ind1d ? ind1d.trend !== 'bearish' : undefined,
+      trend4h: ind4h.trend === 'bullish',
+      setup1h: bias1h.pass,
+      entry15m: entry5m.pass, // 5m breakout entry fills the entry15m slot
+      volume: volumeEval.pass,
+      btcAlign: btcEval.pass,
+      macdMomentum: macdEval.pass,
+      flowConfirm: flowAnalysis.flowConfirmPass,
+      liqBias: liqAnalysis.aligned,
+    };
+  }
+
+  // Swing strategy (default): existing logic
   const entry15m = evaluate15mLongEntry(ind15m);
   const setup1h = evaluate1hLongSetup(ind1h);
-
-  // Determine context for volume evaluation
   const context = determineEntryContext(ind15m, ind1h, 'long');
   const volumeEval = evaluateVolume(ind15m.volRatio, context);
-
-  // MACD with dead zone
   const macdEval = evaluateMACDMomentum('long', ind15m.histogram, ind15m.macd);
-
-  // BTC alignment with setup strength context
   const btcEval = evaluateBTCAlignment('long', btcTrend, 0, setup1h.quality);
 
   return {
@@ -929,21 +1212,43 @@ export function evaluateShortConditions(
   btcTrend: 'bull' | 'bear' | 'neut',
   micro?: MicrostructureInput | null,
   liq?: LiquidationInput | null,
-  ind1d?: Indicators | null
+  ind1d?: Indicators | null,
+  strategy?: TradingStrategy,
+  ind5m?: Indicators | null,
+  confluentLevels?: PriceLevel[],
+  currentPrice?: number,
+  ohlc5m?: OHLCData[]
 ): ShortChecks {
   const flowAnalysis = analyzeFlow('short', micro || null);
   const liqAnalysis = analyzeLiquidation('short', liq || null);
+
+  if (strategy?.meta.type === 'breakout' && ind5m) {
+    // Breakout strategy: use 5m breakout entry + 1H bias
+    const entry5m = evaluate5mBreakoutEntry(ind5m, confluentLevels || [], 'short', currentPrice || 0, ohlc5m);
+    const bias1h = evaluate1hBreakoutBias(ind1h, 'short');
+    const volumeEval = evaluateVolume(ind5m.volRatio, 'breakout');
+    const macdEval = evaluateMACDMomentum('short', ind5m.histogram, ind5m.macd);
+    const btcEval = evaluateBTCAlignment('short', btcTrend, 0, bias1h.quality);
+
+    return {
+      trend1d: ind1d ? ind1d.trend !== 'bullish' : undefined,
+      trend4h: ind4h.trend === 'bearish',
+      setup1h: bias1h.pass,
+      entry15m: entry5m.pass,
+      volume: volumeEval.pass,
+      btcAlign: btcEval.pass,
+      macdMomentum: macdEval.pass,
+      flowConfirm: flowAnalysis.flowConfirmPass,
+      liqBias: liqAnalysis.aligned,
+    };
+  }
+
+  // Swing strategy (default): existing logic
   const entry15m = evaluate15mShortEntry(ind15m);
   const setup1h = evaluate1hShortSetup(ind1h);
-
-  // Determine context for volume evaluation
   const context = determineEntryContext(ind15m, ind1h, 'short');
   const volumeEval = evaluateVolume(ind15m.volRatio, context);
-
-  // MACD with dead zone
   const macdEval = evaluateMACDMomentum('short', ind15m.histogram, ind15m.macd);
-
-  // BTC alignment with setup strength context
   const btcEval = evaluateBTCAlignment('short', btcTrend, 0, setup1h.quality);
 
   return {
@@ -1148,55 +1453,126 @@ export function formatChecklist(
   ohlc1h?: OHLCData[],
   confluentLevels?: PriceLevel[],
   currentPrice?: number,
-  strategy?: TradingStrategy
+  strategy?: TradingStrategy,
+  ind5m?: Indicators | null,
+  ohlc5m?: OHLCData[]
 ): TradingRecommendation['checklist'] {
   const flowAnalysis = micro ? analyzeFlow(direction, micro) : null;
   const liqAnalysis = liq ? analyzeLiquidation(direction, liq, liqConfig) : null;
+  const isBreakout = strategy?.meta.type === 'breakout';
 
   // Format 4H trend with EMA info
   const trend4hValue = formatEMAInfo(ind4h);
 
-  const checklist: TradingRecommendation['checklist'] = {
+  // Build checklist incrementally — required fields are filled in the if/else blocks below
+  const checklist = {
     trend4h: {
       pass: checks.trend4h,
       value: trend4hValue + (ind4h.trendStrength === 'strong' ? ' ★' : ''),
     },
-    setup1h: {
+  } as TradingRecommendation['checklist'];
+
+  if (isBreakout) {
+    // --- Breakout strategy: 1H Bias + 5m Breakout Entry labels ---
+    const bias1h = evaluate1hBreakoutBias(ind1h, direction);
+    const topSignal = bias1h.signals[0] || '';
+    const qualityIcon = bias1h.quality === 'strong' ? '★' :
+                        bias1h.quality === 'moderate' ? '✓' : '';
+    checklist.setup1h = {
+      pass: checks.setup1h,
+      value: `${bias1h.score}/8 ${bias1h.quality} ${qualityIcon} ${topSignal}`,
+    };
+
+    // 5m Breakout Entry with level break info
+    if (ind5m) {
+      const entry5m = evaluate5mBreakoutEntry(ind5m, confluentLevels || [], direction, currentPrice || 0, ohlc5m);
+      const topSignals = entry5m.signals.slice(0, 2).join(', ');
+      checklist.entry15m = {
+        pass: checks.entry15m,
+        value: entry5m.pass
+          ? `✓ ${entry5m.score.toFixed(0)}/8 (${topSignals})`
+          : `${entry5m.score.toFixed(0)}/8 - ${topSignals || 'no breakout'}`,
+      };
+
+      // Add dedicated level break checklist item for breakout strategy
+      if (entry5m.brokenLevel) {
+        const distPct = direction === 'long'
+          ? ((currentPrice! - entry5m.brokenLevel.price) / entry5m.brokenLevel.price) * 100
+          : ((entry5m.brokenLevel.price - currentPrice!) / entry5m.brokenLevel.price) * 100;
+        const retestStatus = distPct <= 0.3 ? 'retesting' : distPct <= 0.6 ? 'near retest' : 'extended';
+        checklist.keyLevelProximity = {
+          pass: distPct <= 0.6,
+          value: `${entry5m.brokenLevel.type === 'resistance' ? 'Res' : 'Sup'} ${entry5m.brokenLevel.price.toFixed(5)} broken — ${retestStatus} (${distPct.toFixed(2)}%)`,
+        };
+      }
+
+      // Volume with breakout emphasis
+      const volEval = evaluateVolume(ind5m.volRatio, 'breakout');
+      checklist.volume = {
+        pass: checks.volume,
+        value: `${ind5m.volRatio.toFixed(1)}x avg ${volEval.quality === 'strong' ? '— confirmed breakout' : volEval.quality === 'moderate' ? '— confirmed' : '— weak'}`,
+      };
+    } else {
+      checklist.entry15m = {
+        pass: checks.entry15m,
+        value: formatEntry15mValue(direction, ind15m),
+      };
+      checklist.volume = {
+        pass: checks.volume,
+        value: formatVolumeValue(direction, ind15m, ind1h),
+      };
+    }
+
+    // MACD on 5m for breakout
+    if (ind5m) {
+      checklist.macdMomentum = {
+        pass: checks.macdMomentum,
+        value: formatMACDValue(direction, ind5m),
+      };
+    } else {
+      checklist.macdMomentum = {
+        pass: checks.macdMomentum,
+        value: formatMACDValue(direction, ind15m),
+      };
+    }
+  } else {
+    // --- Swing strategy (default): existing labels ---
+    checklist.setup1h = {
       pass: checks.setup1h,
       value: format1hSetupValue(direction, ind1h),
-    },
-    entry15m: {
+    };
+    checklist.entry15m = {
       pass: checks.entry15m,
       value: formatEntry15mValue(direction, ind15m),
-    },
-    volume: {
+    };
+    checklist.volume = {
       pass: checks.volume,
       value: formatVolumeValue(direction, ind15m, ind1h),
-    },
-    btcAlign: {
-      pass: checks.btcAlign,
-      value: formatBTCValue(
-        direction,
-        btcTrend,
-        btcChange,
-        (direction === 'long' ? evaluate1hLongSetup(ind1h) : evaluate1hShortSetup(ind1h)).quality
-      ),
-    },
-    macdMomentum: {
+    };
+    checklist.macdMomentum = {
       pass: checks.macdMomentum,
       value: formatMACDValue(direction, ind15m),
-    },
+    };
+  }
+
+  // BTC alignment (shared)
+  const setupQuality = isBreakout
+    ? evaluate1hBreakoutBias(ind1h, direction).quality
+    : (direction === 'long' ? evaluate1hLongSetup(ind1h) : evaluate1hShortSetup(ind1h)).quality;
+  checklist.btcAlign = {
+    pass: checks.btcAlign,
+    value: formatBTCValue(direction, btcTrend, btcChange, setupQuality),
   };
 
-  // Add daily trend if available with EMA info
-  if (ind1d && checks.trend1d !== undefined) {
+  // Add daily trend if available with EMA info (skip for breakout if weight is 0)
+  if (ind1d && checks.trend1d !== undefined && !(isBreakout && (strategy?.timeframeWeights['1d'] ?? 0) === 0)) {
     checklist.trend1d = {
       pass: checks.trend1d,
       value: formatEMAInfo(ind1d) + (ind1d.trendStrength === 'strong' ? ' ★' : ''),
     };
   }
 
-  // Option B: Add flow confirmation to checklist when microstructure data available
+  // Flow confirmation
   if (flowAnalysis) {
     const imbalanceStr = `${(flowAnalysis.imbalance * 100).toFixed(0)}%`;
     const cvdStr = flowAnalysis.cvdTrend;
@@ -1206,8 +1582,7 @@ export function formatChecklist(
     };
   }
 
-  // Add liquidation bias to checklist when liquidation data available
-  // Uses zone-aware description from analyzeLiquidation()
+  // Liquidation bias
   if (liqAnalysis) {
     checklist.liqBias = {
       pass: checks.liqBias ?? true,
@@ -1215,7 +1590,7 @@ export function formatChecklist(
     };
   }
 
-  // Add reversal signal to checklist when detected
+  // Reversal signal
   if (reversalSignal && reversalSignal.detected) {
     const reversalAligns = (direction === 'long' && reversalSignal.direction === 'bullish')
       || (direction === 'short' && reversalSignal.direction === 'bearish');
@@ -1230,7 +1605,7 @@ export function formatChecklist(
     };
   }
 
-  // Add market structure to checklist
+  // Market structure
   if (ohlc4h || ohlc1h) {
     const ms = evaluateMarketStructure(direction, ohlc4h, ohlc1h);
     checklist.marketStructure = {
@@ -1239,13 +1614,21 @@ export function formatChecklist(
     };
   }
 
-  // Add key level proximity to checklist
-  if (confluentLevels && confluentLevels.length > 0 && currentPrice && currentPrice > 0) {
+  // Key level proximity (only for swing — breakout handles this via entry5m above)
+  if (!isBreakout && confluentLevels && confluentLevels.length > 0 && currentPrice && currentPrice > 0) {
     const kl = evaluateKeyLevelProximity(direction, currentPrice, confluentLevels, strategy?.keyLevels);
     checklist.keyLevelProximity = {
       pass: kl.value >= 0.55,
       value: kl.description + (kl.rrWarning ? ' ⚠' : ''),
     };
+  }
+
+  // Rejection signal
+  if (strategy?.rejection?.enabled && confluentLevels && confluentLevels.length > 0 && currentPrice && currentPrice > 0 && ind5m) {
+    const rej = evaluateRejection(direction, currentPrice, confluentLevels, ind15m, ind5m, strategy.rejection, reversalSignal);
+    if (rej.detected || rej.components?.levelProximity.met) {
+      checklist.rejection = { pass: rej.detected, value: rej.description };
+    }
   }
 
   return checklist;
@@ -1445,6 +1828,188 @@ export function evaluateKeyLevelProximity(
   return { value, description, rrRatio, rrWarning };
 }
 
+// ============================================================================
+// REJECTION DETECTION — composite hard AND gate
+// ============================================================================
+
+export interface RejectionResult {
+  value: number; // 0-1 signal value (0.5 = neutral)
+  detected: boolean;
+  rejectedLevel: PriceLevel | null;
+  description: string;
+  components: {
+    levelProximity: { met: boolean; distPct: number; levelPrice: number };
+    reversalCandle: { met: boolean; patternName: string; strength: number };
+    macdConfirm: { met: boolean; histogram: number };
+    volumeConfirm: { met: boolean; volRatio: number };
+  } | null;
+}
+
+const NEUTRAL_REJECTION: RejectionResult = {
+  value: 0.5,
+  detected: false,
+  rejectedLevel: null,
+  description: 'No rejection',
+  components: null,
+};
+
+/**
+ * Evaluate composite S/R rejection signal.
+ * Hard AND gate: ALL four conditions must be met for signal to fire.
+ * (1) Near strong S/R  (2) Reversal candle  (3) MACD confirms  (4) Volume threshold
+ */
+export function evaluateRejection(
+  direction: 'long' | 'short',
+  currentPrice: number,
+  confluentLevels: PriceLevel[],
+  ind15m: Indicators,
+  ind5m: Indicators | null,
+  config?: RejectionConfig,
+  reversalSignal?: ReversalSignal | null
+): RejectionResult {
+  if (!config?.enabled) return NEUTRAL_REJECTION;
+
+  const proxPct = config.proximityPct ?? 1.0;
+  const minVolRatio = config.minVolumeRatio ?? 1.2;
+  const minCandleStr = config.minCandleStrength ?? 0.3;
+  const minHistMag = config.minMacdHistMagnitude ?? 0.00005;
+  const requireMacdAlign = config.requireMacdAlignment ?? true;
+  const minLevelStr = config.minLevelStrength ?? 'moderate';
+  const minTouches = config.minLevelTouches ?? 2;
+  const confluenceBonus = config.reversalConfluenceBonus ?? 1.2;
+
+  const strengthRank: Record<string, number> = { strong: 3, moderate: 2, weak: 1 };
+
+  // --- 1. Level proximity ---
+  // For long: look for support below (bouncing off support)
+  // For short: look for resistance above (rejecting at resistance)
+  const targetType = direction === 'long' ? 'support' : 'resistance';
+  const candidateLevels = confluentLevels
+    .filter(l => l.type === targetType && l.touches >= minTouches)
+    .filter(l => (strengthRank[l.strength] ?? 0) >= (strengthRank[minLevelStr] ?? 2));
+
+  let nearestLevel: PriceLevel | null = null;
+  let nearestDistPct = Infinity;
+
+  for (const lv of candidateLevels) {
+    const distPct = Math.abs(currentPrice - lv.price) / currentPrice * 100;
+    if (distPct <= proxPct && distPct < nearestDistPct) {
+      nearestDistPct = distPct;
+      nearestLevel = lv;
+    }
+  }
+
+  const levelMet = nearestLevel !== null;
+
+  // --- 2. Reversal candle ---
+  // Check extendedPatterns on 15m (full weight) and 5m (0.7x weight) for reversal patterns
+  const targetPatternType = direction === 'long' ? 'reversal_bullish' : 'reversal_bearish';
+  let bestCandleStrength = 0;
+  let bestCandleName = '';
+
+  const patterns15m = ind15m.extendedPatterns || [];
+  for (const p of patterns15m) {
+    if (p.type === targetPatternType && p.strength > bestCandleStrength) {
+      bestCandleStrength = p.strength;
+      bestCandleName = p.name.replace(/_/g, ' ');
+    }
+  }
+
+  if (ind5m) {
+    const patterns5m = ind5m.extendedPatterns || [];
+    for (const p of patterns5m) {
+      const adjusted = p.strength * 0.7;
+      if (p.type === targetPatternType && adjusted > bestCandleStrength) {
+        bestCandleStrength = adjusted;
+        bestCandleName = p.name.replace(/_/g, ' ') + ' (5m)';
+      }
+    }
+  }
+
+  const candleMet = bestCandleStrength >= minCandleStr;
+
+  // --- 3. MACD histogram ---
+  const histogram = ind15m.histogram ?? 0;
+  const histMag = Math.abs(histogram);
+  let macdMet = histMag >= minHistMag;
+  if (requireMacdAlign && macdMet) {
+    // For long rejection (bullish): histogram should be positive or turning positive
+    // For short rejection (bearish): histogram should be negative or turning negative
+    const alignedDir = direction === 'long' ? histogram > 0 : histogram < 0;
+    macdMet = alignedDir;
+  }
+
+  // --- 4. Volume ---
+  const volRatio = ind15m.volRatio;
+  const volumeMet = volRatio >= minVolRatio;
+
+  // --- Hard AND gate ---
+  const allMet = levelMet && candleMet && macdMet && volumeMet;
+
+  const components: RejectionResult['components'] = {
+    levelProximity: { met: levelMet, distPct: nearestDistPct === Infinity ? -1 : nearestDistPct, levelPrice: nearestLevel?.price ?? 0 },
+    reversalCandle: { met: candleMet, patternName: bestCandleName || 'none', strength: bestCandleStrength },
+    macdConfirm: { met: macdMet, histogram },
+    volumeConfirm: { met: volumeMet, volRatio },
+  };
+
+  if (!allMet) {
+    const failedParts: string[] = [];
+    if (!levelMet) failedParts.push('no level');
+    if (!candleMet) failedParts.push('no candle');
+    if (!macdMet) failedParts.push('no MACD');
+    if (!volumeMet) failedParts.push('no vol');
+    return {
+      value: 0.5,
+      detected: false,
+      rejectedLevel: nearestLevel,
+      description: `Rejection incomplete: ${failedParts.join(', ')}`,
+      components,
+    };
+  }
+
+  // All conditions met — score from 0.75 to 1.0 based on component strengths
+  let compositeStrength = 0.75;
+
+  // Proximity contribution (closer = stronger)
+  const proxContrib = Math.max(0, 1 - nearestDistPct / proxPct) * 0.08;
+  compositeStrength += proxContrib;
+
+  // Candle strength contribution
+  compositeStrength += Math.min(bestCandleStrength, 1) * 0.08;
+
+  // Volume excess contribution
+  const volExcess = Math.min((volRatio - minVolRatio) / minVolRatio, 1) * 0.05;
+  compositeStrength += volExcess;
+
+  // MACD magnitude contribution
+  const macdExcess = Math.min(histMag / (minHistMag * 5), 1) * 0.04;
+  compositeStrength += macdExcess;
+
+  // Reversal detector confluence bonus
+  if (reversalSignal?.detected) {
+    const reversalAligns = (direction === 'long' && reversalSignal.direction === 'bullish')
+      || (direction === 'short' && reversalSignal.direction === 'bearish');
+    if (reversalAligns) {
+      compositeStrength = Math.min(1, compositeStrength * confluenceBonus);
+    }
+  }
+
+  compositeStrength = Math.min(1, compositeStrength);
+
+  const levelDesc = nearestLevel
+    ? `${nearestLevel.type} ${nearestLevel.price.toFixed(5)} (${nearestDistPct.toFixed(2)}%)`
+    : '?';
+
+  return {
+    value: compositeStrength,
+    detected: true,
+    rejectedLevel: nearestLevel,
+    description: `Rejection at ${levelDesc}, ${bestCandleName}, vol ${volRatio.toFixed(1)}x`,
+    components,
+  };
+}
+
 /**
  * Weighted signal scoring for Martingale-optimized trading
  * Each signal has a weight based on its importance for 15m entries with HTF confirmation
@@ -1578,52 +2143,82 @@ export function calculateDirectionStrength(
     warnings.push(`⚠️ 4H opposes: ${htfTrend} (${htfScore})`);
   }
 
-  // === 3. 1H SETUP (weight: 35) - Setup confirmation (trader's primary TF) ===
+  // === 3. 1H SETUP / BIAS ===
+  const isBreakoutStrat = strategy?.meta.type === 'breakout';
   let setupValue = 0.5;
-  const setupTrend = ind1h.trend;
 
-  if (direction === 'long') {
-    if (setupTrend === 'bullish') setupValue = 0.9;
-    else if (setupTrend === 'neutral') setupValue = 0.5;
-    else setupValue = 0.25;
+  if (isBreakoutStrat) {
+    // Breakout: 1H bias — more permissive, doesn't penalize extended price
+    const bias1h = evaluate1hBreakoutBias(ind1h, direction);
+    const maxBiasScore = 8;
+    setupValue = Math.min(1, bias1h.score / maxBiasScore);
+    if (!bias1h.pass) setupValue = Math.min(setupValue, 0.35);
+
+    signals.push({ name: '1H Bias', weight: w['1hSetup'], value: setupValue });
+    if (setupValue >= 0.6) reasons.push(`1H bias: ${bias1h.signals.slice(0, 2).join(', ')}`);
   } else {
-    if (setupTrend === 'bearish') setupValue = 0.9;
-    else if (setupTrend === 'neutral') setupValue = 0.5;
-    else setupValue = 0.25;
+    // Swing: 1H setup confirmation
+    const setupTrend = ind1h.trend;
+    if (direction === 'long') {
+      if (setupTrend === 'bullish') setupValue = 0.9;
+      else if (setupTrend === 'neutral') setupValue = 0.5;
+      else setupValue = 0.25;
+    } else {
+      if (setupTrend === 'bearish') setupValue = 0.9;
+      else if (setupTrend === 'neutral') setupValue = 0.5;
+      else setupValue = 0.25;
+    }
+
+    signals.push({ name: '1H Setup', weight: w['1hSetup'], value: setupValue });
+    if (setupValue >= 0.8) reasons.push(`1H confirms ${ind1h.trend}`);
   }
 
-  signals.push({ name: '1H Setup', weight: w['1hSetup'], value: setupValue });
-  if (setupValue >= 0.8) reasons.push(`1H confirms ${setupTrend}`);
+  // === 4. ENTRY (15m for swing, 5m for breakout) ===
+  let entryValue: number;
+  if (isBreakoutStrat) {
+    // Breakout: use 5m breakout entry evaluator
+    const entry5m = evaluate5mBreakoutEntry(ind5m, confluentLevels || [], direction, currentPrice || 0);
+    const maxEntryScore = 8;
+    entryValue = Math.min(1, entry5m.score / maxEntryScore);
+    if (!entry5m.pass) entryValue = Math.min(entryValue, 0.35);
 
-  // 4. 15m ENTRY (weight: 20) - Multi-signal entry timing (RSI + BB + MACD + EMA20)
-  // Uses evaluate15mLongEntry/ShortEntry instead of raw RSI for stable, confluent signals
-  const entry15m = direction === 'long'
-    ? evaluate15mLongEntry(ind15m)
-    : evaluate15mShortEntry(ind15m);
+    signals.push({ name: '5m Breakout', weight: w['15mEntry'], value: entryValue });
+    if (entryValue >= 0.5) reasons.push(`5m breakout: ${entry5m.signals.slice(0, 2).join(', ')}`);
+  } else {
+    // Swing: 15m multi-signal entry timing
+    const entry15m = direction === 'long'
+      ? evaluate15mLongEntry(ind15m)
+      : evaluate15mShortEntry(ind15m);
+    const maxEntryScore = 7.5;
+    entryValue = Math.min(1, entry15m.score / maxEntryScore);
+    if (!entry15m.pass) entryValue = Math.min(entryValue, 0.35);
 
-  // Normalize multi-signal score (max ~7.5) to 0-1 range
-  const maxEntryScore = 7.5;
-  let entryValue = Math.min(1, entry15m.score / maxEntryScore);
-
-  // Cap score for entries that don't meet the confluence threshold (score < 3)
-  if (!entry15m.pass) {
-    entryValue = Math.min(entryValue, 0.35);
+    signals.push({ name: '15m Entry', weight: w['15mEntry'], value: entryValue });
+    if (entryValue >= 0.6) reasons.push(`15m entry: ${entry15m.signals.slice(0, 2).join(', ')}`);
   }
 
-  signals.push({ name: '15m Entry', weight: w['15mEntry'], value: entryValue });
-  if (entryValue >= 0.6) reasons.push(`15m entry: ${entry15m.signals.slice(0, 2).join(', ')}`);
-
-  // 5. Volume (weight: 6) - Context-aware confirmation
-  const volContext = determineEntryContext(ind15m, ind1h, direction);
-  const volEval = evaluateVolume(ind15m.volRatio, volContext);
+  // === 5. Volume ===
   let volValue = 0.5;
-  if (volEval.pass) {
-    volValue = volEval.quality === 'strong' ? 0.9 : volEval.quality === 'moderate' ? 0.65 : 0.5;
+  if (isBreakoutStrat) {
+    // Breakout: always use 'breakout' context with 5m volume
+    const volEval = evaluateVolume(ind5m.volRatio, 'breakout');
+    if (volEval.pass) {
+      volValue = volEval.quality === 'strong' ? 0.95 : volEval.quality === 'moderate' ? 0.7 : 0.5;
+    } else {
+      volValue = 0.2; // Volume is critical for breakouts — harsher penalty
+    }
   } else {
-    volValue = 0.25;
+    // Swing: context-aware volume evaluation
+    const volContext = determineEntryContext(ind15m, ind1h, direction);
+    const volEval = evaluateVolume(ind15m.volRatio, volContext);
+    if (volEval.pass) {
+      volValue = volEval.quality === 'strong' ? 0.9 : volEval.quality === 'moderate' ? 0.65 : 0.5;
+    } else {
+      volValue = 0.25;
+    }
   }
   signals.push({ name: 'Volume', weight: w.volume, value: volValue });
-  if (volValue >= 0.8) reasons.push(`Volume ${volEval.description}`);
+  if (volValue >= 0.8) reasons.push(`Strong volume`);
 
   // 6. BTC alignment (weight: 8) - Correlation
   let btcValue = 0.5;
@@ -1772,6 +2367,23 @@ export function calculateDirectionStrength(
       reversalValue = 0.5 + phaseMultiplier * (reversalSignal.confidence / 100) * 0.5;
       reversalValue = Math.min(1, reversalValue);
 
+      // S/R confluence boost: reversal at key level is stronger
+      if (confluentLevels && confluentLevels.length > 0 && currentPrice && currentPrice > 0) {
+        const klCfg = strategy?.keyLevels;
+        const proxPct = klCfg?.reversalAtLevelProximityPct ?? klCfg?.nearProximityPct ?? 1.0;
+        const mult = klCfg?.reversalAtLevelMultiplier ?? 1.35;
+        const atKeyLevel = confluentLevels.some(lv => {
+          const dist = Math.abs(currentPrice - lv.price) / currentPrice * 100;
+          if (dist > proxPct) return false;
+          return (reversalSignal.direction === 'bullish' && lv.type === 'support')
+              || (reversalSignal.direction === 'bearish' && lv.type === 'resistance');
+        });
+        if (atKeyLevel) {
+          reversalValue = Math.min(1, reversalValue * mult);
+          reasons.push(`reversal at key ${reversalSignal.direction === 'bullish' ? 'support' : 'resistance'}`);
+        }
+      }
+
       if (reversalValue >= 0.7) {
         reasons.push(`↺ ${reversalSignal.phase} reversal (${reversalSignal.confidence}%)`);
       }
@@ -1818,6 +2430,14 @@ export function calculateDirectionStrength(
     signals.push({ name: 'Key Levels', weight: keyLevelWeight, value: kl.value });
     if (kl.value >= 0.7) reasons.push(`Levels: ${kl.description}`);
     if (kl.rrWarning) warnings.push(`⚠️ Poor RR: ${kl.description}`);
+  }
+
+  // 14. Rejection Signal (weight: configurable, default 0) — composite S/R rejection
+  const rejectionWeight = w.rejection ?? 0;
+  if (rejectionWeight > 0 && confluentLevels && confluentLevels.length > 0 && currentPrice && currentPrice > 0) {
+    const rej = evaluateRejection(direction, currentPrice, confluentLevels, ind15m, ind5m, strategy?.rejection, reversalSignal);
+    signals.push({ name: 'Rejection', weight: rejectionWeight, value: rej.value });
+    if (rej.detected) reasons.push(`Rejection at ${rej.rejectedLevel?.price.toFixed(5) ?? '?'}`);
   }
 
   // Calculate weighted strength
@@ -2027,21 +2647,25 @@ export function generateRecommendation(
     });
   }
 
+  // Market regime detection (moved up — needed for Fibonacci regime gating)
+  const regimeAnalysis = detectMarketRegime(ind4h, ind1h, strat.regime);
+
   // Build chart context for market structure + key level analysis
   const ohlcMap: Record<number, OHLCData[]> = {};
+  if (tf1d?.ohlc) ohlcMap[1440] = tf1d.ohlc;
   if (tf4h.ohlc) ohlcMap[240] = tf4h.ohlc;
   if (tf1h.ohlc) ohlcMap[60] = tf1h.ohlc;
   if (tf15m.ohlc) ohlcMap[15] = tf15m.ohlc;
   if (tf5m.ohlc) ohlcMap[5] = tf5m.ohlc;
   const chartContext = Object.keys(ohlcMap).length > 0
-    ? buildChartContext(ohlcMap, pair || 'XRPEUR')
+    ? buildChartContext(ohlcMap, pair || 'XRPEUR', strat.fibonacci, regimeAnalysis.regime)
     : null;
   const confluentLevels = chartContext?.confluentLevels ?? [];
   const effectivePrice = currentPrice ?? (tf15m.ohlc?.[tf15m.ohlc.length - 1]?.close) ?? 0;
 
   // Evaluate both directions (with microstructure, liquidation, and daily data)
-  const longChecks = evaluateLongConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d);
-  const shortChecks = evaluateShortConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d);
+  const longChecks = evaluateLongConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d, strat, ind5m, confluentLevels, effectivePrice, tf5m.ohlc);
+  const shortChecks = evaluateShortConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d, strat, ind5m, confluentLevels, effectivePrice, tf5m.ohlc);
 
   // Calculate weighted strength scores for BOTH directions (with reversal + structure + levels)
   const longStrengthResult = calculateDirectionStrength('long', longChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat);
@@ -2055,17 +2679,15 @@ export function generateRecommendation(
   const longPassedFull = countPassed(longChecks, true);
   const shortPassedFull = countPassed(shortChecks, true);
 
-  // Calculate total items in checklist (6-7 base + extras if available)
+  // Calculate total items in base checklist (core + optional flow/liquidation)
   let totalItems = getTotalBaseConditions(longChecks);
   if (micro) totalItems++;
   if (liq) totalItems++;
-  if (tf4h.ohlc || tf1h.ohlc) totalItems++;
-  if (confluentLevels.length > 0 && effectivePrice > 0) totalItems++;
 
   // Format checklists for BOTH directions
   const liqConfig = strat.liquidation;
-  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat);
-  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat);
+  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat, ind5m, tf5m.ohlc);
+  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat, ind5m, tf5m.ohlc);
 
   // Determine which setup is stronger (based on weighted strength)
   const bestSetup = longStrengthResult.strength >= shortStrengthResult.strength ? 'long' : 'short';
@@ -2118,9 +2740,6 @@ export function generateRecommendation(
   let action: TradingRecommendation['action'] = 'WAIT';
   let reason = '';
   let baseConfidence = 0;
-
-  // Market regime detection — adjusts action threshold dynamically
-  const regimeAnalysis = detectMarketRegime(ind4h, ind1h, strat.regime);
 
   // Use regime-adjusted action threshold instead of fixed strategy value
   const { directionLeadThreshold, sitOnHandsThreshold } = signalConfig;
@@ -2364,6 +2983,27 @@ export function generateRecommendation(
         .slice(0, 5)
         .map(p => p.name.replace(/_/g, ' ')),
     } : undefined,
+    rejectionStatus: (() => {
+      if (!strat.rejection?.enabled || !confluentLevels.length || effectivePrice <= 0) return undefined;
+      // Evaluate rejection for both directions, return the one that detected
+      for (const dir of ['long', 'short'] as const) {
+        const rej = evaluateRejection(dir, effectivePrice, confluentLevels, ind15m, ind5m, strat.rejection, reversalSignal);
+        if (rej.detected) {
+          return {
+            detected: true,
+            direction: (dir === 'long' ? 'bullish' : 'bearish') as 'bullish' | 'bearish',
+            description: rej.description,
+            rejectedLevel: rej.rejectedLevel ? {
+              price: rej.rejectedLevel.price,
+              type: rej.rejectedLevel.type,
+              strength: rej.rejectedLevel.strength,
+            } : undefined,
+            components: rej.components,
+          };
+        }
+      }
+      return undefined;
+    })(),
     regimeStatus: {
       regime: regimeAnalysis.regime,
       confidence: regimeAnalysis.confidence,

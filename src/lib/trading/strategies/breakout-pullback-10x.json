@@ -1,0 +1,255 @@
+{
+  "meta": {
+    "name": "BREAKOUT_PULLBACK_10X",
+    "type": "breakout",
+    "description": "Breakout-pullback strategy at 10x leverage. Enter on first pullback retest after confirmed level break. Tight timebox, volume-driven, max 1 DCA.",
+    "version": "1.0.0",
+    "pair": "XRP/EUR",
+    "author": "SmartBeat Trader"
+  },
+
+  "timeframeWeights": {
+    "1d": 0,
+    "4h": 15,
+    "1h": 18,
+    "15m": 22,
+    "5m": 45
+  },
+
+  "signals": {
+    "actionThreshold": 62,
+    "directionLeadThreshold": 10,
+    "sitOnHandsThreshold": 45,
+
+    "directionWeights": {
+      "1dTrend": 0,
+      "4hTrend": 12,
+      "1hSetup": 10,
+      "15mEntry": 22,
+      "volume": 16,
+      "btcAlign": 6,
+      "macdMom": 4,
+      "flow": 10,
+      "liq": 4,
+      "candlestick": 4,
+      "reversal": 6,
+      "marketStructure": 6,
+      "keyLevelProximity": 14,
+      "rejection": 6
+    },
+
+    "gradeThresholds": {
+      "A": 78,
+      "B": 62,
+      "C": 48,
+      "D": 35
+    }
+  },
+
+  "spike": {
+    "volumeRatioThreshold": 2.0,
+    "oversoldRSI": 25,
+    "overboughtRSI": 75
+  },
+
+  "positionSizing": {
+    "leverage": 10,
+    "fullEntryMarginPercent": 10,
+    "cautiousEntryMarginPercent": 6,
+    "minEntryConfidence": 62,
+    "fullEntryConfidence": 78,
+    "maxDCACount": 1,
+    "dcaMarginPercent": 8,
+    "maxTotalMarginPercent": 22,
+    "minFreeMarginPercent": 78
+  },
+
+  "dca": {
+    "minDrawdownForDCA": 2,
+    "minTimeBetweenDCAsMs": 3600000,
+    "minExhaustionConfidence": 55,
+    "dcaSizeScaleFactor": 1.0,
+    "allowDCAAfterMidpoint": false,
+
+    "exhaustionThresholds": {
+      "rsiOversold": 28,
+      "rsiOverbought": 72,
+
+      "volumeDecline5m": 0.7,
+      "volumeFading5m": 0.5,
+      "volumeDecline15m": 0.9,
+
+      "macdNearZero": 0.0005,
+      "macdSignalProximity": 0.0002,
+
+      "bbMiddleLow": 0.25,
+      "bbMiddleHigh": 0.75,
+
+      "priceStabilizingLookback": 6,
+      "priceStabilizingMinMatches": 3,
+
+      "minHoursBetweenByLevel": {
+        "1": 1
+      }
+    }
+  },
+
+  "exit": {
+    "exitPressureThreshold": 45,
+    "minConditionFlips": 2,
+    "allowPartialExits": false,
+    "minProfitForExit": 15
+  },
+
+  "antiGreed": {
+    "enabled": true,
+    "drawdownThresholdPercent": 40,
+    "minPnLToActivate": 20,
+    "minHWMToTrack": 60
+  },
+
+  "timebox": {
+    "maxHours": 6,
+    "escalationStartHours": 2,
+    "pressureCurve": "step",
+    "steps": [
+      { "hours": 0, "pressure": 0, "label": "Fresh breakout entry" },
+      { "hours": 1, "pressure": 10, "label": "Move should be developing" },
+      { "hours": 2, "pressure": 25, "label": "Midpoint — breakout resolving?" },
+      { "hours": 4, "pressure": 55, "label": "Late — exit on any bounce" },
+      { "hours": 5, "pressure": 80, "label": "Almost done — take what you can" },
+      { "hours": 6, "pressure": 100, "label": "Timebox expired — exit now" }
+    ]
+  },
+
+  "liquidation": {
+    "magnetProximityPct": 2.0,
+    "magnetMinStrength": 0.3,
+    "wallProximityPct": 5.0,
+    "wallMinDensity": 0.5,
+    "wallMinStrength": 0.6,
+    "densityNormFactor": 20,
+    "strongAsymmetryThreshold": 1.5,
+    "directionWeight": 4,
+    "scoring": {
+      "magnetAligned": 12,
+      "magnetOpposing": -8,
+      "wallSupport": 6,
+      "wallBlock": -6,
+      "asymmetryAligned": 8,
+      "asymmetryOpposing": -4,
+      "fundingConfirm": 4,
+      "proximityBonus": 4
+    }
+  },
+
+  "regime": {
+    "strongTrendADX": 30,
+    "trendingADX": 18,
+    "lowVolBBWidth": 0.8,
+    "highVolBBWidth": 2.5,
+    "rangingActionThreshold": 72,
+    "strongTrendActionThreshold": 55,
+    "trendingActionThreshold": 62,
+    "strongTrendMaxHours": 8,
+    "trendingMaxHours": 6,
+    "rangingMaxHours": 4,
+    "strongTrendTimeboxWeight": 0.08,
+    "trendingTimeboxWeight": 0.15,
+    "rangingTimeboxWeight": 0.25
+  },
+
+  "keyLevels": {
+    "nearProximityPct": 0.5,
+    "strongProximityPct": 0.3,
+    "minTouches": 2,
+    "minStrength": "moderate",
+    "rrMinRatio": 1.2,
+    "rrWarningRatio": 0.8,
+    "reversalAtLevelMultiplier": 1.5,
+    "reversalAtLevelProximityPct": 0.5
+  },
+
+  "fibonacci": {
+    "enabled": true,
+    "ratios": [0.382, 0.5, 0.618],
+    "extensions": [1.272, 1.618],
+    "timeframes": [15, 60],
+    "minSwingRangeATRMultiple": 1.5,
+    "regimeMultipliers": {
+      "strong_trend": 1.0,
+      "trending": 1.0,
+      "ranging": 0.3,
+      "low_volatility": 0.2
+    }
+  },
+
+  "session": {
+    "enabled": true,
+    "asiaDiscount": -12,
+    "transitionDiscount": -5,
+    "weekendDiscount": -10,
+    "overlapBonus": 6
+  },
+
+  "spreadGuard": {
+    "enabled": true,
+    "warnMultiplier": 1.3,
+    "blockMultiplier": 2.0,
+    "blockPenalty": -20,
+    "warnPenalty": -8
+  },
+
+  "rejection": {
+    "enabled": true,
+    "proximityPct": 0.5,
+    "minVolumeRatio": 1.5,
+    "minCandleStrength": 0.3,
+    "minMacdHistMagnitude": 0.00005,
+    "requireMacdAlignment": true,
+    "minLevelStrength": "moderate",
+    "minLevelTouches": 2,
+    "reversalConfluenceBonus": 1.2
+  },
+
+  "derivatives": {
+    "oiRisingThresholdPct": 5,
+    "oiFallingThresholdPct": -5,
+    "fundingExtremeThreshold": 0.01
+  },
+
+  "risk": {
+    "useStopLoss": false,
+    "useFixedTP": false,
+    "acceptLiquidation": true
+  },
+
+  "aiInstructions": {
+    "personality": "Fast, decisive, no hesitation. Think like a prop trader on a breakout desk. Volume and levels are your Bible. If the level didn't break clean, walk away.",
+    "corePhilosophy": [
+      "This is a BREAKOUT-PULLBACK strategy — enter AFTER the level breaks and price retests",
+      "Do NOT DCA more than once — a failed breakout is a failed thesis, don't average into it",
+      "6-hour timebox is the backstop — if the move hasn't happened, it won't",
+      "Volume confirmation is MANDATORY — no volume = no entry, period",
+      "Exit fast, take profit early — don't wait for perfect exits on breakout plays",
+      "10x leverage keeps liquidation at ~10% distance — standard margin power",
+      "10% margin entry — standard position sizing, max 1 DCA to 22% total",
+      "NO stop losses — the tight timebox and small size ARE the risk management",
+      "Strategy NEVER exits at a loss — hold through timebox or accept small loss on expiry",
+      "Timeframe priority: 5m=45%, 15m=22%, 1H=18%, 4H=15%, 1D=0% — 5m is execution king"
+    ],
+    "dcaGuidance": "Maximum 1 DCA on a retest dip. If the first pullback DCA doesn't hold, the breakout failed — do NOT add more. DCA requires volume confirmation and the broken level must still be respected. Minimum 2% drawdown before DCA triggers.",
+    "exitGuidance": "Exit pressure threshold is 45 (vs 60 for swing). Take profit fast. €15 minimum profit threshold — breakout plays aim for quick, clean moves. Anti-greed at 40% drawdown from HWM. Timebox escalates aggressively: by hour 4, pressure is 55. If you're not in profit by hour 4, you probably won't be. Volume drying up after breakout = exit signal. The 6h timebox is strict — breakouts resolve or die within hours.",
+    "responseRules": [
+      "Always check if price has actually broken a key level before recommending entry",
+      "Volume on breakout candle must be >= 2x average — non-negotiable",
+      "When asked about DCA, emphasize max 1 DCA only and failed breakout = dead trade",
+      "Never suggest holding past the 6h timebox — breakouts are time-sensitive",
+      "Never suggest stop losses or fixed take-profit levels",
+      "Never suggest exiting at a loss — hold through timebox if needed",
+      "Emphasize level retest quality — clean retest of broken level is ideal entry",
+      "Format EUR amounts as €X,XXX.XX",
+      "Always mention leverage is 10x and position size is 10% margin"
+    ]
+  }
+}

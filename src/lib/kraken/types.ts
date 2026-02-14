@@ -402,6 +402,7 @@ export interface DirectionRecommendation {
     liqBias?: ChecklistItem;
     marketStructure?: ChecklistItem; // HH/HL vs LH/LL structure
     keyLevelProximity?: ChecklistItem; // S/R level proximity + RR
+    rejection?: ChecklistItem; // Composite S/R rejection signal
   };
   passedCount: number;
   totalCount: number;
@@ -474,6 +475,7 @@ export interface TradingRecommendation {
     reversalSignal?: ChecklistItem; // Reversal pattern confluence
     marketStructure?: ChecklistItem; // HH/HL vs LH/LL structure
     keyLevelProximity?: ChecklistItem; // S/R level proximity + RR
+    rejection?: ChecklistItem; // Composite S/R rejection signal
   };
   // Option A: Flow analysis
   flowStatus?: {
@@ -525,6 +527,19 @@ export interface TradingRecommendation {
     urgency: 'immediate' | 'developing' | 'early_warning';
     description: string;
     patterns: string[]; // Pattern names for display
+  };
+  // Composite S/R rejection detection
+  rejectionStatus?: {
+    detected: boolean;
+    direction: 'bullish' | 'bearish';
+    description: string;
+    rejectedLevel?: { price: number; type: string; strength: string };
+    components: {
+      levelProximity: { met: boolean; distPct: number; levelPrice: number };
+      reversalCandle: { met: boolean; patternName: string; strength: number };
+      macdConfirm: { met: boolean; histogram: number };
+      volumeConfirm: { met: boolean; volRatio: number };
+    } | null;
   };
   // Market regime detection
   regimeStatus?: {

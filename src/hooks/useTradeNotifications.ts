@@ -51,22 +51,34 @@ function notify(
   tag: string,
   priority: 'high' | 'medium' = 'medium',
   replacePrefix?: string,
+  persist = true,
 ) {
   sendBrowserNotification(title, body, { tag, renotify: true });
 
-  // Persist to database (fire-and-forget)
-  fetch('/api/notifications', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      title,
-      body,
-      type: tag.replace(/-.*/, ''), // "signal-change" -> "signal"
-      tag,
-      priority,
-      ...(replacePrefix && { replacePrefix }),
-    }),
-  }).catch(() => {}); // Silent fail — browser notification still works
+  const type = tag.replace(/-.*/, ''); // "signal-change" -> "signal"
+
+  if (persist) {
+    // Persist to database (fire-and-forget)
+    fetch('/api/notifications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        body,
+        type,
+        tag,
+        priority,
+        ...(replacePrefix && { replacePrefix }),
+      }),
+    }).catch(() => {}); // Silent fail — browser notification still works
+  } else {
+    // Session-only: dispatch custom event so NotificationBell can pick it up
+    window.dispatchEvent(
+      new CustomEvent('session-notification', {
+        detail: { title, body, type, tag, priority },
+      }),
+    );
+  }
 }
 
 export function useTradeNotifications({
@@ -137,6 +149,8 @@ export function useTradeNotifications({
           `${prevAction} signal lost — now WAIT`,
           'signal-invalidated',
           'high',
+          undefined,
+          false, // session-only
         );
       }
     }
@@ -158,6 +172,8 @@ export function useTradeNotifications({
           `${direction ? `${direction} ` : ''}Confidence dropped to ${confidence}% — setup degrading`,
           'grade-change',
           'high',
+          undefined,
+          false, // session-only
         );
         lastGradeAlertRef.current = now;
       }
@@ -176,6 +192,9 @@ export function useTradeNotifications({
         'Setup Forming',
         `Confidence rising to ${confidence}% — watch for confirmation`,
         'setup-forming',
+        'medium',
+        undefined,
+        false, // session-only
       );
       lastSetupAlertRef.current = now;
     }

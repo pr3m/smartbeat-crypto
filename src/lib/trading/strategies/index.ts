@@ -24,11 +24,18 @@ import type {
   TimeboxConfig,
   RiskConfig,
   LiquidationStrategyConfig,
+  KeyLevelConfig,
+  FibonacciConfig,
+  SessionFilterConfig,
+  SpreadGuardConfig,
+  DerivativesConfig,
+  RejectionConfig,
 } from '../v2-types';
 import type { MarketRegimeConfig } from '../market-regime';
 
 // Import strategy JSON files
 import aggressiveSwing10xJson from './aggressive-swing-10x.json';
+import breakoutPullback10xJson from './breakout-pullback-10x.json';
 
 // ============================================================================
 // JSON → TradingStrategy HYDRATION
@@ -66,6 +73,12 @@ function hydrateStrategy(raw: Record<string, unknown>): TradingStrategy {
     risk: json.risk as unknown as RiskConfig,
     liquidation: json.liquidation ? json.liquidation as unknown as LiquidationStrategyConfig : undefined,
     regime: json.regime ? json.regime as unknown as MarketRegimeConfig : undefined,
+    keyLevels: json.keyLevels ? json.keyLevels as unknown as KeyLevelConfig : undefined,
+    fibonacci: json.fibonacci ? json.fibonacci as unknown as FibonacciConfig : undefined,
+    session: json.session ? json.session as unknown as SessionFilterConfig : undefined,
+    spreadGuard: json.spreadGuard ? json.spreadGuard as unknown as SpreadGuardConfig : undefined,
+    derivatives: json.derivatives ? json.derivatives as unknown as DerivativesConfig : undefined,
+    rejection: json.rejection ? json.rejection as unknown as RejectionConfig : undefined,
     aiInstructions: json.aiInstructions as unknown as TradingStrategy['aiInstructions'],
   };
 }
@@ -183,8 +196,11 @@ const DEFAULT_STRATEGY_NAME = 'AGGRESSIVE_SWING_10X';
 
 // Load built-in strategies on module init
 function initRegistry() {
-  const builtIn = hydrateStrategy(aggressiveSwing10xJson as unknown as Record<string, unknown>);
-  strategyRegistry.set(builtIn.meta.name, builtIn);
+  const swing = hydrateStrategy(aggressiveSwing10xJson as unknown as Record<string, unknown>);
+  strategyRegistry.set(swing.meta.name, swing);
+
+  const breakout = hydrateStrategy(breakoutPullback10xJson as unknown as Record<string, unknown>);
+  strategyRegistry.set(breakout.meta.name, breakout);
 }
 
 initRegistry();

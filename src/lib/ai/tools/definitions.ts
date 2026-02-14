@@ -102,7 +102,7 @@ export const assistantTools: ChatCompletionTool[] = [
     function: {
       name: 'get_trading_recommendation',
       description:
-        'Get the full multi-timeframe trading recommendation for XRP/EUR. Analyzes 4H, 1H, 15m, and 5m timeframes using the same algorithm as the Trading dashboard. Returns action (LONG/SHORT/WAIT), confidence, checklist with all conditions, reasoning, reversal detection status, and candlestick patterns.',
+        'Get the full multi-timeframe trading recommendation for XRP/EUR. Analyzes 4H, 1H, 15m, and 5m timeframes using the same algorithm as the Trading dashboard. Returns action (LONG/SHORT/WAIT), confidence, checklist with all conditions, reasoning, reversal detection, rejection detection (composite S/R rejection), and candlestick patterns.',
       parameters: {
         type: 'object',
         properties: {
@@ -135,6 +135,10 @@ export const assistantTools: ChatCompletionTool[] = [
           limit: {
             type: 'number',
             description: 'Number of candles to return (default: 50, max: 200)',
+          },
+          since: {
+            type: 'string',
+            description: 'ISO date string (e.g. "2026-02-13T00:00:00Z") to fetch candles from a specific time. Kraken returns up to 720 candles after this timestamp.',
           },
           includeIndicators: {
             type: 'boolean',
@@ -367,6 +371,28 @@ export const assistantTools: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'get_chart_analysis',
+      description:
+        'Get detailed chart structure analysis including support/resistance levels, Fibonacci levels, swing points, trend structure, and multi-timeframe alignment. Use this when discussing price levels, chart patterns, or market structure.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pair: {
+            type: 'string',
+            description: 'Trading pair (default: XRPEUR)',
+          },
+          timeframes: {
+            type: 'array',
+            items: { type: 'number', enum: [5, 15, 60, 240, 1440] },
+            description: 'Timeframe intervals in minutes to analyze (default: [15, 60, 240, 1440])',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'get_v2_engine_state',
       description:
         'Get the v2 trading engine state for the current position. Returns DCA signal (momentum exhaustion analysis with 5 signals), exit signal (pressure breakdown from 8 sources including reversal detection), reversal signal (candlestick pattern-based reversal phase, confidence, patterns), timebox status (hours elapsed/remaining, current step, pressure), anti-greed status (HWM, drawdown), and position sizing recommendation. Use this when the user asks about DCA, exit, or position management.',
@@ -400,4 +426,5 @@ export type ToolName =
   | 'get_current_setup'
   | 'analyze_position'
   | 'get_strategy_config'
+  | 'get_chart_analysis'
   | 'get_v2_engine_state';
