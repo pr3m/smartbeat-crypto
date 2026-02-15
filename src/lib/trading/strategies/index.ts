@@ -30,6 +30,7 @@ import type {
   SpreadGuardConfig,
   DerivativesConfig,
   RejectionConfig,
+  BTCAlignmentConfig,
 } from '../v2-types';
 import type { MarketRegimeConfig } from '../market-regime';
 
@@ -79,6 +80,7 @@ function hydrateStrategy(raw: Record<string, unknown>): TradingStrategy {
     spreadGuard: json.spreadGuard ? json.spreadGuard as unknown as SpreadGuardConfig : undefined,
     derivatives: json.derivatives ? json.derivatives as unknown as DerivativesConfig : undefined,
     rejection: json.rejection ? json.rejection as unknown as RejectionConfig : undefined,
+    btcAlignment: json.btcAlignment ? json.btcAlignment as unknown as BTCAlignmentConfig : undefined,
     aiInstructions: json.aiInstructions as unknown as TradingStrategy['aiInstructions'],
   };
 }
@@ -165,6 +167,26 @@ export function validateStrategy(strategy: TradingStrategy): ValidationError[] {
     }
   } else {
     errors.push({ field: 'timebox', message: 'Timebox config is required' });
+  }
+
+  // BTC alignment (optional)
+  if (strategy.btcAlignment) {
+    const btc = strategy.btcAlignment;
+    if (!btc.timeframes || btc.timeframes.length === 0) {
+      errors.push({ field: 'btcAlignment.timeframes', message: 'Must have at least one timeframe' });
+    }
+    if (btc.weights && btc.timeframes && btc.weights.length !== btc.timeframes.length) {
+      errors.push({ field: 'btcAlignment.weights', message: 'Weights must match timeframes length' });
+    }
+    if (btc.weights) {
+      const wSum = btc.weights.reduce((a, b) => a + b, 0);
+      if (Math.abs(wSum - 1.0) > 0.01) {
+        errors.push({ field: 'btcAlignment.weights', message: `Weights must sum to 1.0, got ${wSum.toFixed(2)}` });
+      }
+    }
+    if (btc.emaPeriod < 5 || btc.emaPeriod > 200) {
+      errors.push({ field: 'btcAlignment.emaPeriod', message: 'Must be 5-200' });
+    }
   }
 
   // Liquidation (optional)

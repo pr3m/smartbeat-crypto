@@ -19,6 +19,8 @@ import type {
   SignalEvaluationConfig,
   SpikeDetectionConfig,
   LiquidationStrategyConfig,
+  BTCTimeframeTrend,
+  BTCAlignmentConfig,
 } from './v2-types';
 import { DEFAULT_STRATEGY } from './v2-types';
 import { detectKnife, KNIFE_GATING_ENABLED, type KnifeAnalysis } from './knife-detection';
@@ -1074,39 +1076,94 @@ export function evaluateMACDMomentum(
 }
 
 /**
- * Evaluate BTC alignment with nuance
+ * Evaluate BTC alignment using OHLC-based per-timeframe trends.
  *
- * For swing trades:
- * - BTC trending same direction = strong confirmation
- * - BTC neutral = acceptable for strong setups
- * - BTC opposing = warning, need very strong setup
+ * Computes a weighted score across strategy-defined timeframes:
+ * - Aligned trend = 1.0, neutral = 0.5, opposing = 0.0
+ * - Fresh momentum gets a bonus (captures "heads up" for breakout strategies)
+ * - Combined score > 0.55 passes, > 0.75 is strong
+ *
+ * Falls back to legacy ticker-based evaluation when no OHLC trends are available.
  */
 export function evaluateBTCAlignment(
   direction: 'long' | 'short',
   btcTrend: 'bull' | 'bear' | 'neut',
   btcChange: number,
-  setupStrength: 'strong' | 'moderate' | 'weak'
-): { pass: boolean; quality: 'aligned' | 'neutral' | 'opposing'; description: string } {
+  setupStrength: 'strong' | 'moderate' | 'weak',
+  btcTfTrends?: BTCTimeframeTrend[],
+  btcAlignConfig?: BTCAlignmentConfig,
+): { pass: boolean; quality: 'aligned' | 'neutral' | 'opposing'; description: string; score: number } {
+  // --- OHLC-based evaluation (when available) ---
+  if (btcTfTrends && btcTfTrends.length > 0 && btcAlignConfig) {
+    const weights = btcAlignConfig.weights;
+    let weightedScore = 0;
+    let totalWeight = 0;
+    const parts: string[] = [];
+
+    for (let i = 0; i < btcTfTrends.length; i++) {
+      const tf = btcTfTrends[i];
+      const w = weights[i] ?? (1 / btcTfTrends.length);
+      totalWeight += w;
+
+      // Base score: aligned = 1.0, neutral = 0.5, opposing = 0.0
+      let tfScore: number;
+      const aligned = (direction === 'long' && tf.trend === 'bull') ||
+                      (direction === 'short' && tf.trend === 'bear');
+      const opposing = (direction === 'long' && tf.trend === 'bear') ||
+                       (direction === 'short' && tf.trend === 'bull');
+
+      if (aligned) {
+        tfScore = 1.0;
+        // Fresh momentum bonus: up to +0.15 for very fresh aligned trends
+        tfScore += tf.freshness * 0.15;
+      } else if (opposing) {
+        tfScore = 0.0;
+        // Fresh opposing is even worse
+        tfScore -= tf.freshness * 0.1;
+      } else {
+        // Neutral
+        tfScore = 0.5;
+      }
+
+      // EMA position confirmation: price on the right side of EMA adds conviction
+      if (aligned && tf.emaPosition > 0.3) tfScore += 0.05;
+      if (opposing && tf.emaPosition < -0.3) tfScore -= 0.05;
+
+      tfScore = Math.max(0, Math.min(1.15, tfScore));
+      weightedScore += tfScore * w;
+
+      const tfLabel = tf.interval >= 60 ? `${tf.interval / 60}H` : `${tf.interval}m`;
+      parts.push(`${tfLabel}:${tf.trend}${tf.freshness > 0.6 ? '↑' : ''}`);
+    }
+
+    const score = totalWeight > 0 ? weightedScore / totalWeight : 0.5;
+    const passThreshold = setupStrength === 'weak' ? 0.6 : 0.5;
+    const pass = score >= passThreshold;
+    const quality: 'aligned' | 'neutral' | 'opposing' =
+      score >= 0.7 ? 'aligned' : score >= 0.4 ? 'neutral' : 'opposing';
+    const description = `${parts.join(' ')}${quality === 'opposing' ? ' ⚠️' : ''}`;
+
+    return { pass, quality, description, score };
+  }
+
+  // --- Legacy ticker-based fallback ---
   if (direction === 'long') {
     if (btcTrend === 'bull') {
-      return { pass: true, quality: 'aligned', description: `BTC bull ${btcChange.toFixed(1)}%` };
+      return { pass: true, quality: 'aligned', description: `BTC bull ${btcChange.toFixed(1)}%`, score: 1.0 };
     } else if (btcTrend === 'neut') {
-      // Neutral BTC passes for strong/moderate setups
       const pass = setupStrength !== 'weak';
-      return { pass, quality: 'neutral', description: `BTC neut ${btcChange.toFixed(1)}%` };
+      return { pass, quality: 'neutral', description: `BTC neut ${btcChange.toFixed(1)}%`, score: 0.5 };
     } else {
-      // BTC bearish - only pass for very strong setups (divergence play)
-      return { pass: false, quality: 'opposing', description: `BTC bear ${btcChange.toFixed(1)}% ⚠️` };
+      return { pass: false, quality: 'opposing', description: `BTC bear ${btcChange.toFixed(1)}% ⚠️`, score: 0.0 };
     }
   } else {
-    // SHORT
     if (btcTrend === 'bear') {
-      return { pass: true, quality: 'aligned', description: `BTC bear ${btcChange.toFixed(1)}%` };
+      return { pass: true, quality: 'aligned', description: `BTC bear ${btcChange.toFixed(1)}%`, score: 1.0 };
     } else if (btcTrend === 'neut') {
       const pass = setupStrength !== 'weak';
-      return { pass, quality: 'neutral', description: `BTC neut ${btcChange.toFixed(1)}%` };
+      return { pass, quality: 'neutral', description: `BTC neut ${btcChange.toFixed(1)}%`, score: 0.5 };
     } else {
-      return { pass: false, quality: 'opposing', description: `BTC bull ${btcChange.toFixed(1)}% ⚠️` };
+      return { pass: false, quality: 'opposing', description: `BTC bull ${btcChange.toFixed(1)}% ⚠️`, score: 0.0 };
     }
   }
 }
@@ -1154,25 +1211,24 @@ export function evaluateLongConditions(
   ind5m?: Indicators | null,
   confluentLevels?: PriceLevel[],
   currentPrice?: number,
-  ohlc5m?: OHLCData[]
+  ohlc5m?: OHLCData[],
+  btcTfTrends?: BTCTimeframeTrend[],
 ): LongChecks {
   const flowAnalysis = analyzeFlow('long', micro || null);
   const liqAnalysis = analyzeLiquidation('long', liq || null);
 
   if (strategy?.meta.type === 'breakout' && ind5m) {
-    // Breakout strategy: use 5m breakout entry + 1H bias
     const entry5m = evaluate5mBreakoutEntry(ind5m, confluentLevels || [], 'long', currentPrice || 0, ohlc5m);
     const bias1h = evaluate1hBreakoutBias(ind1h, 'long');
-    // Volume always in 'breakout' context for this strategy
     const volumeEval = evaluateVolume(ind5m.volRatio, 'breakout');
     const macdEval = evaluateMACDMomentum('long', ind5m.histogram, ind5m.macd);
-    const btcEval = evaluateBTCAlignment('long', btcTrend, 0, bias1h.quality);
+    const btcEval = evaluateBTCAlignment('long', btcTrend, 0, bias1h.quality, btcTfTrends, strategy.btcAlignment);
 
     return {
       trend1d: ind1d ? ind1d.trend !== 'bearish' : undefined,
       trend4h: ind4h.trend === 'bullish',
       setup1h: bias1h.pass,
-      entry15m: entry5m.pass, // 5m breakout entry fills the entry15m slot
+      entry15m: entry5m.pass,
       volume: volumeEval.pass,
       btcAlign: btcEval.pass,
       macdMomentum: macdEval.pass,
@@ -1187,7 +1243,7 @@ export function evaluateLongConditions(
   const context = determineEntryContext(ind15m, ind1h, 'long');
   const volumeEval = evaluateVolume(ind15m.volRatio, context);
   const macdEval = evaluateMACDMomentum('long', ind15m.histogram, ind15m.macd);
-  const btcEval = evaluateBTCAlignment('long', btcTrend, 0, setup1h.quality);
+  const btcEval = evaluateBTCAlignment('long', btcTrend, 0, setup1h.quality, btcTfTrends, strategy?.btcAlignment);
 
   return {
     trend1d: ind1d ? ind1d.trend !== 'bearish' : undefined,
@@ -1217,18 +1273,18 @@ export function evaluateShortConditions(
   ind5m?: Indicators | null,
   confluentLevels?: PriceLevel[],
   currentPrice?: number,
-  ohlc5m?: OHLCData[]
+  ohlc5m?: OHLCData[],
+  btcTfTrends?: BTCTimeframeTrend[],
 ): ShortChecks {
   const flowAnalysis = analyzeFlow('short', micro || null);
   const liqAnalysis = analyzeLiquidation('short', liq || null);
 
   if (strategy?.meta.type === 'breakout' && ind5m) {
-    // Breakout strategy: use 5m breakout entry + 1H bias
     const entry5m = evaluate5mBreakoutEntry(ind5m, confluentLevels || [], 'short', currentPrice || 0, ohlc5m);
     const bias1h = evaluate1hBreakoutBias(ind1h, 'short');
     const volumeEval = evaluateVolume(ind5m.volRatio, 'breakout');
     const macdEval = evaluateMACDMomentum('short', ind5m.histogram, ind5m.macd);
-    const btcEval = evaluateBTCAlignment('short', btcTrend, 0, bias1h.quality);
+    const btcEval = evaluateBTCAlignment('short', btcTrend, 0, bias1h.quality, btcTfTrends, strategy.btcAlignment);
 
     return {
       trend1d: ind1d ? ind1d.trend !== 'bullish' : undefined,
@@ -1249,7 +1305,7 @@ export function evaluateShortConditions(
   const context = determineEntryContext(ind15m, ind1h, 'short');
   const volumeEval = evaluateVolume(ind15m.volRatio, context);
   const macdEval = evaluateMACDMomentum('short', ind15m.histogram, ind15m.macd);
-  const btcEval = evaluateBTCAlignment('short', btcTrend, 0, setup1h.quality);
+  const btcEval = evaluateBTCAlignment('short', btcTrend, 0, setup1h.quality, btcTfTrends, strategy?.btcAlignment);
 
   return {
     trend1d: ind1d ? ind1d.trend !== 'bullish' : undefined,
@@ -1422,13 +1478,17 @@ function formatBTCValue(
   direction: 'long' | 'short',
   btcTrend: string,
   btcChange: number,
-  setupQuality: 'strong' | 'moderate' | 'weak'
+  setupQuality: 'strong' | 'moderate' | 'weak',
+  btcTfTrends?: BTCTimeframeTrend[],
+  btcAlignConfig?: BTCAlignmentConfig,
 ): string {
   const btcEval = evaluateBTCAlignment(
     direction,
     btcTrend as 'bull' | 'bear' | 'neut',
     btcChange,
-    setupQuality
+    setupQuality,
+    btcTfTrends,
+    btcAlignConfig,
   );
   return btcEval.description;
 }
@@ -1455,7 +1515,8 @@ export function formatChecklist(
   currentPrice?: number,
   strategy?: TradingStrategy,
   ind5m?: Indicators | null,
-  ohlc5m?: OHLCData[]
+  ohlc5m?: OHLCData[],
+  btcTfTrends?: BTCTimeframeTrend[],
 ): TradingRecommendation['checklist'] {
   const flowAnalysis = micro ? analyzeFlow(direction, micro) : null;
   const liqAnalysis = liq ? analyzeLiquidation(direction, liq, liqConfig) : null;
@@ -1561,7 +1622,7 @@ export function formatChecklist(
     : (direction === 'long' ? evaluate1hLongSetup(ind1h) : evaluate1hShortSetup(ind1h)).quality;
   checklist.btcAlign = {
     pass: checks.btcAlign,
-    value: formatBTCValue(direction, btcTrend, btcChange, setupQuality),
+    value: formatBTCValue(direction, btcTrend, btcChange, setupQuality, btcTfTrends, strategy?.btcAlignment),
   };
 
   // Add daily trend if available with EMA info (skip for breakout if weight is 0)
@@ -2046,7 +2107,8 @@ export function calculateDirectionStrength(
   ohlc1h?: OHLCData[],
   confluentLevels?: PriceLevel[],
   currentPrice?: number,
-  strategy?: TradingStrategy
+  strategy?: TradingStrategy,
+  btcTfTrends?: BTCTimeframeTrend[],
 ): { strength: number; signals: SignalWeight[]; reasons: string[]; warnings: string[] } {
   const signals: SignalWeight[] = [];
   const reasons: string[] = [];
@@ -2221,19 +2283,11 @@ export function calculateDirectionStrength(
   if (volValue >= 0.8) reasons.push(`Strong volume`);
 
   // 6. BTC alignment (weight: 8) - Correlation
-  let btcValue = 0.5;
-  if (direction === 'long') {
-    if (btcTrend === 'bull') btcValue = 1.0;
-    else if (btcTrend === 'neut') btcValue = 0.6;
-    else btcValue = 0.3;
-  } else {
-    if (btcTrend === 'bear') btcValue = 1.0;
-    else if (btcTrend === 'neut') btcValue = 0.6;
-    else btcValue = 0.3;
-  }
+  const btcEvalForStrength = evaluateBTCAlignment(direction, btcTrend, 0, 'moderate', btcTfTrends, strategy?.btcAlignment);
+  const btcValue = btcEvalForStrength.score;
   signals.push({ name: 'BTC Align', weight: w.btcAlign, value: btcValue });
-  if (btcValue >= 0.8) reasons.push(`BTC ${btcTrend}`);
-  if (btcValue < 0.4) warnings.push(`⚠️ BTC opposing: ${btcTrend}`);
+  if (btcValue >= 0.8) reasons.push(`BTC aligned`);
+  if (btcValue < 0.4) warnings.push(`⚠️ BTC opposing`);
 
   // 7. MACD momentum (weight: 6) - Dead-zone-aware evaluation
   const macdEval = evaluateMACDMomentum(direction, ind15m.histogram, ind15m.macd);
@@ -2615,7 +2669,8 @@ export function generateRecommendation(
   currentPrice?: number,
   exchange?: string,
   pair?: string,
-  strategy?: TradingStrategy
+  strategy?: TradingStrategy,
+  btcTfTrends?: BTCTimeframeTrend[],
 ): TradingRecommendation | null {
   const strat = strategy ?? DEFAULT_STRATEGY;
   const signalConfig = strat.signals;
@@ -2664,12 +2719,12 @@ export function generateRecommendation(
   const effectivePrice = currentPrice ?? (tf15m.ohlc?.[tf15m.ohlc.length - 1]?.close) ?? 0;
 
   // Evaluate both directions (with microstructure, liquidation, and daily data)
-  const longChecks = evaluateLongConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d, strat, ind5m, confluentLevels, effectivePrice, tf5m.ohlc);
-  const shortChecks = evaluateShortConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d, strat, ind5m, confluentLevels, effectivePrice, tf5m.ohlc);
+  const longChecks = evaluateLongConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d, strat, ind5m, confluentLevels, effectivePrice, tf5m.ohlc, btcTfTrends);
+  const shortChecks = evaluateShortConditions(ind4h, ind1h, ind15m, btcTrend, micro, liq, ind1d, strat, ind5m, confluentLevels, effectivePrice, tf5m.ohlc, btcTfTrends);
 
   // Calculate weighted strength scores for BOTH directions (with reversal + structure + levels)
-  const longStrengthResult = calculateDirectionStrength('long', longChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat);
-  const shortStrengthResult = calculateDirectionStrength('short', shortChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat);
+  const longStrengthResult = calculateDirectionStrength('long', longChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat, btcTfTrends);
+  const shortStrengthResult = calculateDirectionStrength('short', shortChecks, ind4h, ind1h, ind15m, ind5m, ind1d, btcTrend, micro || null, liq || null, signalConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat, btcTfTrends);
 
   // Base score (6-7 conditions depending on daily availability, excluding flowConfirm and liqBias)
   const longPassed = countPassed(longChecks, false);
@@ -2686,8 +2741,8 @@ export function generateRecommendation(
 
   // Format checklists for BOTH directions
   const liqConfig = strat.liquidation;
-  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat, ind5m, tf5m.ohlc);
-  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat, ind5m, tf5m.ohlc);
+  const longChecklist = formatChecklist(longChecks, 'long', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat, ind5m, tf5m.ohlc, btcTfTrends);
+  const shortChecklist = formatChecklist(shortChecks, 'short', ind4h, ind1h, ind15m, btcTrend, btcChange, micro, liq, ind1d, liqConfig, reversalSignal, tf4h.ohlc, tf1h.ohlc, confluentLevels, effectivePrice, strat, ind5m, tf5m.ohlc, btcTfTrends);
 
   // Determine which setup is stronger (based on weighted strength)
   const bestSetup = longStrengthResult.strength >= shortStrengthResult.strength ? 'long' : 'short';

@@ -5,6 +5,7 @@
  */
 
 import type { OHLCData, Indicators, CandlestickPattern } from '@/lib/kraken/types';
+import type { BTCAlignmentConfig, BTCTimeframeTrend } from './v2-types';
 import { detectAllCandlestickPatterns } from './candlestick-patterns';
 
 /**
@@ -735,4 +736,128 @@ export function calculateBTCTrend(
   // BTC needs >0.5% move to be considered trending
   const trend = btcChange > 0.5 ? 'bull' : btcChange < -0.5 ? 'bear' : 'neut';
   return { trend, change: btcChange };
+}
+
+/**
+ * Calculate BTC trend from OHLC candles for a single timeframe.
+ * Uses EMA position + slope to determine trend direction and freshness.
+ *
+ * @param candles - BTC OHLC candles for one timeframe
+ * @param interval - Timeframe interval in minutes
+ * @param emaPeriod - EMA period (from strategy config)
+ * @param slopeCandles - Number of candles to measure slope over
+ * @param neutralZonePct - Slope within this range is "neut"
+ */
+export function calculateBTCTrendFromOHLC(
+  candles: OHLCData[],
+  interval: number,
+  emaPeriod: number,
+  slopeCandles: number,
+  neutralZonePct: number
+): BTCTimeframeTrend {
+  const fallback: BTCTimeframeTrend = {
+    interval,
+    trend: 'neut',
+    slope: 0,
+    emaPosition: 0,
+    freshness: 0,
+    description: 'Insufficient data',
+  };
+
+  if (!candles || candles.length < emaPeriod + slopeCandles) {
+    return fallback;
+  }
+
+  const closes = candles.map(c => c.close);
+  const emaValues = ema(closes, emaPeriod);
+
+  // Need at least slopeCandles + 1 EMA values
+  const validEma = emaValues.filter(v => v !== undefined && v > 0);
+  if (validEma.length < slopeCandles + 1) {
+    return fallback;
+  }
+
+  // Current values
+  const currentPrice = closes[closes.length - 1];
+  const currentEma = validEma[validEma.length - 1];
+
+  // EMA slope: % change per candle over recent window
+  const slope = calculateEMASlope(validEma, slopeCandles);
+
+  // Price position relative to EMA: positive = above, negative = below
+  // Normalize by recent ATR to make it scale-independent
+  const highs = candles.slice(-20).map(c => c.high);
+  const lows = candles.slice(-20).map(c => c.low);
+  let atrSum = 0;
+  for (let i = 1; i < highs.length; i++) {
+    atrSum += highs[i] - lows[i];
+  }
+  const atr = atrSum / (highs.length - 1) || 1;
+  const emaPosition = (currentPrice - currentEma) / atr;
+  // Clamp to -1..+1
+  const clampedPosition = Math.max(-1, Math.min(1, emaPosition));
+
+  // Determine trend from slope
+  let trend: 'bull' | 'bear' | 'neut';
+  if (slope > neutralZonePct) {
+    trend = 'bull';
+  } else if (slope < -neutralZonePct) {
+    trend = 'bear';
+  } else {
+    trend = 'neut';
+  }
+
+  // Freshness: how recently did the trend start?
+  // Look back through EMA slopes — if trend just turned, freshness is high.
+  // We check how many of the recent slopeCandles have the same sign.
+  let sameDirectionCount = 0;
+  for (let i = validEma.length - 1; i >= Math.max(0, validEma.length - slopeCandles * 2); i--) {
+    const prev = validEma[i - 1];
+    if (!prev || prev <= 0) break;
+    const localSlope = ((validEma[i] - prev) / prev) * 100;
+    if ((trend === 'bull' && localSlope > 0) || (trend === 'bear' && localSlope < 0)) {
+      sameDirectionCount++;
+    } else {
+      break; // Direction changed — this is where the trend started
+    }
+  }
+  // Freshness: 1.0 = just started (1-2 candles), 0.0 = long-established
+  const maxFreshCandles = slopeCandles * 2;
+  const freshness = trend === 'neut'
+    ? 0
+    : Math.max(0, 1 - (sameDirectionCount - 1) / maxFreshCandles);
+
+  // Timeframe label
+  const tfLabel = interval >= 60 ? `${interval / 60}H` : `${interval}m`;
+  const slopeStr = slope >= 0 ? `+${slope.toFixed(3)}` : slope.toFixed(3);
+  const description = `${tfLabel} ${trend} (slope ${slopeStr}%/c${freshness > 0.6 ? ' FRESH' : ''})`;
+
+  return { interval, trend, slope, emaPosition: clampedPosition, freshness, description };
+}
+
+/**
+ * Evaluate BTC alignment across multiple timeframes using strategy config.
+ * Returns per-timeframe trends and a combined weighted score.
+ *
+ * @param btcOhlcByInterval - Map of interval → BTC OHLC candles
+ * @param config - BTCAlignmentConfig from the active strategy
+ */
+export function evaluateBTCTrends(
+  btcOhlcByInterval: Record<number, OHLCData[]>,
+  config: BTCAlignmentConfig
+): BTCTimeframeTrend[] {
+  return config.timeframes.map(tf => {
+    const candles = btcOhlcByInterval[tf];
+    if (!candles || candles.length === 0) {
+      return {
+        interval: tf,
+        trend: 'neut' as const,
+        slope: 0,
+        emaPosition: 0,
+        freshness: 0,
+        description: 'No data',
+      };
+    }
+    return calculateBTCTrendFromOHLC(candles, tf, config.emaPeriod, config.slopeCandles, config.neutralZonePct);
+  });
 }

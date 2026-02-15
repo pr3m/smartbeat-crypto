@@ -90,6 +90,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     bestAsk,
     btcChange,
     btcTrend,
+    btcTfTrends,
     tfData,
     loading,
     error,
@@ -740,7 +741,8 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
       priceForRecRef.current, // Current price for ATR volatility calculation
       undefined, // exchange
       'XRPEUR', // pair
-      strategy // Selected strategy — drives evaluators, weights, and thresholds
+      strategy, // Selected strategy — drives evaluators, weights, and thresholds
+      btcTfTrends, // OHLC-based BTC trend per strategy timeframe
     );
 
     console.log('Generated recommendation:', rec?.action, 'Long:', rec?.longScore, 'Short:', rec?.shortScore, 'Flow:', rec?.flowStatus?.status, 'Liq:', rec?.liquidationStatus?.bias);
@@ -758,7 +760,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     }
 
     lastRecommendationRef.current = rec?.action || null;
-  }, [tfData, btcTrend, btcChange, microData, liqData, addToast, strategy]);
+  }, [tfData, btcTrend, btcChange, btcTfTrends, microData, liqData, addToast, strategy]);
 
   // Request notification permission on mount
   useEffect(() => {

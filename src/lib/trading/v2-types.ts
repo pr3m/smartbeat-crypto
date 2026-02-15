@@ -605,6 +605,45 @@ export interface DerivativesConfig {
   fundingExtremeThreshold: number;
 }
 
+// ============================================================================
+// BTC ALIGNMENT
+// ============================================================================
+
+/**
+ * Strategy-driven BTC alignment configuration.
+ * Each strategy defines which BTC timeframes to evaluate and how.
+ */
+export interface BTCAlignmentConfig {
+  /** BTC OHLC timeframes to evaluate (Kraken interval minutes, e.g. [60, 15]) */
+  timeframes: number[];
+  /** EMA period for trend detection on each timeframe */
+  emaPeriod: number;
+  /** Number of recent candles to measure slope over */
+  slopeCandles: number;
+  /** Slope (% per candle) within this range is considered neutral */
+  neutralZonePct: number;
+  /** Weight per timeframe (same order as timeframes array, must sum to 1.0) */
+  weights: number[];
+}
+
+/**
+ * Per-timeframe BTC trend result from OHLC analysis.
+ */
+export interface BTCTimeframeTrend {
+  /** Timeframe interval in minutes */
+  interval: number;
+  /** Trend direction */
+  trend: 'bull' | 'bear' | 'neut';
+  /** EMA slope (% per candle, positive = rising) */
+  slope: number;
+  /** Price position relative to EMA (-1 to +1: below/above, scaled by ATR) */
+  emaPosition: number;
+  /** How recently the trend started — higher = fresher momentum */
+  freshness: number;
+  /** Human-readable description */
+  description: string;
+}
+
 /** Spike detection config for 5m timeframe */
 export interface SpikeDetectionConfig {
   /** Volume ratio threshold for spike (e.g., 2.0 = 2x average) */
@@ -758,6 +797,8 @@ export interface TradingStrategy {
   derivatives?: DerivativesConfig;
   /** Composite S/R rejection detection config */
   rejection?: RejectionConfig;
+  /** BTC alignment evaluation config (timeframes, EMA, weights) */
+  btcAlignment?: BTCAlignmentConfig;
   /** Optional AI instructions for strategy-aware assistant */
   aiInstructions?: AIInstructions;
 }

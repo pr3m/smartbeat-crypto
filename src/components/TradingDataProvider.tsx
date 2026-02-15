@@ -2,8 +2,10 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { calculateIndicators, calculateBTCTrend } from '@/lib/trading/indicators';
+import { calculateIndicators, calculateBTCTrend, evaluateBTCTrends } from '@/lib/trading/indicators';
 import type { OHLCData, TimeframeData, TradeBalance } from '@/lib/kraken/types';
+import type { BTCTimeframeTrend } from '@/lib/trading/v2-types';
+import { getDefaultStrategy } from '@/lib/trading/strategies';
 import { useKrakenWebSocket, type WebSocketStatus } from '@/hooks/useKrakenWebSocket';
 
 export const TRADING_TIMEFRAMES = [
@@ -123,6 +125,7 @@ interface TradingDataContextValue {
   bestAsk: number;
   btcChange: number;
   btcTrend: 'bull' | 'bear' | 'neut';
+  btcTfTrends: BTCTimeframeTrend[];
   tfData: Record<number, TimeframeData>;
   loading: boolean;
   error: string | null;
@@ -175,6 +178,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
   const [bestAsk, setBestAsk] = useState(0);
   const [btcChange, setBtcChange] = useState(0);
   const [btcTrend, setBtcTrend] = useState<'bull' | 'bear' | 'neut'>('neut');
+  const [btcTfTrends, setBtcTfTrends] = useState<BTCTimeframeTrend[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // nextRefresh is tracked via nextRefreshRef (set up near the countdown timer effect)
@@ -334,12 +338,23 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     }
 
     try {
-      const responses = await Promise.all(
-        TRADING_TIMEFRAMES.map(tf =>
-          fetch(`/api/kraken/public/ohlc?pair=XRPEUR&interval=${tf.value}`)
-        )
-      );
+      // Determine which BTC timeframes the active strategy needs
+      const strat = getDefaultStrategy();
+      const btcIntervals = strat.btcAlignment?.timeframes ?? [];
 
+      // Fetch XRP OHLC + BTC OHLC in parallel
+      const [xrpResponses, ...btcResponses] = await Promise.all([
+        Promise.all(
+          TRADING_TIMEFRAMES.map(tf =>
+            fetch(`/api/kraken/public/ohlc?pair=XRPEUR&interval=${tf.value}`)
+          )
+        ),
+        ...btcIntervals.map(interval =>
+          fetch(`/api/kraken/public/ohlc?pair=XBTEUR&interval=${interval}`)
+        ),
+      ]);
+
+      // Process XRP OHLC
       const newTfData: Record<number, TimeframeData> = {
         5: { ohlc: [], indicators: null },
         15: { ohlc: [], indicators: null },
@@ -350,7 +365,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
 
       for (let i = 0; i < TRADING_TIMEFRAMES.length; i += 1) {
         const tf = TRADING_TIMEFRAMES[i].value;
-        const response = responses[i];
+        const response = xrpResponses[i];
         if (!response.ok) {
           console.error(`Failed to fetch OHLC for ${tf}m:`, response.status);
           continue;
@@ -362,6 +377,22 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
           const indicators = calculateIndicators(ohlc);
           newTfData[tf] = { ohlc, indicators };
         }
+      }
+
+      // Process BTC OHLC and calculate per-timeframe trends
+      if (strat.btcAlignment && btcIntervals.length > 0) {
+        const btcOhlcByInterval: Record<number, OHLCData[]> = {};
+        for (let i = 0; i < btcIntervals.length; i++) {
+          const interval = btcIntervals[i];
+          const response = btcResponses[i];
+          if (!response || !response.ok) continue;
+          const result = await response.json();
+          if (!result.error && result.data) {
+            btcOhlcByInterval[interval] = result.data;
+          }
+        }
+        const trends = evaluateBTCTrends(btcOhlcByInterval, strat.btcAlignment);
+        setBtcTfTrends(trends);
       }
 
       setTfData(newTfData);
@@ -1003,6 +1034,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     bestAsk,
     btcChange,
     btcTrend,
+    btcTfTrends,
     tfData,
     loading,
     error,
@@ -1045,6 +1077,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
     bestAsk,
     btcChange,
     btcTrend,
+    btcTfTrends,
     tfData,
     loading,
     error,

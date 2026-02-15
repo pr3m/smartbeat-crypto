@@ -212,6 +212,14 @@
     "reversalConfluenceBonus": 1.2
   },
 
+  "btcAlignment": {
+    "timeframes": [15, 5],
+    "emaPeriod": 14,
+    "slopeCandles": 3,
+    "neutralZonePct": 0.08,
+    "weights": [0.5, 0.5]
+  },
+
   "derivatives": {
     "oiRisingThresholdPct": 5,
     "oiFallingThresholdPct": -5,
