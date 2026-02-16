@@ -109,8 +109,8 @@
   },
 
   "timebox": {
-    "maxHours": 6,
-    "escalationStartHours": 2,
+    "maxHours": 48,
+    "escalationStartHours": 32,
     "pressureCurve": "step",
     "steps": [
       { "hours": 0, "pressure": 0, "label": "Fresh breakout entry" },

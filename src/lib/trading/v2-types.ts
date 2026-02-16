@@ -441,6 +441,11 @@ export interface SignalEvaluationConfig {
   /** Strength above this = "SIT ON HANDS" (forming but not actionable) */
   sitOnHandsThreshold: number;
 
+  /** MACD histogram dead zone — values below this are treated as neutral (default 0.00005) */
+  macdDeadZone?: number;
+  /** Hysteresis gap: once a signal fires, it stays until strength drops actionThreshold - this value (default 8) */
+  maintainThresholdGap?: number;
+
   /** Weighted signal scoring for direction strength calculation */
   directionWeights: DirectionWeightMap;
 

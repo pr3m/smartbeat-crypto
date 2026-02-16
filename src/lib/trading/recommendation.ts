@@ -1020,12 +1020,13 @@ export function evaluateVolume(
 export function evaluateMACDMomentum(
   direction: 'long' | 'short',
   histogram: number | undefined,
-  macd: number
+  macd: number,
+  deadZone?: number,
 ): { pass: boolean; strength: 'strong' | 'moderate' | 'weak' | 'neutral'; description: string } {
   const hist = histogram ?? 0;
 
   // Dead zone - histogram too small to be meaningful
-  const DEAD_ZONE = 0.00005;
+  const DEAD_ZONE = deadZone ?? 0.00005;
 
   if (Math.abs(hist) < DEAD_ZONE) {
     return {
@@ -1221,7 +1222,7 @@ export function evaluateLongConditions(
     const entry5m = evaluate5mBreakoutEntry(ind5m, confluentLevels || [], 'long', currentPrice || 0, ohlc5m);
     const bias1h = evaluate1hBreakoutBias(ind1h, 'long');
     const volumeEval = evaluateVolume(ind5m.volRatio, 'breakout');
-    const macdEval = evaluateMACDMomentum('long', ind5m.histogram, ind5m.macd);
+    const macdEval = evaluateMACDMomentum('long', ind5m.histogram, ind5m.macd, strategy.signals?.macdDeadZone);
     const btcEval = evaluateBTCAlignment('long', btcTrend, 0, bias1h.quality, btcTfTrends, strategy.btcAlignment);
 
     return {
@@ -1242,7 +1243,7 @@ export function evaluateLongConditions(
   const setup1h = evaluate1hLongSetup(ind1h);
   const context = determineEntryContext(ind15m, ind1h, 'long');
   const volumeEval = evaluateVolume(ind15m.volRatio, context);
-  const macdEval = evaluateMACDMomentum('long', ind15m.histogram, ind15m.macd);
+  const macdEval = evaluateMACDMomentum('long', ind15m.histogram, ind15m.macd, strategy?.signals?.macdDeadZone);
   const btcEval = evaluateBTCAlignment('long', btcTrend, 0, setup1h.quality, btcTfTrends, strategy?.btcAlignment);
 
   return {
@@ -1283,7 +1284,7 @@ export function evaluateShortConditions(
     const entry5m = evaluate5mBreakoutEntry(ind5m, confluentLevels || [], 'short', currentPrice || 0, ohlc5m);
     const bias1h = evaluate1hBreakoutBias(ind1h, 'short');
     const volumeEval = evaluateVolume(ind5m.volRatio, 'breakout');
-    const macdEval = evaluateMACDMomentum('short', ind5m.histogram, ind5m.macd);
+    const macdEval = evaluateMACDMomentum('short', ind5m.histogram, ind5m.macd, strategy.signals?.macdDeadZone);
     const btcEval = evaluateBTCAlignment('short', btcTrend, 0, bias1h.quality, btcTfTrends, strategy.btcAlignment);
 
     return {
@@ -1304,7 +1305,7 @@ export function evaluateShortConditions(
   const setup1h = evaluate1hShortSetup(ind1h);
   const context = determineEntryContext(ind15m, ind1h, 'short');
   const volumeEval = evaluateVolume(ind15m.volRatio, context);
-  const macdEval = evaluateMACDMomentum('short', ind15m.histogram, ind15m.macd);
+  const macdEval = evaluateMACDMomentum('short', ind15m.histogram, ind15m.macd, strategy?.signals?.macdDeadZone);
   const btcEval = evaluateBTCAlignment('short', btcTrend, 0, setup1h.quality, btcTfTrends, strategy?.btcAlignment);
 
   return {
@@ -2290,7 +2291,8 @@ export function calculateDirectionStrength(
   if (btcValue < 0.4) warnings.push(`⚠️ BTC opposing`);
 
   // 7. MACD momentum (weight: 6) - Dead-zone-aware evaluation
-  const macdEval = evaluateMACDMomentum(direction, ind15m.histogram, ind15m.macd);
+  const macdDeadZone = signalConfig.macdDeadZone;
+  const macdEval = evaluateMACDMomentum(direction, ind15m.histogram, ind15m.macd, macdDeadZone);
   let macdValue = 0.5;
   if (macdEval.pass) {
     macdValue = macdEval.strength === 'strong' ? 0.95

@@ -39,10 +39,34 @@ function getPositionKey(position: SimulatedPosition | Position, testMode: boolea
     const openedAt = 'openedAt' in position ? Date.parse(position.openedAt) : NaN;
     return Number.isFinite(openedAt) ? `${baseId}-${openedAt}` : baseId;
   }
-  const openTime = 'openTime' in position ? position.openTime : undefined;
-  return typeof openTime === 'number' && Number.isFinite(openTime)
-    ? `${baseId}-${openTime}`
-    : baseId;
+
+  const livePosition = position as Position;
+  const sortedEntries = [...(livePosition.rawEntries || [])].sort((a, b) => a.timestamp - b.timestamp);
+  const firstEntry = sortedEntries[0];
+  const openTime = 'openTime' in livePosition ? livePosition.openTime : undefined;
+
+  const lifecycleId =
+    firstEntry?.ordertxid ||
+    firstEntry?.id ||
+    (typeof openTime === 'number' && Number.isFinite(openTime) ? String(openTime) : 'live');
+
+  return `${baseId}-${lifecycleId}`;
+}
+
+function getBaseChecklistPassCount(recommendation: TradingRecommendation, direction: 'long' | 'short'): number {
+  const checklist = recommendation[direction].checklist;
+  const baseItems = [
+    checklist.trend4h,
+    checklist.setup1h,
+    checklist.entry15m,
+    checklist.volume,
+    checklist.btcAlign,
+    checklist.macdMomentum,
+  ];
+
+  let passed = baseItems.filter(item => item?.pass).length;
+  if (checklist.trend1d?.pass) passed += 1;
+  return passed;
 }
 
 function notify(
@@ -103,6 +127,19 @@ export function useTradeNotifications({
   const lastVolumeAlertRef = useRef<number>(0);
   const lastRsiAlertRef = useRef<number>(0);
   const lastExitSignalRef = useRef<string | null>(null);
+  const lastExitPressureBucketRef = useRef<number>(0);
+
+  // --- 4a. Entry signal confirmation timer ---
+  // Track consecutive polls with same signal to require persistence before notifying
+  const pendingSignalRef = useRef<{ action: string; firstSeenAt: number } | null>(null);
+  const lastSignalNotifyRef = useRef<number>(0);
+  const SIGNAL_CONFIRM_MS = 2 * 60 * 1000; // 2 minutes (2 consecutive polls)
+  const SIGNAL_COOLDOWN_MS = 5 * 60 * 1000; // 5-minute cooldown between signal notifications
+
+  // --- 4b. Setup invalidation (market-condition based) ---
+  const lastInvalidationNotifyRef = useRef<number>(0);
+  const INVALIDATION_COOLDOWN_MS = 10 * 60 * 1000; // 10-minute cooldown between invalidation notifications
+  const prevRecommendationRef = useRef<TradingRecommendation | null>(null);
 
   // Order fill tracking
   const prevOpenOrdersRef = useRef<Map<string, OpenOrder>>(new Map());
@@ -117,41 +154,74 @@ export function useTradeNotifications({
     if (!notificationsEnabled || !recommendation) return;
 
     const now = Date.now();
+    const prevRecommendation = prevRecommendationRef.current;
     const prevAction = prevActionRef.current;
     const prevConfidence = prevConfidenceRef.current;
     const action = recommendation.action;
     const confidence = recommendation.confidence;
 
-    // --- 1. New Signal ---
-    if (
-      (action === 'LONG' || action === 'SHORT') &&
-      action !== prevAction
-    ) {
-      notify(
-        `Signal: ${action}`,
-        recommendation.reason,
-        'signal-change',
-        'high',
-      );
+    // --- 1. New Signal (with confirmation timer) ---
+    // Don't notify immediately — track pending signal and only notify after it persists for 2 polls
+    if (action === 'LONG' || action === 'SHORT') {
+      if (action !== prevAction) {
+        // New signal direction — start confirmation timer
+        pendingSignalRef.current = { action, firstSeenAt: now };
+      } else if (pendingSignalRef.current && pendingSignalRef.current.action === action) {
+        // Same signal persists — check if confirmation period elapsed
+        const elapsed = now - pendingSignalRef.current.firstSeenAt;
+        if (elapsed >= SIGNAL_CONFIRM_MS && now - lastSignalNotifyRef.current > SIGNAL_COOLDOWN_MS) {
+          notify(
+            `Signal: ${action}`,
+            recommendation.reason,
+            'signal-change',
+            'high',
+          );
+          lastSignalNotifyRef.current = now;
+          pendingSignalRef.current = null; // Confirmed and notified
+        }
+      }
+    } else {
+      // Action is WAIT or SPIKE — clear pending signal
+      pendingSignalRef.current = null;
     }
 
-    // --- 2. Setup Invalidated ---
+    // --- 2. Setup Invalidated (market-condition deterioration) ---
     if (
       prevAction &&
       (prevAction === 'LONG' || prevAction === 'SHORT') &&
       action !== prevAction
     ) {
-      // Already covered by "New Signal" if it flipped to opposite
-      // Only notify separately if it went to WAIT
-      if (action === 'WAIT') {
-        notify(
-          'Setup Invalidated',
-          `${prevAction} signal lost — now WAIT`,
-          'signal-invalidated',
-          'high',
-          undefined,
-          false, // session-only
-        );
+      if (action === 'WAIT' && prevRecommendation) {
+        const priorDirection: 'long' | 'short' = prevAction === 'LONG' ? 'long' : 'short';
+        const oppositeLead = priorDirection === 'long'
+          ? recommendation.short.strength - recommendation.long.strength
+          : recommendation.long.strength - recommendation.short.strength;
+
+        const confidenceDrop = prevRecommendation.confidence - recommendation.confidence;
+        const basePassDrop = getBaseChecklistPassCount(prevRecommendation, priorDirection)
+          - getBaseChecklistPassCount(recommendation, priorDirection);
+        const directionLeadThreshold = strategy.signals.directionLeadThreshold ?? 12;
+
+        const deteriorationSignals = [
+          confidenceDrop >= 12,
+          basePassDrop >= 2,
+          oppositeLead >= directionLeadThreshold,
+        ].filter(Boolean).length;
+
+        if (
+          deteriorationSignals >= 2 &&
+          now - lastInvalidationNotifyRef.current > INVALIDATION_COOLDOWN_MS
+        ) {
+          notify(
+            'Setup Invalidated',
+            `${prevAction} setup degraded (conf -${Math.max(0, Math.round(confidenceDrop))}, base checks -${Math.max(0, basePassDrop)}) — now WAIT`,
+            'signal-invalidated',
+            'high',
+            undefined,
+            false, // session-only
+          );
+          lastInvalidationNotifyRef.current = now;
+        }
       }
     }
 
@@ -202,6 +272,7 @@ export function useTradeNotifications({
     // Update refs
     prevActionRef.current = action;
     prevConfidenceRef.current = confidence;
+    prevRecommendationRef.current = recommendation;
   }, [recommendation, notificationsEnabled]);
 
   // --- 5. Volume Spike & RSI Extreme (from 15m indicators) ---
@@ -349,14 +420,26 @@ export function useTradeNotifications({
     }
   }, [price, simulatedPositions, openPositions, testMode, notificationsEnabled, dcaSignal]);
 
-  // V2 Engine exit signal notification
+  // V2 Engine exit signal notification (10% buckets, only notify on increasing pressure)
   useEffect(() => {
-    if (!notificationsEnabled || !exitSignal?.shouldExit) return;
+    if (!notificationsEnabled || !exitSignal?.shouldExit) {
+      // Reset tracking when exit is no longer active
+      if (!exitSignal?.shouldExit) {
+        lastExitPressureBucketRef.current = 0;
+      }
+      return;
+    }
 
-    const pressureBucket = Math.floor(exitSignal.totalPressure / 5) * 5;
+    // Use 10% buckets instead of 5% to reduce notification noise
+    const pressureBucket = Math.floor(exitSignal.totalPressure / 10) * 10;
     const exitKey = `${exitSignal.urgency}-${pressureBucket}`;
     if (lastExitSignalRef.current === exitKey) return;
+
+    // Only notify when pressure is increasing (not oscillating down then back up)
+    if (pressureBucket < lastExitPressureBucketRef.current) return;
+
     lastExitSignalRef.current = exitKey;
+    lastExitPressureBucketRef.current = pressureBucket;
 
     notify(
       `Exit Signal: ${exitSignal.urgency.toUpperCase()}`,

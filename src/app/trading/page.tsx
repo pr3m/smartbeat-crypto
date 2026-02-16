@@ -722,6 +722,13 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
   const priceForRecRef = useRef(price);
   priceForRecRef.current = price;
 
+  // --- Signal hysteresis refs ---
+  // EMA smoothing for direction strength scores (alpha = 0.4 new, 0.6 prior)
+  const smoothedLongStrengthRef = useRef<number | null>(null);
+  const smoothedShortStrengthRef = useRef<number | null>(null);
+  // Schmitt trigger: track previous action to apply maintain threshold
+  const prevHysteresisActionRef = useRef<string | null>(null);
+
   useEffect(() => {
     // Only generate if we have indicator data
     if (!tfData[240].indicators || !tfData[60].indicators || !tfData[15].indicators || !tfData[5].indicators) {
@@ -745,11 +752,72 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
       btcTfTrends, // OHLC-based BTC trend per strategy timeframe
     );
 
-    console.log('Generated recommendation:', rec?.action, 'Long:', rec?.longScore, 'Short:', rec?.shortScore, 'Flow:', rec?.flowStatus?.status, 'Liq:', rec?.liquidationStatus?.bias);
+    if (!rec) {
+      setRecommendation(rec);
+      lastRecommendationRef.current = null;
+      return;
+    }
+
+    // --- 2a. EMA smoothing on direction strength scores ---
+    // Dampens transient spikes: alpha=0.4 means 40% new value, 60% prior smoothed
+    const EMA_ALPHA = 0.4;
+    const rawLong = rec.long.strength;
+    const rawShort = rec.short.strength;
+
+    if (smoothedLongStrengthRef.current === null) {
+      smoothedLongStrengthRef.current = rawLong;
+      smoothedShortStrengthRef.current = rawShort;
+    } else {
+      smoothedLongStrengthRef.current = EMA_ALPHA * rawLong + (1 - EMA_ALPHA) * smoothedLongStrengthRef.current;
+      smoothedShortStrengthRef.current = EMA_ALPHA * rawShort + (1 - EMA_ALPHA) * smoothedShortStrengthRef.current!;
+    }
+
+    const smoothedLong = Math.round(smoothedLongStrengthRef.current);
+    const smoothedShort = Math.round(smoothedShortStrengthRef.current!);
+
+    // Override rec strengths with smoothed values
+    rec.long.strength = smoothedLong;
+    rec.short.strength = smoothedShort;
+
+    // --- 2b. Asymmetric maintain threshold (Schmitt trigger) ---
+    // Once a LONG/SHORT signal fires at actionThreshold, keep it active until
+    // strength drops below actionThreshold - maintainThresholdGap
+    const actionThreshold = strategy.signals.actionThreshold;
+    const maintainGap = strategy.signals.maintainThresholdGap ?? 8;
+    const maintainThreshold = actionThreshold - maintainGap;
+    const directionLead = strategy.signals.directionLeadThreshold;
+    const prevAction = prevHysteresisActionRef.current;
+
+    // Re-derive action from smoothed strengths
+    let smoothedAction = rec.action;
+
+    if (smoothedLong >= actionThreshold && smoothedLong > smoothedShort + directionLead) {
+      smoothedAction = 'LONG';
+    } else if (smoothedShort >= actionThreshold && smoothedShort > smoothedLong + directionLead) {
+      smoothedAction = 'SHORT';
+    } else if (prevAction === 'LONG' && smoothedLong >= maintainThreshold && smoothedLong > smoothedShort) {
+      // Hysteresis: keep LONG active until it drops below maintain threshold
+      smoothedAction = 'LONG';
+    } else if (prevAction === 'SHORT' && smoothedShort >= maintainThreshold && smoothedShort > smoothedLong) {
+      // Hysteresis: keep SHORT active until it drops below maintain threshold
+      smoothedAction = 'SHORT';
+    } else {
+      smoothedAction = 'WAIT';
+    }
+
+    // Preserve spike detection — don't override spike signals with hysteresis
+    if (rec.action === 'SPIKE ↑' || rec.action === 'SPIKE ↓') {
+      smoothedAction = rec.action;
+    }
+
+    rec.action = smoothedAction as typeof rec.action;
+    prevHysteresisActionRef.current = smoothedAction;
+
+    console.log('Generated recommendation:', rec.action, 'Long:', rec.longScore, `(str:${rawLong}->${smoothedLong})`, 'Short:', rec.shortScore, `(str:${rawShort}->${smoothedShort})`, 'Flow:', rec.flowStatus?.status, 'Liq:', rec.liquidationStatus?.bias);
     setRecommendation(rec);
 
     // Check for new signal (only if action changes and is not WAIT)
-    if (rec && rec.action !== 'WAIT' && rec.action !== lastRecommendationRef.current) {
+    if (rec.action !== 'WAIT' && rec.action !== lastRecommendationRef.current) {
       // Toast notification (browser notifications handled by useTradeNotifications hook)
       addToast({
         title: `🎯 Signal: ${rec.action}`,
@@ -759,7 +827,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
       });
     }
 
-    lastRecommendationRef.current = rec?.action || null;
+    lastRecommendationRef.current = rec.action || null;
   }, [tfData, btcTrend, btcChange, btcTfTrends, microData, liqData, addToast, strategy]);
 
   // Request notification permission on mount
@@ -784,6 +852,34 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
   // V2 Engine: position state, DCA signals, exit signals, sizing
   const v2 = useV2Engine(recommendation, strategy);
 
+  // --- 2c. Exit pressure confirmation ---
+  // Require 2 consecutive polls where shouldExit=true before propagating to UI/notifications.
+  // Exception: knife emergency bypasses this (genuine crash detection).
+  const exitConfirmCountRef = useRef(0);
+  const confirmedExitSignal = useMemo(() => {
+    const rawExit = v2.output.exitSignal;
+    if (!rawExit) {
+      exitConfirmCountRef.current = 0;
+      return rawExit;
+    }
+
+    // Knife emergency bypasses confirmation
+    const isKnifeEmergency = rawExit.reason === 'knife_detected' && rawExit.urgency === 'immediate';
+
+    if (rawExit.shouldExit) {
+      exitConfirmCountRef.current++;
+      // Require 2 consecutive polls (or knife emergency) to confirm exit
+      if (exitConfirmCountRef.current >= 2 || isKnifeEmergency) {
+        return rawExit;
+      }
+      // Not yet confirmed — return signal with shouldExit=false so UI shows pressure but not the exit trigger
+      return { ...rawExit, shouldExit: false };
+    } else {
+      exitConfirmCountRef.current = 0;
+      return rawExit;
+    }
+  }, [v2.output.exitSignal]);
+
   // Background trade notifications (signals, P&L, DCA, RSI, volume, order fills)
   const { markOrderCancelled } = useTradeNotifications({
     recommendation,
@@ -795,7 +891,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
     testMode,
     notificationsEnabled,
     dcaSignal: v2.output.dcaSignal,
-    exitSignal: v2.output.exitSignal,
+    exitSignal: confirmedExitSignal,
   });
 
   // Fetch reports count on mount
@@ -1022,7 +1118,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
           {/* V2 Position Dashboard */}
           <PositionDashboard
             position={v2.output.position}
-            exitSignal={v2.output.exitSignal}
+            exitSignal={confirmedExitSignal}
             dcaSignal={v2.output.dcaSignal}
             sizing={v2.output.sizing}
             summary={v2.output.summary}

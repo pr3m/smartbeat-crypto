@@ -20,6 +20,8 @@
     "actionThreshold": 63,
     "directionLeadThreshold": 12,
     "sitOnHandsThreshold": 48,
+    "macdDeadZone": 0.00020,
+    "maintainThresholdGap": 8,
 
     "directionWeights": {
       "1dTrend": 4,
@@ -106,8 +108,8 @@
   "antiGreed": {
     "enabled": true,
     "drawdownThresholdPercent": 50,
-    "minPnLToActivate": 50,
-    "minHWMToTrack": 60
+    "minPnLToActivate": 80,
+    "minHWMToTrack": 100
   },
 
   "timebox": {
@@ -217,9 +219,9 @@
   "btcAlignment": {
     "timeframes": [60, 15],
     "emaPeriod": 21,
-    "slopeCandles": 5,
-    "neutralZonePct": 0.05,
-    "weights": [0.6, 0.4]
+    "slopeCandles": 10,
+    "neutralZonePct": 0.12,
+    "weights": [0.7, 0.3]
   },
 
   "derivatives": {

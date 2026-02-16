@@ -83,7 +83,7 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>)
 /**
  * Helper: Fetch with timeout
  */
-async function fetchWithTimeout(url: string, timeoutMs = 10000): Promise<Response> {
+async function fetchWithTimeout(url: string, timeoutMs = 15000): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -1782,16 +1782,34 @@ async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResu
       return { success: false, error: 'Failed to get current price' };
     }
 
-    // Fetch OHLC for indicator calculation
-    const [ohlc15m, ohlc1h, ohlc5m] = await Promise.all([
-      fetchOHLC(pair, 15),
-      fetchOHLC(pair, 60),
-      fetchOHLC(pair, 5),
-    ]);
+    // Fetch OHLC for indicator calculation (with individual error handling)
+    let ohlc15m: OHLCData[] = [];
+    let ohlc1h: OHLCData[] = [];
+    let ohlc5m: OHLCData[] = [];
+
+    try {
+      [ohlc15m, ohlc1h, ohlc5m] = await Promise.all([
+        fetchOHLC(pair, 15),
+        fetchOHLC(pair, 60),
+        fetchOHLC(pair, 5),
+      ]);
+    } catch (ohlcError) {
+      return {
+        success: false,
+        error: `Failed to fetch OHLC data for v2 engine: ${ohlcError instanceof Error ? ohlcError.message : 'Unknown error'}. The Kraken API may be temporarily unavailable.`,
+      };
+    }
 
     const ind15m = calculateIndicators(ohlc15m);
     const ind1h = calculateIndicators(ohlc1h);
     const ind5m = calculateIndicators(ohlc5m);
+
+    if (!ind15m || !ind1h || !ind5m) {
+      return {
+        success: false,
+        error: `Insufficient OHLC data for indicator calculation (15m: ${ohlc15m.length}, 1h: ${ohlc1h.length}, 5m: ${ohlc5m.length} candles). Need at least 50 candles per timeframe.`,
+      };
+    }
 
     // Get position data
     let positionState: PositionState = EMPTY_POSITION_STATE;
@@ -1861,52 +1879,105 @@ async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResu
         const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`);
         if (res.ok) {
           const data = await res.json();
-          const entries = Object.entries(data);
-          if (entries.length > 0) {
-            hasPosition = true;
-            const [, posData] = entries[0];
+          const allEntries = Object.entries(data);
+
+          // Filter to XRP positions of same type for consolidation
+          const xrpEntries = allEntries.filter(([, posData]) => {
             const p = posData as Record<string, unknown>;
-            const vol = Number(p.vol) || 0;
-            const cost = Number(p.cost) || 0;
-            const entryPrice = vol > 0 ? cost / vol : 0;
-            const fee = Number(p.fee) || 0;
-            const margin = Number(p.margin) || 0;
-            const rawLev = p.leverage ? parseFloat(String(p.leverage)) : NaN;
-            const leverage = Number.isFinite(rawLev) ? rawLev : margin > 0 ? Math.round(cost / margin) : 10;
-            const side = String(p.type || 'buy');
-            const direction: TradeDirection = side === 'sell' ? 'short' : 'long';
-            const rawTime = p.time ? parseFloat(String(p.time)) : NaN;
-            const openTime = Number.isFinite(rawTime) ? rawTime * 1000 : Date.now();
+            const pairStr = String(p.pair || '');
+            return pairStr.includes('XRP') || pairStr.includes('XXRP');
+          });
+
+          if (xrpEntries.length > 0) {
+            hasPosition = true;
+
+            // Consolidate all XRP positions (same direction)
+            let totalVol = 0, totalCost = 0, totalFee = 0, totalMargin = 0;
+            let earliestTime = Infinity;
+            let firstType = 'buy';
+            let firstLeverage = 10;
+
+            // Collect raw entries grouped by ordertxid
+            const rawByOrder = new Map<string, { cost: number; vol: number; fee: number; margin: number; time: number }>();
+
+            for (const [, posData] of xrpEntries) {
+              const p = posData as Record<string, unknown>;
+              const vol = Number(p.vol) || 0;
+              const cost = Number(p.cost) || 0;
+              const fee = Number(p.fee) || 0;
+              const margin = Number(p.margin) || 0;
+              const rawTime = p.time ? parseFloat(String(p.time)) : NaN;
+              const openTime = Number.isFinite(rawTime) ? rawTime * 1000 : Date.now();
+              const ordertxid = String(p.ordertxid || '');
+              const rawLev = p.leverage ? parseFloat(String(p.leverage)) : NaN;
+
+              totalVol += vol;
+              totalCost += cost;
+              totalFee += fee;
+              totalMargin += margin;
+              if (openTime < earliestTime) {
+                earliestTime = openTime;
+                firstType = String(p.type || 'buy');
+              }
+              if (Number.isFinite(rawLev)) firstLeverage = rawLev;
+
+              // Group partial fills by ordertxid
+              const key = ordertxid || `anon-${openTime}`;
+              const existing = rawByOrder.get(key);
+              if (existing) {
+                existing.cost += cost;
+                existing.vol += vol;
+                existing.fee += fee;
+                existing.margin += margin;
+                existing.time = Math.min(existing.time, openTime);
+              } else {
+                rawByOrder.set(key, { cost, vol, fee, margin, time: openTime });
+              }
+            }
+
+            // Sort grouped entries by time
+            const sortedGroups = Array.from(rawByOrder.entries())
+              .sort((a, b) => a[1].time - b[1].time);
+
+            const direction: TradeDirection = firstType === 'sell' ? 'short' : 'long';
+            const entryPrice = totalVol > 0 ? totalCost / totalVol : 0;
+            const leverage = firstLeverage > 0 ? firstLeverage : (totalMargin > 0 ? Math.round(totalCost / totalMargin) : 10);
+            const openTime = earliestTime < Infinity ? earliestTime : Date.now();
             const hoursOpen = (Date.now() - openTime) / 3600000;
             const dirMult = direction === 'long' ? 1 : -1;
             const priceDiff = (currentPrice - entryPrice) * dirMult;
-            const unrealizedPnl = priceDiff * vol - fee;
+            const unrealizedPnl = priceDiff * totalVol - totalFee;
             const unrealizedPnlPercent = entryPrice > 0 ? (priceDiff / entryPrice) * 100 : 0;
-            const posValue = vol * currentPrice;
-            const liqResult = calculateLiquidationPrice(entryPrice, margin, posValue, direction, leverage);
+            const posValue = totalVol * currentPrice;
+            const liqResult = calculateLiquidationPrice(entryPrice, totalMargin, posValue, direction, leverage);
+
+            // Build entry records from grouped ordertxid entries
+            const entryRecords: Array<import('@/lib/trading/v2-types').EntryRecord> = sortedGroups.map(([, g], idx) => ({
+              id: idx === 0 ? 'initial' : `dca-${idx}`,
+              type: (idx === 0 ? 'initial' : 'dca') as 'initial' | 'dca',
+              dcaLevel: idx,
+              price: g.vol > 0 ? g.cost / g.vol : 0,
+              volume: g.vol,
+              marginUsed: g.margin,
+              marginPercent: 0,
+              timestamp: g.time,
+              confidence: 0,
+              entryMode: 'full' as const,
+              reason: idx === 0 ? 'Initial entry' : `DCA entry #${idx}`,
+            }));
+
+            const dcaCount = Math.min(entryRecords.length - 1, strategy.positionSizing.maxDCACount);
 
             positionState = {
               isOpen: true,
               direction,
               phase: 'entry',
-              entries: [{
-                id: 'kraken-pos',
-                type: 'initial',
-                dcaLevel: 0,
-                price: entryPrice,
-                volume: vol,
-                marginUsed: margin,
-                marginPercent: 0,
-                timestamp: openTime,
-                confidence: 0,
-                entryMode: 'full',
-                reason: 'Existing Kraken position',
-              }],
+              entries: entryRecords,
               avgPrice: entryPrice,
-              totalVolume: vol,
-              totalMarginUsed: margin,
+              totalVolume: totalVol,
+              totalMarginUsed: totalMargin,
               totalMarginPercent: 0,
-              dcaCount: 0,
+              dcaCount,
               unrealizedPnL: unrealizedPnl,
               unrealizedPnLPercent: unrealizedPnlPercent,
               unrealizedPnLLevered: unrealizedPnl,
@@ -1921,7 +1992,7 @@ async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResu
               liquidationPrice: liqResult.liquidationPrice,
               liquidationDistancePercent: liqResult.distancePercent,
               leverage,
-              totalFees: fee,
+              totalFees: totalFee,
               rolloverCostPer4h: 0,
             };
           }

@@ -20,6 +20,17 @@ export const TRADING_REFRESH_INTERVAL_SEC = 60;
 const TRADING_REFRESH_INTERVAL_MS = TRADING_REFRESH_INTERVAL_SEC * 1000;
 const RELOAD_THROTTLE_KEY = 'trading:lastOhlcFetchAt';
 
+export interface RawPositionEntry {
+  id: string;           // Kraken position ID
+  ordertxid: string;    // Order txid (for grouping partial fills)
+  price: number;        // cost / vol
+  volume: number;
+  cost: number;
+  fee: number;
+  margin: number;
+  timestamp: number;    // ms
+}
+
 export interface Position {
   id: string;
   pair: string;
@@ -34,6 +45,7 @@ export interface Position {
   openTime: number;
   rollovertm: number;
   actualRolloverCost: number; // From ledger
+  rawEntries: RawPositionEntry[]; // Individual Kraken position entries for DCA detection
 }
 
 export interface SimulatedBalanceData {
@@ -561,20 +573,35 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
         }
         console.log('[Positions] Leverage for position:', id, { rawLeverage, cost, margin, calculatedLeverage: leverage });
 
+        const parsedCost = parseFloat(pos.cost || '0');
+        const parsedVol = parseFloat(pos.vol || '0');
+        const parsedFee = parseFloat(pos.fee || '0');
+        const parsedMargin = parseFloat(pos.margin || '0');
+
         return {
           id,
           pair: pos.pair || '',
           type: pos.type || 'buy',
-          cost: parseFloat(pos.cost || '0'),
-          fee: parseFloat(pos.fee || '0'),
-          volume: parseFloat(pos.vol || '0'),
-          margin: parseFloat(pos.margin || '0'),
+          cost: parsedCost,
+          fee: parsedFee,
+          volume: parsedVol,
+          margin: parsedMargin,
           value: parseFloat(pos.value || '0'),
           net: parseFloat(pos.net || '0'),
           leverage,
           openTime,
           rollovertm: pos.rollovertm ? parseFloat(pos.rollovertm) * 1000 : 0,
           actualRolloverCost: 0, // Will be fetched separately from ledger
+          rawEntries: [{
+            id,
+            ordertxid: pos.ordertxid || '',
+            price: parsedVol > 0 ? parsedCost / parsedVol : 0,
+            volume: parsedVol,
+            cost: parsedCost,
+            fee: parsedFee,
+            margin: parsedMargin,
+            timestamp: openTime,
+          }],
         };
       });
 
@@ -604,6 +631,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
             openTime: Math.min(existing.openTime, pos.openTime), // Earliest open time
             rollovertm: Math.max(existing.rollovertm, pos.rollovertm),
             actualRolloverCost: existing.actualRolloverCost + pos.actualRolloverCost,
+            rawEntries: [...existing.rawEntries, ...pos.rawEntries],
           });
         } else {
           consolidatedMap.set(key, { ...pos, id: `${key}-consolidated` });

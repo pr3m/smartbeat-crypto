@@ -142,20 +142,24 @@ export function detectMACDReversal(
 ): { active: boolean; value: number; detail: string } {
   const hist = histogram1h ?? 0;
 
+  // Dead zone: histogram must be meaningfully past zero to trigger exit pressure.
+  // Prevents noise from histogram hovering near zero from creating false exit signals.
+  const MACD_EXIT_DEAD_ZONE = 0.0002;
+
   if (direction === 'long') {
     // For longs: MACD turning negative = bearish reversal
-    if (hist < 0 && macd1h < 0) {
+    if (hist < -MACD_EXIT_DEAD_ZONE && macd1h < 0) {
       return { active: true, value: 80, detail: `1H MACD reversed bearish (hist: ${hist.toFixed(5)})` };
     }
-    if (hist < 0) {
+    if (hist < -MACD_EXIT_DEAD_ZONE) {
       return { active: true, value: 50, detail: `1H histogram turning negative (${hist.toFixed(5)})` };
     }
   } else {
     // For shorts: MACD turning positive = bullish reversal
-    if (hist > 0 && macd1h > 0) {
+    if (hist > MACD_EXIT_DEAD_ZONE && macd1h > 0) {
       return { active: true, value: 80, detail: `1H MACD reversed bullish (hist: +${hist.toFixed(5)})` };
     }
-    if (hist > 0) {
+    if (hist > MACD_EXIT_DEAD_ZONE) {
       return { active: true, value: 50, detail: `1H histogram turning positive (+${hist.toFixed(5)})` };
     }
   }
@@ -261,11 +265,14 @@ export function detectMomentumFading(
     if (Math.abs(ind15m.ema20Slope) < 0.02) signals++;
   }
 
-  if (signals >= 2) {
+  if (signals >= 3) {
     return { active: true, value: 60, detail: `Momentum fading (${signals}/3 signals)` };
   }
+  if (signals === 2) {
+    return { active: false, value: 30, detail: `Partial momentum fade (${signals}/3 signals)` };
+  }
   if (signals === 1) {
-    return { active: false, value: 20, detail: `Partial momentum fade (${signals}/3 signals)` };
+    return { active: false, value: 10, detail: `Partial momentum fade (${signals}/3 signals)` };
   }
   return { active: false, value: 0, detail: 'Momentum intact' };
 }

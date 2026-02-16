@@ -13,6 +13,7 @@
 
 import { useMemo, useRef } from 'react';
 import { useTradingData } from '@/components/TradingDataProvider';
+import type { RawPositionEntry } from '@/components/TradingDataProvider';
 import type { TradingRecommendation } from '@/lib/kraken/types';
 import type {
   PositionState,
@@ -39,9 +40,61 @@ import { detectMarketRegime } from '@/lib/trading/market-regime';
 // ============================================================================
 
 /**
- * Convert existing Kraken/simulated position data to a v2 PositionState.
- * This bridges the gap between the current data model and the v2 engine.
+ * Group raw position entries by ordertxid to collapse partial fills,
+ * then sort by timestamp to identify initial entry vs DCA entries.
  */
+function groupRawEntries(rawEntries: RawPositionEntry[]): Array<{
+  ordertxid: string;
+  price: number;
+  volume: number;
+  cost: number;
+  fee: number;
+  margin: number;
+  timestamp: number;
+}> {
+  const grouped = new Map<string, {
+    ordertxid: string;
+    totalCost: number;
+    totalVolume: number;
+    totalFee: number;
+    totalMargin: number;
+    earliestTimestamp: number;
+  }>();
+
+  for (const entry of rawEntries) {
+    const key = entry.ordertxid || entry.id; // Fallback to id if no ordertxid
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.totalCost += entry.cost;
+      existing.totalVolume += entry.volume;
+      existing.totalFee += entry.fee;
+      existing.totalMargin += entry.margin;
+      existing.earliestTimestamp = Math.min(existing.earliestTimestamp, entry.timestamp);
+    } else {
+      grouped.set(key, {
+        ordertxid: key,
+        totalCost: entry.cost,
+        totalVolume: entry.volume,
+        totalFee: entry.fee,
+        totalMargin: entry.margin,
+        earliestTimestamp: entry.timestamp,
+      });
+    }
+  }
+
+  return Array.from(grouped.values())
+    .sort((a, b) => a.earliestTimestamp - b.earliestTimestamp)
+    .map(g => ({
+      ordertxid: g.ordertxid,
+      price: g.totalVolume > 0 ? g.totalCost / g.totalVolume : 0,
+      volume: g.totalVolume,
+      cost: g.totalCost,
+      fee: g.totalFee,
+      margin: g.totalMargin,
+      timestamp: g.earliestTimestamp,
+    }));
+}
+
 function bridgeToPositionState(
   positions: Array<{
     pair: string;
@@ -64,12 +117,14 @@ function bridgeToPositionState(
     unrealizedPnlLeveredPercent?: number;
     liquidationPrice?: number;
     marginUsed?: number;
+    rawEntries?: RawPositionEntry[];
   }>,
   currentPrice: number,
   availableMargin: number,
   isSimulated: boolean,
   tradeBalance: { e: string; tb: string } | null,
-  timeboxMaxHours: number
+  timeboxMaxHours: number,
+  maxDCACount: number
 ): PositionState {
   if (positions.length === 0) {
     return EMPTY_POSITION_STATE;
@@ -118,20 +173,48 @@ function bridgeToPositionState(
   const hoursRemaining = Math.max(0, timeboxMaxHours - hoursInTrade);
   const timeboxProgress = Math.min(1, hoursInTrade / timeboxMaxHours);
 
-  // Build a synthetic entry record
-  const entryRecord: EntryRecord = {
-    id: 'initial',
-    type: 'initial',
-    dcaLevel: 0,
-    price: avgPrice,
-    volume,
-    marginUsed,
-    marginPercent,
-    timestamp: openedAt,
-    confidence: 75, // Default - we don't track this from Kraken
-    entryMode: 'full',
-    reason: 'Existing position',
-  };
+  // Build entry records from raw entries (DCA detection)
+  let entries: EntryRecord[];
+  let dcaCount: number;
+
+  if (!isSimulated && pos.rawEntries && pos.rawEntries.length > 0) {
+    // Group by ordertxid to collapse partial fills into logical entries
+    const grouped = groupRawEntries(pos.rawEntries);
+
+    entries = grouped.map((g, idx) => {
+      const entryMarginPercent = totalEquity > 0 ? (g.margin / totalEquity) * 100 : 0;
+      return {
+        id: idx === 0 ? 'initial' : `dca-${idx}`,
+        type: (idx === 0 ? 'initial' : 'dca') as 'initial' | 'dca',
+        dcaLevel: idx,
+        price: g.price,
+        volume: g.volume,
+        marginUsed: g.margin,
+        marginPercent: entryMarginPercent,
+        timestamp: g.timestamp,
+        confidence: 75,
+        entryMode: 'full' as const,
+        reason: idx === 0 ? 'Initial entry' : `DCA entry #${idx}`,
+      };
+    });
+    dcaCount = Math.min(entries.length - 1, maxDCACount);
+  } else {
+    // Simulated or no raw entries — single synthetic entry
+    entries = [{
+      id: 'initial',
+      type: 'initial',
+      dcaLevel: 0,
+      price: avgPrice,
+      volume,
+      marginUsed,
+      marginPercent,
+      timestamp: openedAt,
+      confidence: 75,
+      entryMode: 'full',
+      reason: 'Existing position',
+    }];
+    dcaCount = 0;
+  }
 
   // Liquidation price - use Kraken's proper formula when account data is available
   const equity = tradeBalance ? parseFloat(tradeBalance.e || '0') : 0;
@@ -198,12 +281,12 @@ function bridgeToPositionState(
     isOpen: true,
     direction,
     phase: 'entry', // Will be refined by engine tick
-    entries: [entryRecord],
+    entries,
     avgPrice,
     totalVolume: volume,
     totalMarginUsed: marginUsed,
     totalMarginPercent: marginPercent,
-    dcaCount: 0, // No DCA tracking from Kraken yet
+    dcaCount,
     unrealizedPnL,
     unrealizedPnLPercent,
     unrealizedPnLLevered,
@@ -390,7 +473,8 @@ export function useV2Engine(
       availableMargin,
       isSimulated,
       tradeBalance,
-      strategy.timebox.maxHours
+      strategy.timebox.maxHours,
+      strategy.positionSizing.maxDCACount
     );
 
     // Persist HWM across ticks

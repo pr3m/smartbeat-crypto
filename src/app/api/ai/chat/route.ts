@@ -157,11 +157,36 @@ export async function POST(request: NextRequest) {
         },
       ];
 
-      // Add conversation history (last 20 messages)
-      for (const msg of conversation.messages.slice(-20)) {
-        if (msg.role === 'user' || msg.role === 'assistant') {
+      // Add conversation history (last 30 messages, including tool calls/results)
+      for (const msg of conversation.messages.slice(-30)) {
+        if (msg.role === 'user') {
+          messages.push({ role: 'user', content: msg.content });
+        } else if (msg.role === 'assistant') {
+          // Reconstruct assistant message with tool calls if present
+          if (msg.toolCalls) {
+            try {
+              const toolCalls = JSON.parse(msg.toolCalls) as { id: string; name: string; arguments: string }[];
+              if (toolCalls.length > 0) {
+                messages.push({
+                  role: 'assistant',
+                  content: msg.content || null,
+                  tool_calls: toolCalls.map(tc => ({
+                    id: tc.id,
+                    type: 'function' as const,
+                    function: { name: tc.name, arguments: tc.arguments },
+                  })),
+                });
+                continue; // Don't add as plain assistant message
+              }
+            } catch {
+              // Invalid JSON, fall through to plain message
+            }
+          }
+          messages.push({ role: 'assistant', content: msg.content });
+        } else if (msg.role === 'tool' && msg.toolCallId && msg.name) {
           messages.push({
-            role: msg.role as 'user' | 'assistant',
+            role: 'tool',
+            tool_call_id: msg.toolCallId,
             content: msg.content,
           });
         }
@@ -170,157 +195,170 @@ export async function POST(request: NextRequest) {
       // Add current message
       messages.push({ role: 'user', content: message });
 
-      // Call OpenAI with streaming and function calling
+      // Multi-round tool call loop
+      // The model may need multiple rounds: e.g., get positions first, then analyze them
+      const MAX_TOOL_ROUNDS = 5;
       let fullResponse = '';
-      let toolCallsData: { id: string; name: string; arguments: string }[] = [];
+      let allToolCallsData: { id: string; name: string; arguments: string }[] = [];
+      let toolRound = 0;
+      let needsMoreToolCalls = true;
 
-      // First call - may trigger tool use
-      const response = await openai.chat.completions.create({
-        model,
-        messages,
-        tools: assistantTools,
-        tool_choice: 'auto',
-        stream: true,
-        stream_options: { include_usage: true },
-      });
+      while (needsMoreToolCalls && toolRound < MAX_TOOL_ROUNDS) {
+        toolRound++;
+        const roundToolCalls: { id: string; name: string; arguments: string }[] = [];
+        let roundContent = '';
 
-      let currentToolCall: { id: string; name: string; arguments: string } | null = null;
+        const response = await openai.chat.completions.create({
+          model,
+          messages,
+          tools: assistantTools,
+          tool_choice: 'auto',
+          stream: true,
+          stream_options: { include_usage: true },
+        });
 
-      for await (const chunk of response) {
-        const delta = chunk.choices[0]?.delta;
+        let currentToolCall: { id: string; name: string; arguments: string } | null = null;
 
-        // Track usage from final chunk
-        if (chunk.usage) {
-          totalInputTokens += chunk.usage.prompt_tokens || 0;
-          totalOutputTokens += chunk.usage.completion_tokens || 0;
-        }
+        for await (const chunk of response) {
+          const delta = chunk.choices[0]?.delta;
 
-        // Handle tool calls
-        if (delta?.tool_calls) {
-          for (const toolCall of delta.tool_calls) {
-            if (toolCall.id) {
-              // New tool call starting
-              if (currentToolCall) {
-                toolCallsData.push(currentToolCall);
+          // Track usage from final chunk
+          if (chunk.usage) {
+            totalInputTokens += chunk.usage.prompt_tokens || 0;
+            totalOutputTokens += chunk.usage.completion_tokens || 0;
+          }
+
+          // Handle tool calls
+          if (delta?.tool_calls) {
+            for (const toolCall of delta.tool_calls) {
+              if (toolCall.id) {
+                // New tool call starting
+                if (currentToolCall) {
+                  roundToolCalls.push(currentToolCall);
+                }
+                currentToolCall = {
+                  id: toolCall.id,
+                  name: toolCall.function?.name || '',
+                  arguments: toolCall.function?.arguments || '',
+                };
+                await send({ type: 'tool_start', name: currentToolCall.name });
+              } else if (currentToolCall && toolCall.function?.arguments) {
+                // Continuing arguments
+                currentToolCall.arguments += toolCall.function.arguments;
               }
-              currentToolCall = {
-                id: toolCall.id,
-                name: toolCall.function?.name || '',
-                arguments: toolCall.function?.arguments || '',
-              };
-              await send({ type: 'tool_start', name: currentToolCall.name });
-            } else if (currentToolCall && toolCall.function?.arguments) {
-              // Continuing arguments
-              currentToolCall.arguments += toolCall.function.arguments;
             }
+          }
+
+          // Handle content
+          if (delta?.content) {
+            roundContent += delta.content;
+            await send({ type: 'text', content: delta.content });
           }
         }
 
-        // Handle content
-        if (delta?.content) {
-          fullResponse += delta.content;
-          await send({ type: 'text', content: delta.content });
+        // Save final tool call if exists
+        if (currentToolCall) {
+          roundToolCalls.push(currentToolCall);
         }
-      }
 
-      // Save final tool call if exists
-      if (currentToolCall) {
-        toolCallsData.push(currentToolCall);
-      }
+        // If no tool calls this round, we're done
+        if (roundToolCalls.length === 0) {
+          fullResponse = roundContent;
+          needsMoreToolCalls = false;
 
-      // Detect if model output JSON tool call as text (bad behavior)
-      if (toolCallsData.length === 0 && fullResponse.trim()) {
-        const jsonMatch = fullResponse.match(/^\s*\{[\s\S]*"toolCall"[\s\S]*\}\s*$/);
-        if (jsonMatch) {
-          console.warn('Model output tool call as text instead of using tools:', fullResponse);
-          // Clear the bad response and ask it to try again properly
-          fullResponse = "I apologize, but I encountered an issue processing your request. Let me try again.";
-          await send({ type: 'text', content: "\n\nPlease rephrase your question and I'll help you." });
+          // Detect if model output JSON tool call as text (bad behavior)
+          if (fullResponse.trim()) {
+            const jsonMatch = fullResponse.match(/^\s*\{[\s\S]*"toolCall"[\s\S]*\}\s*$/);
+            if (jsonMatch) {
+              console.warn('Model output tool call as text instead of using tools:', fullResponse);
+              fullResponse = "I apologize, but I encountered an issue processing your request. Let me try again.";
+              await send({ type: 'text', content: "\n\nPlease rephrase your question and I'll help you." });
+            }
+          }
+          break;
         }
-      }
 
-      // If there were tool calls, execute them and continue
-      if (toolCallsData.length > 0) {
-        // Add assistant message with tool calls
+        // Tool calls found — execute them
+        allToolCallsData.push(...roundToolCalls);
+
+        // Add assistant message with tool calls to conversation
         messages.push({
           role: 'assistant',
-          content: fullResponse || null,
-          tool_calls: toolCallsData.map(tc => ({
+          content: roundContent || null,
+          tool_calls: roundToolCalls.map(tc => ({
             id: tc.id,
             type: 'function' as const,
             function: { name: tc.name, arguments: tc.arguments },
           })),
         });
 
-        // Execute each tool
-        for (const toolCall of toolCallsData) {
+        // Execute each tool and save results to DB for conversation history
+        for (const toolCall of roundToolCalls) {
+          let toolResultContent: string;
           try {
             const args = JSON.parse(toolCall.arguments || '{}');
-            console.log(`Executing tool: ${toolCall.name}`, args);
+            console.log(`[Round ${toolRound}] Executing tool: ${toolCall.name}`, args);
             const result = await executeTool(toolCall.name as ToolName, args);
-            console.log(`Tool ${toolCall.name} result success:`, (result as { success?: boolean }).success);
+            console.log(`[Round ${toolRound}] Tool ${toolCall.name} result success:`, (result as { success?: boolean }).success);
 
             await send({ type: 'tool_end', name: toolCall.name });
 
             // Stringify result, but limit size to avoid context overflow
             const resultStr = JSON.stringify(result);
-            const truncatedResult = resultStr.length > 50000
-              ? JSON.stringify({ success: true, data: { note: 'Response truncated due to size', preview: resultStr.slice(0, 1000) + '...' } })
+            toolResultContent = resultStr.length > 30000
+              ? JSON.stringify({ success: true, data: { note: 'Response truncated due to size', preview: resultStr.slice(0, 2000) + '...' } })
               : resultStr;
-
-            // Add tool result to messages
-            messages.push({
-              role: 'tool',
-              tool_call_id: toolCall.id,
-              content: truncatedResult,
-            });
           } catch (toolError) {
-            console.error(`Tool ${toolCall.name} error:`, toolError);
+            console.error(`[Round ${toolRound}] Tool ${toolCall.name} error:`, toolError);
             await send({ type: 'tool_end', name: toolCall.name });
 
-            // Add error result to messages
-            messages.push({
-              role: 'tool',
-              tool_call_id: toolCall.id,
-              content: JSON.stringify({
-                success: false,
-                error: toolError instanceof Error ? toolError.message : 'Tool execution failed',
-              }),
+            toolResultContent = JSON.stringify({
+              success: false,
+              error: toolError instanceof Error ? toolError.message : 'Tool execution failed',
             });
           }
-        }
 
-        // Get final response with tool results
-        fullResponse = '';
-        let finishReason = '';
-
-        try {
-          // Add instruction to generate response from tool results
+          // Add tool result to messages for the model
           messages.push({
-            role: 'user',
-            content: 'Based on the tool results above, provide a helpful response to the user. Be concise and format numbers nicely.',
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: toolResultContent,
           });
 
-          // Generate response from tool results (no tools passed = text only)
+          // Save tool result to DB for conversation history continuity
+          await prisma.chatMessage.create({
+            data: {
+              conversationId: conversation.id,
+              role: 'tool',
+              content: toolResultContent,
+              toolCallId: toolCall.id,
+              name: toolCall.name,
+            },
+          });
+        }
+
+        // Continue the loop — the next iteration will send tool results back
+        // to the model, which can then call more tools or generate a response
+      }
+
+      // Safety: if the loop ended without a text response (all rounds were tool calls)
+      if (!fullResponse.trim() && allToolCallsData.length > 0) {
+        try {
+          // One final call to generate the response (with tools available in case model still needs data)
           const finalResponse = await openai.chat.completions.create({
             model,
             messages,
+            tools: assistantTools,
+            tool_choice: 'none', // Force text response, no more tools
             stream: true,
             stream_options: { include_usage: true },
           });
 
           for await (const chunk of finalResponse) {
-            // Track usage from final chunk
             if (chunk.usage) {
               totalInputTokens += chunk.usage.prompt_tokens || 0;
               totalOutputTokens += chunk.usage.completion_tokens || 0;
             }
-
-            // Track finish reason
-            if (chunk.choices[0]?.finish_reason) {
-              finishReason = chunk.choices[0].finish_reason;
-            }
-
             const content = chunk.choices[0]?.delta?.content;
             if (content) {
               fullResponse += content;
@@ -328,17 +366,16 @@ export async function POST(request: NextRequest) {
             }
           }
         } catch (finalError) {
-          console.error('Final OpenAI response error:', finalError);
+          console.error('Final response generation error:', finalError);
           fullResponse = `I gathered the data but encountered an error generating a response: ${finalError instanceof Error ? finalError.message : 'Unknown error'}. Please try again.`;
           await send({ type: 'text', content: fullResponse });
         }
+      }
 
-        // If no response was generated after tool calls, provide more context
-        if (!fullResponse.trim()) {
-          console.warn('Empty response after tool calls. Finish reason:', finishReason, 'Tool results count:', toolCallsData.length);
-          fullResponse = 'I processed the data successfully but the AI model returned an empty response. This can happen due to rate limits or content filters. Please try asking your question again.';
-          await send({ type: 'text', content: fullResponse });
-        }
+      // Final safety: still no response
+      if (!fullResponse.trim()) {
+        fullResponse = 'I processed the data but the AI model returned an empty response. This can happen due to rate limits or content filters. Please try again.';
+        await send({ type: 'text', content: fullResponse });
       }
 
       // Save assistant message
@@ -347,15 +384,16 @@ export async function POST(request: NextRequest) {
           conversationId: conversation.id,
           role: 'assistant',
           content: fullResponse,
-          toolCalls: toolCallsData.length > 0 ? JSON.stringify(toolCallsData) : null,
+          toolCalls: allToolCallsData.length > 0 ? JSON.stringify(allToolCallsData) : null,
         },
       });
 
-      // Update conversation
+      // Update conversation (user + assistant + tool result messages)
+      const totalNewMessages = 2 + allToolCallsData.length; // user + assistant + N tool results
       await prisma.chatConversation.update({
         where: { id: conversation.id },
         data: {
-          messageCount: { increment: 2 },
+          messageCount: { increment: totalNewMessages },
           updatedAt: new Date(),
         },
       });

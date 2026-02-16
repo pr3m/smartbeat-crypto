@@ -13,6 +13,8 @@ import type {
   PositionSizingResult,
   TradingEngineConfig,
   TimeboxStep,
+  EntryRecord,
+  TradeDirection,
 } from '@/lib/trading/v2-types';
 import { DEFAULT_ENGINE_CONFIG } from '@/lib/trading/v2-types';
 import type { TradingRecommendation } from '@/lib/kraken/types';
@@ -251,38 +253,95 @@ function IdleState({
   );
 }
 
+/** Format relative time from timestamp */
+function formatEntryAge(timestampMs: number): string {
+  const diffMs = Date.now() - timestampMs;
+  const hours = diffMs / (1000 * 60 * 60);
+  if (hours < 1) return `${Math.round(hours * 60)}m ago`;
+  if (hours < 24) return `${hours.toFixed(1)}h ago`;
+  return `${(hours / 24).toFixed(1)}d ago`;
+}
+
 /** DCA counter - visual dots showing DCA usage */
 function DCACounter({
   dcaCount,
   maxDCA,
   dcaSignal,
+  entries,
+  currentPrice,
+  direction,
 }: {
   dcaCount: number;
   maxDCA: number;
   dcaSignal: DCASignal | null;
+  entries: EntryRecord[];
+  currentPrice: number;
+  direction: TradeDirection;
 }) {
   const hasPendingDCA = dcaSignal?.shouldDCA && dcaCount < maxDCA;
 
   return (
     <Tooltip
       content={
-        <div className="text-xs max-w-xs">
-          <strong>DCA Status: {dcaCount}/{maxDCA}</strong>
-          {dcaSignal && dcaSignal.shouldDCA && (
-            <div className="mt-1">
-              <div className="text-yellow-400">DCA Signal Active</div>
-              <div>Confidence: {dcaSignal.confidence}%</div>
-              <div>Type: {dcaSignal.exhaustionType.replace(/_/g, ' ')}</div>
-              <div>Drawdown: {dcaSignal.drawdownPercent.toFixed(1)}%</div>
-              <div className="mt-1">{dcaSignal.reason}</div>
+        <div className="text-xs min-w-[220px]">
+          <div className="flex items-center justify-between mb-1.5">
+            <strong>DCA Status</strong>
+            <span className="mono text-tertiary">{dcaCount}/{maxDCA}</span>
+          </div>
+
+          {/* Entry list */}
+          {entries.length > 0 && (
+            <div className="space-y-0.5 mb-1.5">
+              {entries.map((entry, idx) => {
+                const priceDiff = direction === 'long'
+                  ? currentPrice - entry.price
+                  : entry.price - currentPrice;
+                const entryPnl = priceDiff * entry.volume;
+                const entryPnlPct = entry.price > 0 ? (priceDiff / entry.price) * 100 : 0;
+                const isProfitable = entryPnl >= 0;
+
+                return (
+                  <div key={entry.id} className="flex items-center gap-2 py-1 border-t border-gray-700/50 first:border-t-0">
+                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                      idx === 0 ? 'bg-blue-400' : 'bg-blue-500'
+                    }`} />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-secondary">
+                          {idx === 0 ? 'Initial' : `DCA #${idx}`}
+                        </span>
+                        <span className="text-tertiary mono">{formatEntryAge(entry.timestamp)}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 mt-0.5">
+                        <span className="mono">{entry.price.toFixed(5)} <span className="text-tertiary">x{entry.volume.toFixed(0)}</span></span>
+                        <span className={`mono font-medium ${isProfitable ? 'text-green-400' : 'text-red-400'}`}>
+                          {isProfitable ? '+' : ''}{entryPnl.toFixed(2)} ({entryPnlPct >= 0 ? '+' : ''}{entryPnlPct.toFixed(1)}%)
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
+
+          {/* Active DCA signal */}
+          {dcaSignal && dcaSignal.shouldDCA && (
+            <div className="pt-1.5 border-t border-gray-700/50">
+              <div className="text-yellow-400 font-medium">DCA Signal Active</div>
+              <div className="text-tertiary mt-0.5">
+                {dcaSignal.exhaustionType.replace(/_/g, ' ')} &middot; {dcaSignal.confidence}% conf &middot; {dcaSignal.drawdownPercent.toFixed(1)}% dd
+              </div>
+            </div>
+          )}
+
           {dcaCount >= maxDCA && (
-            <div className="mt-1 text-red-400">Max DCA reached - no more entries</div>
+            <div className="pt-1.5 border-t border-gray-700/50 text-red-400">Max DCA reached</div>
           )}
         </div>
       }
       position="bottom"
+      maxWidth="360px"
     >
       <div className="flex items-center gap-1.5 cursor-help">
         <span className="text-xs text-tertiary">DCA</span>
@@ -730,6 +789,9 @@ export function PositionDashboard({
             dcaCount={pos.dcaCount}
             maxDCA={config.positionSizing.maxDCACount}
             dcaSignal={dcaSignal}
+            entries={pos.entries}
+            currentPrice={currentPrice}
+            direction={pos.direction}
           />
         </div>
 
