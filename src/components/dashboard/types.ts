@@ -27,6 +27,10 @@ export interface QuickDCAParams {
   volume: number;
   marginToUse: number;
   confidence: number;
+  /** Current position avg entry price (for new-avg preview) */
+  currentAvgPrice: number;
+  /** Current position total volume (for new-avg preview) */
+  currentVolume: number;
 }
 
 /** Parameters for placing a trailing stop order */

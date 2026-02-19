@@ -44,15 +44,23 @@ export function QuickConfirmModal({
   const [entryPrice, setEntryPrice] = useState(0);
   const [priceEdited, setPriceEdited] = useState(false);
 
+  // Editable overrides for DCA actions
+  const [dcaMarginEur, setDcaMarginEur] = useState(0);
+
   const entryMargin = availableMargin * (entryMarginPct / 100);
 
   // Reset editable state when modal opens — only on open transition, not on price ticks
   const [wasOpen, setWasOpen] = useState(false);
   useEffect(() => {
-    if (isOpen && !wasOpen && action.type === 'entry') {
-      setEntryMarginPct(action.params.marginPercent);
-      setEntryPrice(currentPrice);
-      setPriceEdited(false);
+    if (isOpen && !wasOpen) {
+      if (action.type === 'entry') {
+        setEntryMarginPct(action.params.marginPercent);
+        setEntryPrice(currentPrice);
+        setPriceEdited(false);
+      }
+      if (action.type === 'dca') {
+        setDcaMarginEur(action.params.marginToUse);
+      }
     }
     setWasOpen(isOpen);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -77,8 +85,20 @@ export function QuickConfirmModal({
         },
       };
     }
+    if (action.type === 'dca') {
+      const leverage = 10; // Same leverage as position
+      const volume = currentPrice > 0 ? (dcaMarginEur * leverage) / currentPrice : 0;
+      return {
+        type: 'dca',
+        params: {
+          ...action.params,
+          marginToUse: dcaMarginEur,
+          volume,
+        },
+      };
+    }
     return action;
-  }, [action, availableMargin, entryMarginPct, entryPrice, priceEdited, currentPrice]);
+  }, [action, availableMargin, entryMarginPct, entryPrice, priceEdited, currentPrice, dcaMarginEur]);
 
   const handleConfirm = useCallback(async () => {
     if (!testMode && !liveConfirmed) return;
@@ -135,6 +155,8 @@ export function QuickConfirmModal({
             onEntryMarginPctChange={setEntryMarginPct}
             onEntryPriceChange={(price) => { setEntryPrice(price); setPriceEdited(true); }}
             onResetPrice={() => { setEntryPrice(currentPrice); setPriceEdited(false); }}
+            dcaMarginEur={dcaMarginEur}
+            onDcaMarginEurChange={setDcaMarginEur}
           />
 
           {/* Live mode extra confirmation */}
@@ -295,6 +317,8 @@ function ActionDetails({
   onEntryMarginPctChange,
   onEntryPriceChange,
   onResetPrice,
+  dcaMarginEur,
+  onDcaMarginEurChange,
 }: {
   action: QuickActionParams;
   currentPrice: number;
@@ -306,6 +330,8 @@ function ActionDetails({
   onEntryMarginPctChange: (v: number) => void;
   onEntryPriceChange: (v: number) => void;
   onResetPrice: () => void;
+  dcaMarginEur: number;
+  onDcaMarginEurChange: (v: number) => void;
 }) {
   switch (action.type) {
     case 'entry':
@@ -326,7 +352,15 @@ function ActionDetails({
     case 'close':
       return <CloseDetails params={action.params} currentPrice={currentPrice} />;
     case 'dca':
-      return <DCADetails params={action.params} currentPrice={currentPrice} />;
+      return (
+        <DCADetails
+          params={action.params}
+          currentPrice={currentPrice}
+          availableMargin={availableMargin}
+          dcaMarginEur={dcaMarginEur}
+          onDcaMarginEurChange={onDcaMarginEurChange}
+        />
+      );
     case 'trailing-stop':
       return <TrailingStopDetails params={action.params} currentPrice={currentPrice} />;
     case 'take-profit':
@@ -487,23 +521,123 @@ function CloseDetails({
 function DCADetails({
   params,
   currentPrice,
+  availableMargin,
+  dcaMarginEur,
+  onDcaMarginEurChange,
 }: {
   params: QuickDCAParams;
   currentPrice: number;
+  availableMargin: number;
+  dcaMarginEur: number;
+  onDcaMarginEurChange: (v: number) => void;
 }) {
-  const positionValue = params.volume * currentPrice;
-  const fees = estimateFees(positionValue, 'market', 10);
+  const leverage = 10;
+  const dcaVolume = currentPrice > 0 ? (dcaMarginEur * leverage) / currentPrice : 0;
+  const positionValue = dcaVolume * currentPrice;
+  const fees = estimateFees(positionValue, 'market', leverage);
+  const isLong = params.direction === 'long';
+  const accentColor = '#3b82f6'; // blue for DCA
+  const marginPct = availableMargin > 0 ? (dcaMarginEur / availableMargin) * 100 : 0;
+
+  // Live new-average calculation
+  const currentAvgPrice = params.currentAvgPrice || 0;
+  const currentVolume = params.currentVolume || 0;
+  const totalCost = (currentAvgPrice * currentVolume) + (currentPrice * dcaVolume);
+  const totalVolume = currentVolume + dcaVolume;
+  const newAvgPrice = totalVolume > 0 ? totalCost / totalVolume : currentAvgPrice;
+  const avgImprovement = currentAvgPrice > 0
+    ? ((currentAvgPrice - newAvgPrice) / currentAvgPrice) * 100
+    : 0;
+  // For longs: lower avg = better. For shorts: higher avg = better.
+  const isBetterAvg = isLong ? newAvgPrice < currentAvgPrice : newAvgPrice > currentAvgPrice;
 
   return (
-    <div className="bg-tertiary rounded-lg p-3 space-y-2 text-sm">
-      <Row label="DCA Level" value={`${params.dcaLevel}`} />
-      <Row label="Direction" value={params.direction === 'long' ? 'LONG (Buy)' : 'SHORT (Sell)'}
-        valueClass={params.direction === 'long' ? 'text-green-400' : 'text-red-400'} />
-      <Row label="Volume" value={`${params.volume.toFixed(1)} XRP`} mono />
-      <Row label="Margin" value={`${params.marginToUse.toFixed(2)} EUR`} mono />
-      <Row label="Confidence" value={`${params.confidence}%`} />
-      <Row label="Market Price" value={`${currentPrice.toFixed(4)} EUR`} mono />
-      <Row label="Est. Fee" value={`${fees.total.toFixed(2)} EUR`} mono />
+    <div className="space-y-2">
+      <div className="bg-tertiary rounded-lg p-3 space-y-2 text-sm">
+        <Row label="DCA Level" value={`${params.dcaLevel}`} />
+        <Row label="Direction" value={isLong ? 'LONG (Buy)' : 'SHORT (Sell)'}
+          valueClass={isLong ? 'text-green-400' : 'text-red-400'} />
+        <Row label="Confidence" value={`${params.confidence}%`} />
+      </div>
+
+      {/* Average price preview */}
+      {currentAvgPrice > 0 && (
+        <div className="bg-tertiary rounded-lg p-3 space-y-2 text-sm">
+          <Row label="Current Avg" value={`${currentAvgPrice.toFixed(4)} EUR`} mono />
+          <Row label="Market Price" value={`${currentPrice.toFixed(4)} EUR`} mono />
+          {dcaVolume > 0 && (
+            <>
+              <div className="border-t border-primary/50 pt-2">
+                <div className="flex justify-between">
+                  <span className="text-secondary">New Avg</span>
+                  <span className={`font-semibold mono ${isBetterAvg ? 'text-blue-400' : 'text-orange-400'}`}>
+                    {newAvgPrice.toFixed(4)} EUR
+                  </span>
+                </div>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-secondary">Improvement</span>
+                <span className={`font-semibold mono text-xs ${isBetterAvg ? 'text-blue-400' : 'text-orange-400'}`}>
+                  {isBetterAvg ? '' : '+'}{avgImprovement.toFixed(2)}%
+                </span>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Margin slider */}
+      <div className="bg-tertiary rounded-lg p-3 space-y-1.5">
+        <div className="flex justify-between text-xs">
+          <span className="text-secondary">Use available margin</span>
+          <span className="font-semibold mono" style={{ color: accentColor }}>
+            {marginPct.toFixed(0)}%
+          </span>
+        </div>
+        <input
+          type="range"
+          min="0"
+          max={availableMargin}
+          step={Math.max(1, Math.round(availableMargin / 100))}
+          value={dcaMarginEur}
+          onChange={(e) => onDcaMarginEurChange(parseFloat(e.target.value))}
+          className="w-full h-2 rounded-lg appearance-none cursor-pointer slider-thumb"
+          style={{
+            background: `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${marginPct}%, #374151 ${marginPct}%, #374151 100%)`,
+          }}
+        />
+        <div className="flex justify-between mt-0.5 px-0.5">
+          {[0, 25, 50, 75, 100].map(pct => {
+            const eurValue = availableMargin * (pct / 100);
+            const isActive = Math.abs(marginPct - pct) < 3;
+            return (
+              <button
+                key={pct}
+                onClick={() => onDcaMarginEurChange(eurValue)}
+                className={`text-xs transition-colors ${
+                  isActive
+                    ? 'font-semibold'
+                    : 'text-tertiary hover:text-secondary'
+                }`}
+                style={isActive ? { color: accentColor } : undefined}
+              >
+                {pct}%
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex justify-between text-xs pt-1 border-t border-primary/50">
+          <span className="text-tertiary">Margin</span>
+          <span className="mono font-semibold">{dcaMarginEur.toFixed(2)} EUR</span>
+        </div>
+      </div>
+
+      <div className="bg-tertiary rounded-lg p-3 space-y-2 text-sm">
+        <Row label="DCA Volume" value={`${dcaVolume.toFixed(1)} XRP`} mono />
+        <Row label="Total Volume" value={`${totalVolume.toFixed(1)} XRP`} mono />
+        <Row label="Position Value" value={`${positionValue.toFixed(2)} EUR`} mono />
+        <Row label="Est. Fee" value={`${fees.total.toFixed(2)} EUR`} mono />
+      </div>
     </div>
   );
 }

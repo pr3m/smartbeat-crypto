@@ -8,6 +8,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useChatStore } from '@/stores/chatStore';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { TOOL_DISPLAY_NAMES } from '@/lib/ai/tool-display-names';
 
 interface Message {
   id: string;
@@ -39,17 +40,28 @@ export function InlineChat({
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
-  const [currentToolCall, setCurrentToolCall] = useState<string | null>(null);
+  const [activeToolCalls, setActiveToolCalls] = useState<string[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [isExpanded, setIsExpanded] = useState(false);
   const tradingMode = useChatStore((s) => s.tradingMode);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive (uses rAF to avoid jank)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (scrollRafRef.current !== null) {
+      cancelAnimationFrame(scrollRafRef.current);
+    }
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const container = messagesContainerRef.current;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
+    });
   }, [messages]);
 
   // Cleanup on unmount
@@ -57,6 +69,9 @@ export function InlineChat({
     return () => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
+      }
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
       }
     };
   }, []);
@@ -101,15 +116,12 @@ export function InlineChat({
         throw new Error(errorData.error || 'Failed to send message');
       }
 
-      // Add empty assistant message for streaming
-      const assistantId = generateId();
-      setMessages((prev) => [...prev, { id: assistantId, role: 'assistant', content: '', isStreaming: true }]);
-
       const reader = response.body?.getReader();
       if (!reader) throw new Error('No response body');
 
       const decoder = new TextDecoder();
       let buffer = '';
+      let inlineAssistantAdded = false;
 
       const processLine = (line: string) => {
         if (!line.startsWith('data: ')) return;
@@ -127,35 +139,53 @@ export function InlineChat({
 
             case 'text':
               if (data.content) {
+                if (!inlineAssistantAdded) {
+                  // Clear tool indicators, then show response
+                  setActiveToolCalls([]);
+                  const id = generateId();
+                  setMessages((prev) => [...prev, { id, role: 'assistant', content: data.content, isStreaming: true }]);
+                  inlineAssistantAdded = true;
+                } else {
+                  setMessages((prev) => {
+                    const msgs = [...prev];
+                    const lastIdx = msgs.length - 1;
+                    if (lastIdx >= 0 && msgs[lastIdx].role === 'assistant') {
+                      msgs[lastIdx] = { ...msgs[lastIdx], content: msgs[lastIdx].content + data.content };
+                    }
+                    return msgs;
+                  });
+                }
+              }
+              break;
+
+            case 'tool_start':
+              setActiveToolCalls((prev) =>
+                prev.includes(data.name) ? prev : [...prev, data.name]
+              );
+              break;
+
+            case 'tool_end':
+              // Keep showing completed tools (no-op)
+              break;
+
+            case 'error': {
+              const errorContent = `Error: ${data.message}`;
+              if (!inlineAssistantAdded) {
+                const id = generateId();
+                setMessages((prev) => [...prev, { id, role: 'assistant', content: errorContent, isStreaming: true }]);
+                inlineAssistantAdded = true;
+              } else {
                 setMessages((prev) => {
                   const msgs = [...prev];
                   const lastIdx = msgs.length - 1;
                   if (lastIdx >= 0 && msgs[lastIdx].role === 'assistant') {
-                    msgs[lastIdx] = { ...msgs[lastIdx], content: msgs[lastIdx].content + data.content };
+                    msgs[lastIdx] = { ...msgs[lastIdx], content: msgs[lastIdx].content + `\n\n${errorContent}` };
                   }
                   return msgs;
                 });
               }
               break;
-
-            case 'tool_start':
-              setCurrentToolCall(data.name);
-              break;
-
-            case 'tool_end':
-              setCurrentToolCall(null);
-              break;
-
-            case 'error':
-              setMessages((prev) => {
-                const msgs = [...prev];
-                const lastIdx = msgs.length - 1;
-                if (lastIdx >= 0 && msgs[lastIdx].role === 'assistant') {
-                  msgs[lastIdx] = { ...msgs[lastIdx], content: msgs[lastIdx].content + `\n\nError: ${data.message}` };
-                }
-                return msgs;
-              });
-              break;
+            }
           }
         } catch {
           // Ignore parse errors
@@ -195,7 +225,7 @@ export function InlineChat({
       ]);
     } finally {
       setIsStreaming(false);
-      setCurrentToolCall(null);
+      setActiveToolCalls([]);
       // Clear streaming flag on last message
       setMessages((prev) => {
         const msgs = [...prev];
@@ -219,23 +249,6 @@ export function InlineChat({
       e.preventDefault();
       sendMessage(input);
     }
-  };
-
-  const toolNames: Record<string, string> = {
-    query_transactions: 'Searching transactions',
-    get_positions: 'Checking positions',
-    get_market_data: 'Fetching market data',
-    get_trading_recommendation: 'Analyzing trading setup',
-    get_ohlc_data: 'Fetching chart data',
-    kraken_api: 'Querying Kraken API',
-    calculate_tax: 'Calculating tax',
-    analyze_trades: 'Analyzing trades',
-    get_ledger: 'Reading ledger',
-    get_balance: 'Checking balance',
-    generate_ai_report: 'Generating AI analysis',
-    get_reports: 'Fetching reports',
-    get_current_setup: 'Analyzing entry checklist',
-    analyze_position: 'Analyzing position',
   };
 
   // Collapsed view - just the input button to expand
@@ -293,6 +306,7 @@ export function InlineChat({
       {/* Messages */}
       {messages.length > 0 && (
         <div
+          ref={messagesContainerRef}
           className="space-y-3 overflow-y-auto mb-3 pr-1"
           style={{ maxHeight }}
         >
@@ -315,27 +329,39 @@ export function InlineChat({
                 ) : (
                   <div className="chat-markdown-inline">
                     <MarkdownRenderer content={msg.content} className="text-sm" />
-                    {msg.isStreaming && (
-                      <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-current animate-pulse" />
-                    )}
                   </div>
                 )}
               </div>
             </div>
           ))}
 
-          {/* Tool call indicator */}
-          {currentToolCall && (
-            <div className="flex items-center gap-2 text-xs text-tertiary">
-              <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path
-                  className="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                />
-              </svg>
-              <span>{toolNames[currentToolCall] || currentToolCall}...</span>
+          {/* Tool call indicators - stacked */}
+          {activeToolCalls.length > 0 && (
+            <div className="flex flex-col gap-1">
+              {activeToolCalls.map((tool, i) => {
+                const isLatest = i === activeToolCalls.length - 1;
+                return (
+                  <div key={tool} className="flex items-center gap-2 text-xs text-tertiary">
+                    {isLatest ? (
+                      <svg className="w-3 h-3 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                        />
+                      </svg>
+                    ) : (
+                      <svg className="w-3 h-3 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                    <span className={isLatest ? '' : 'text-tertiary/60'}>
+                      {TOOL_DISPLAY_NAMES[tool] || tool}...
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           )}
 

@@ -10,7 +10,8 @@ import type { ToolName } from './definitions';
 import type { OHLCData, TimeframeData } from '@/lib/kraken/types';
 import { getDefaultStrategy } from '@/lib/trading/strategies';
 import { buildStrategyContextForTools } from '@/lib/ai/strategy-prompt-builder';
-import { calculateEntrySize, calculateLiquidationPrice } from '@/lib/trading/position-sizing';
+import { calculateEntrySize, calculateLiquidationPrice, calculateNewAvgPrice } from '@/lib/trading/position-sizing';
+import { FEE_RATES, estimateFees } from '@/lib/trading/trade-calculations';
 import { analyzeDCAOpportunity } from '@/lib/trading/dca-signals';
 import { analyzeExitConditions, getExitStatusSummary, calculateTimeboxPressure, getTimePhase } from '@/lib/trading/exit-signals';
 import { detectReversal5m15m } from '@/lib/trading/reversal-detector';
@@ -18,6 +19,8 @@ import { buildChartContext } from '@/lib/trading/chart-context';
 import { detectMarketRegime } from '@/lib/trading/market-regime';
 import type { PositionState, TradeDirection } from '@/lib/trading/v2-types';
 import { EMPTY_POSITION_STATE } from '@/lib/trading/v2-types';
+import { getTradingSession } from '@/lib/trading/session';
+import { calculatePositionHealth, calculateKrakenLiquidationPrice } from '@/lib/trading/position-health';
 
 // Base URL for internal API calls
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:4000';
@@ -68,6 +71,20 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>)
         return await getChartAnalysis(args);
       case 'get_v2_engine_state':
         return await getV2EngineState(args);
+      case 'dca_scenario_planner':
+        return await dcaScenarioPlanner(args);
+      case 'get_fear_greed':
+        return await getFearGreed();
+      case 'get_funding_and_oi':
+        return await getFundingAndOI(args);
+      case 'get_rollover_costs':
+        return await getRolloverCosts(args);
+      case 'get_trading_session':
+        return await getTradingSessionTool();
+      case 'get_position_health':
+        return await getPositionHealth(args);
+      case 'get_trading_history':
+        return await getTradingHistory(args);
       default:
         return { success: false, error: `Unknown tool: ${name}` };
     }
@@ -112,7 +129,36 @@ async function fetchOHLC(pair: string, interval: number, since?: number): Promis
 async function fetchTicker(pair: string): Promise<Record<string, unknown>> {
   const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/public/ticker?pairs=${pair}`);
   if (!res.ok) throw new Error(`Failed to fetch ticker for ${pair}`);
-  return res.json();
+  const json = await res.json();
+
+  // Kraken returns { "XXRPZEUR": { c: [...], a: [...], ... } }
+  // Extract the inner pair object so callers can access .c, .a, etc. directly
+  if (json && typeof json === 'object') {
+    const values = Object.values(json);
+    const pairData = values.find(
+      (v) => v && typeof v === 'object' && 'c' in (v as object)
+    ) as Record<string, unknown> | undefined;
+    if (pairData) {
+      // Flatten common fields for easy access
+      const c = Array.isArray(pairData.c) ? pairData.c : [];
+      const a = Array.isArray(pairData.a) ? pairData.a : [];
+      const b = Array.isArray(pairData.b) ? pairData.b : [];
+      const v = Array.isArray(pairData.v) ? pairData.v : [];
+      const h = Array.isArray(pairData.h) ? pairData.h : [];
+      const l = Array.isArray(pairData.l) ? pairData.l : [];
+      return {
+        ...pairData,
+        price: c[0],
+        bid: b[0],
+        ask: a[0],
+        volume: v[1],
+        high: h[1],
+        low: l[1],
+        open: pairData.o,
+      };
+    }
+  }
+  return json;
 }
 
 /**
@@ -1499,9 +1545,21 @@ async function analyzePosition(args: Record<string, unknown>): Promise<ToolResul
 
     // Kraken positions - fetch live from API
     try {
-      const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`);
+      // Fetch positions and trade balance in parallel
+      const [res, tbRes] = await Promise.all([
+        fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`),
+        fetchWithTimeout(`${BASE_URL}/api/kraken/private/trade-balance`),
+      ]);
       if (!res.ok) {
         return { success: false, error: 'Failed to fetch Kraken positions' };
+      }
+
+      let tradeBalanceVal = 0;
+      let equityVal = 0;
+      if (tbRes.ok) {
+        const tb = await tbRes.json();
+        equityVal = parseFloat(tb.e) || 0;
+        tradeBalanceVal = parseFloat(tb.tb) || 0;
       }
 
       const data = await res.json();
@@ -1539,11 +1597,35 @@ async function analyzePosition(args: Record<string, unknown>): Promise<ToolResul
       const entryPrice = vol > 0 ? cost / vol : 0;
       const fee = Number(p.fee) || 0;
       const net = Number(p.net) || 0;
+      const marginUsed = Number(p.margin) || 0;
+      const leverage = p.leverage ? parseFloat(String(p.leverage)) : 10;
       const side = String(p.type || 'buy');
       const direction = side === 'buy' ? 1 : -1;
       const priceDiff = (currentPrice - entryPrice) * direction;
       const unrealizedPnl = priceDiff * vol - fee;
       const pnlPercent = entryPrice > 0 ? (priceDiff / entryPrice) * 100 : 0;
+
+      // Calculate cross-margin liquidation price
+      let liquidationPrice = 0;
+      let liquidationDistance = 0;
+      if (tradeBalanceVal > 0 && vol > 0) {
+        liquidationPrice = calculateKrakenLiquidationPrice({
+          side: side === 'buy' ? 'long' : 'short',
+          entryPrice,
+          volume: vol,
+          marginUsed,
+          leverage,
+          equity: equityVal,
+          tradeBalance: tradeBalanceVal,
+        });
+        if (liquidationPrice <= 0 || currentPrice <= 0) {
+          liquidationDistance = 100;
+        } else if (side === 'buy') {
+          liquidationDistance = ((currentPrice - liquidationPrice) / currentPrice) * 100;
+        } else {
+          liquidationDistance = ((liquidationPrice - currentPrice) / currentPrice) * 100;
+        }
+      }
 
       // Get current setup for context
       const setupResult = await getCurrentSetup({ detailed: false });
@@ -1571,6 +1653,11 @@ async function analyzePosition(args: Record<string, unknown>): Promise<ToolResul
             percent: pnlPercent.toFixed(2) + '%',
             status: unrealizedPnl >= 0 ? 'PROFIT' : 'LOSS',
           },
+          risk: liquidationPrice > 0 ? {
+            liquidationPrice: liquidationPrice.toFixed(5),
+            liquidationDistance: liquidationDistance.toFixed(2) + '%',
+            marginLevel: marginUsed > 0 ? ((equityVal / marginUsed) * 100).toFixed(0) + '%' : 'N/A',
+          } : undefined,
           marketContext: currentSetup ? {
             currentSetupAction: (currentSetup as any).action,
             setupConfidence: (currentSetup as any).confidence,
@@ -1876,7 +1963,18 @@ async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResu
     } else {
       // Kraken positions
       try {
-        const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`);
+        // Fetch positions and trade balance in parallel for cross-margin liquidation
+        const [res, tbRes] = await Promise.all([
+          fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`),
+          fetchWithTimeout(`${BASE_URL}/api/kraken/private/trade-balance`),
+        ]);
+        let krakenTradeBalance = 0;
+        let krakenEquity = 0;
+        if (tbRes.ok) {
+          const tb = await tbRes.json();
+          krakenEquity = parseFloat(tb.e) || 0;
+          krakenTradeBalance = parseFloat(tb.tb) || 0;
+        }
         if (res.ok) {
           const data = await res.json();
           const allEntries = Object.entries(data);
@@ -1948,8 +2046,33 @@ async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResu
             const priceDiff = (currentPrice - entryPrice) * dirMult;
             const unrealizedPnl = priceDiff * totalVol - totalFee;
             const unrealizedPnlPercent = entryPrice > 0 ? (priceDiff / entryPrice) * 100 : 0;
-            const posValue = totalVol * currentPrice;
-            const liqResult = calculateLiquidationPrice(entryPrice, totalMargin, posValue, direction, leverage);
+            // Use cross-margin liquidation formula when trade balance is available
+            let liqPrice: number;
+            let liqDistPercent: number;
+            if (krakenTradeBalance > 0) {
+              liqPrice = calculateKrakenLiquidationPrice({
+                side: direction === 'long' ? 'long' : 'short',
+                entryPrice,
+                volume: totalVol,
+                marginUsed: totalMargin,
+                leverage,
+                equity: krakenEquity,
+                tradeBalance: krakenTradeBalance,
+              });
+              if (liqPrice <= 0 || currentPrice <= 0) {
+                liqDistPercent = 100;
+              } else if (direction === 'long') {
+                liqDistPercent = ((currentPrice - liqPrice) / currentPrice) * 100;
+              } else {
+                liqDistPercent = ((liqPrice - currentPrice) / currentPrice) * 100;
+              }
+            } else {
+              // Fallback to simple model if trade balance unavailable
+              const posValue = totalVol * currentPrice;
+              const liqResult = calculateLiquidationPrice(entryPrice, totalMargin, posValue, direction, leverage);
+              liqPrice = liqResult.liquidationPrice;
+              liqDistPercent = liqResult.distancePercent;
+            }
 
             // Build entry records from grouped ordertxid entries
             const entryRecords: Array<import('@/lib/trading/v2-types').EntryRecord> = sortedGroups.map(([, g], idx) => ({
@@ -1989,8 +2112,8 @@ async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResu
               timeInTradeMs: hoursOpen * 3600000,
               hoursRemaining: Math.max(0, strategy.timebox.maxHours - hoursOpen),
               timeboxProgress: Math.min(1, hoursOpen / strategy.timebox.maxHours),
-              liquidationPrice: liqResult.liquidationPrice,
-              liquidationDistancePercent: liqResult.distancePercent,
+              liquidationPrice: liqPrice,
+              liquidationDistancePercent: liqDistPercent,
               leverage,
               totalFees: totalFee,
               rolloverCostPer4h: 0,
@@ -2189,6 +2312,1049 @@ async function getV2EngineState(args: Record<string, unknown>): Promise<ToolResu
     return {
       success: false,
       error: `Failed to get v2 engine state: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+// ============================================================================
+// DCA SCENARIO PLANNER
+// ============================================================================
+
+interface ScenarioStep {
+  newAvgPrice: number;
+  newTotalVolume: number;
+  dcaVolume: number;
+  dcaCostEUR: number;
+  marginRequired: number;
+  newLiquidationPrice: number;
+  newLiquidationDistance: number;
+  breakevenPrice: number;
+  fees: { tradingFee: number; marginOpenFee: number; total: number };
+  canAfford: boolean;
+  marginNeeded: number;
+}
+
+/**
+ * Compute a single DCA scenario step: given current position + hypothetical DCA,
+ * returns new avg, liquidation, fees, breakeven, margin feasibility.
+ */
+function computeScenarioStep(
+  currentAvg: number,
+  currentVolume: number,
+  dcaPrice: number,
+  dcaVolume: number,
+  direction: TradeDirection,
+  leverage: number,
+  freeMargin: number
+): ScenarioStep {
+  const newAvgPrice = calculateNewAvgPrice(currentAvg, currentVolume, dcaPrice, dcaVolume);
+  const newTotalVolume = currentVolume + dcaVolume;
+
+  // Cost and margin
+  const dcaCostEUR = dcaPrice * dcaVolume;
+  const marginRequired = dcaCostEUR / leverage;
+
+  // New position value for liquidation calc
+  const newPositionValue = newTotalVolume * newAvgPrice; // approximate at avg entry
+  const newTotalMargin = (currentVolume * currentAvg / leverage) + marginRequired;
+  const liqResult = calculateLiquidationPrice(newAvgPrice, newTotalMargin, newPositionValue, direction, leverage);
+
+  // Liquidation distance from DCA price (more relevant)
+  const liqDistFromCurrent = dcaPrice > 0
+    ? direction === 'long'
+      ? ((dcaPrice - liqResult.liquidationPrice) / dcaPrice) * 100
+      : ((liqResult.liquidationPrice - dcaPrice) / dcaPrice) * 100
+    : 0;
+
+  // Fee estimate (market order for worst-case)
+  const feeEstimate = estimateFees(dcaCostEUR, 'market', leverage);
+
+  // Breakeven: need to cover round-trip fees
+  // For long: breakeven = avgPrice * (1 + 2 * taker_fee)
+  // For short: breakeven = avgPrice * (1 - 2 * taker_fee)
+  const feeMultiplier = 2 * FEE_RATES.taker;
+  const breakevenPrice = direction === 'long'
+    ? newAvgPrice * (1 + feeMultiplier)
+    : newAvgPrice * (1 - feeMultiplier);
+
+  const canAfford = marginRequired <= freeMargin;
+
+  return {
+    newAvgPrice,
+    newTotalVolume,
+    dcaVolume,
+    dcaCostEUR,
+    marginRequired,
+    newLiquidationPrice: liqResult.liquidationPrice,
+    newLiquidationDistance: liqDistFromCurrent,
+    breakevenPrice,
+    fees: {
+      tradingFee: feeEstimate.tradingFee,
+      marginOpenFee: feeEstimate.marginOpenFee,
+      total: feeEstimate.total,
+    },
+    canAfford,
+    marginNeeded: marginRequired,
+  };
+}
+
+/**
+ * DCA Scenario Planner — handles target_avg, what_if_buy, and multi_level_plan modes.
+ */
+async function dcaScenarioPlanner(args: Record<string, unknown>): Promise<ToolResult> {
+  const mode = String(args.mode || '');
+  const pair = String(args.pair || 'XRPEUR').toUpperCase();
+  const positionType = String(args.positionType || 'kraken');
+
+  if (!['target_avg', 'what_if_buy', 'multi_level_plan'].includes(mode)) {
+    return { success: false, error: 'Invalid mode. Must be: target_avg, what_if_buy, or multi_level_plan' };
+  }
+
+  try {
+    const strategy = getDefaultStrategy();
+    const leverage = strategy.positionSizing.leverage;
+
+    // Fetch current price
+    let currentPrice = 0;
+    try {
+      const ticker = await fetchTicker(pair);
+      currentPrice = parseFloat(String(ticker.price || (ticker as any).c?.[0])) || 0;
+    } catch {
+      // Ticker fetch failed — will use dcaPrice if available
+    }
+
+    // If dcaPrice is provided, we can proceed without current market price
+    const dcaPriceFromArgs = Number(args.dcaPrice) || 0;
+    if (currentPrice <= 0 && dcaPriceFromArgs <= 0) {
+      return { success: false, error: 'Failed to get current market price and no dcaPrice provided. Please specify a dcaPrice.' };
+    }
+
+    // Fetch position data
+    let currentAvg = 0;
+    let currentVolume = 0;
+    let direction: TradeDirection = 'long';
+    let hasPosition = false;
+    let freeMargin = 0;
+    let currentMarginUsed = 0;
+
+    if (positionType === 'simulated') {
+      // Simulated position
+      const simPos = await prisma.simulatedPosition.findFirst({
+        where: { isOpen: true },
+        orderBy: { openedAt: 'desc' },
+      });
+
+      if (simPos) {
+        hasPosition = true;
+        currentAvg = simPos.avgEntryPrice;
+        currentVolume = simPos.volume;
+        direction = simPos.side === 'sell' ? 'short' : 'long';
+        // Use currentPrice if available, otherwise estimate from entry
+        const priceForMargin = currentPrice > 0 ? currentPrice : simPos.avgEntryPrice;
+        const posValue = simPos.volume * priceForMargin;
+        currentMarginUsed = posValue / simPos.leverage;
+      }
+
+      // Get simulated balance
+      const balance = await prisma.simulatedBalance.findUnique({
+        where: { id: 'default' },
+      });
+      freeMargin = balance?.freeMargin || 20000;
+    } else {
+      // Kraken positions — consolidate by ordertxid
+      try {
+        const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`);
+        if (res.ok) {
+          const data = await res.json();
+          const xrpEntries = Object.entries(data).filter(([, posData]) => {
+            const p = posData as Record<string, unknown>;
+            const pairStr = String(p.pair || '');
+            return pairStr.includes('XRP') || pairStr.includes('XXRP');
+          });
+
+          if (xrpEntries.length > 0) {
+            hasPosition = true;
+            let totalVol = 0, totalCost = 0, totalMargin = 0;
+            let firstType = 'buy';
+
+            for (const [, posData] of xrpEntries) {
+              const p = posData as Record<string, unknown>;
+              totalVol += Number(p.vol) || 0;
+              totalCost += Number(p.cost) || 0;
+              totalMargin += Number(p.margin) || 0;
+              if (p.type) firstType = String(p.type);
+            }
+
+            currentAvg = totalVol > 0 ? totalCost / totalVol : 0;
+            currentVolume = totalVol;
+            currentMarginUsed = totalMargin;
+            direction = firstType === 'sell' ? 'short' : 'long';
+          }
+        }
+      } catch {
+        // Position fetch failed
+      }
+
+      // Get Kraken balance
+      try {
+        const tbRes = await fetchWithTimeout(`${BASE_URL}/api/kraken/private/trade-balance`);
+        if (tbRes.ok) {
+          const tb = await tbRes.json();
+          freeMargin = parseFloat(tb.mf) || 0;
+        }
+      } catch {
+        // Balance fetch failed
+      }
+    }
+
+    if (!hasPosition) {
+      return {
+        success: false,
+        error: 'No open position found. DCA scenario planning requires an existing position. Open a position first, then ask about DCA scenarios.',
+      };
+    }
+
+    // ========================================================================
+    // MODE: target_avg
+    // ========================================================================
+    if (mode === 'target_avg') {
+      const targetAvg = Number(args.targetAvgPrice);
+      const dcaPrice = Number(args.dcaPrice) || currentPrice;
+
+      if (dcaPrice <= 0) {
+        return { success: false, error: 'dcaPrice is required (could not determine from market data)' };
+      }
+
+      if (!targetAvg || targetAvg <= 0) {
+        return { success: false, error: 'targetAvgPrice is required and must be positive' };
+      }
+
+      // Check if the target is mathematically achievable
+      // For long: to lower avg, dcaPrice must be < currentAvg AND targetAvg must be between dcaPrice and currentAvg
+      // For short: to raise avg, dcaPrice must be > currentAvg AND targetAvg must be between dcaPrice and currentAvg
+      const isLoweringAvg = targetAvg < currentAvg;
+      const isRaisingAvg = targetAvg > currentAvg;
+
+      if (direction === 'long') {
+        if (isRaisingAvg) {
+          return {
+            success: false,
+            error: `Cannot raise average from ${currentAvg.toFixed(5)} to ${targetAvg.toFixed(5)} by buying more. DCA can only lower your average for a long position.`,
+          };
+        }
+        if (dcaPrice >= currentAvg) {
+          return {
+            success: false,
+            error: `Cannot lower average by buying at ${dcaPrice.toFixed(5)} which is >= current avg ${currentAvg.toFixed(5)}. DCA price must be below current average.`,
+          };
+        }
+        if (targetAvg <= dcaPrice) {
+          return {
+            success: false,
+            error: `Target avg ${targetAvg.toFixed(5)} is at or below DCA price ${dcaPrice.toFixed(5)}. Mathematically impossible — target must be between DCA price and current avg.`,
+          };
+        }
+      } else {
+        // Short position
+        if (isLoweringAvg) {
+          return {
+            success: false,
+            error: `Cannot lower average from ${currentAvg.toFixed(5)} to ${targetAvg.toFixed(5)} by selling more. DCA can only raise your average for a short position.`,
+          };
+        }
+        if (dcaPrice <= currentAvg) {
+          return {
+            success: false,
+            error: `Cannot raise average by selling at ${dcaPrice.toFixed(5)} which is <= current avg ${currentAvg.toFixed(5)}. DCA price must be above current average.`,
+          };
+        }
+        if (targetAvg >= dcaPrice) {
+          return {
+            success: false,
+            error: `Target avg ${targetAvg.toFixed(5)} is at or above DCA price ${dcaPrice.toFixed(5)}. Mathematically impossible — target must be between current avg and DCA price.`,
+          };
+        }
+      }
+
+      // Solve: dcaVolume = currentVolume * (currentAvg - targetAvg) / (targetAvg - dcaPrice)
+      const numerator = currentVolume * (currentAvg - targetAvg);
+      const denominator = targetAvg - dcaPrice;
+
+      if (Math.abs(denominator) < 1e-10) {
+        return { success: false, error: 'Target average equals DCA price — infinite volume needed' };
+      }
+
+      const requiredVolume = Math.abs(numerator / denominator);
+
+      if (requiredVolume <= 0 || !Number.isFinite(requiredVolume)) {
+        return { success: false, error: 'Could not solve for DCA volume — check your inputs' };
+      }
+
+      // Compute full scenario step
+      const step = computeScenarioStep(currentAvg, currentVolume, dcaPrice, requiredVolume, direction, leverage, freeMargin);
+
+      const maxDCA = strategy.positionSizing.maxDCACount;
+      const totalMarginAfter = currentMarginUsed + step.marginRequired;
+      const totalEquity = freeMargin + currentMarginUsed;
+      const marginUtilAfter = totalEquity > 0 ? (totalMarginAfter / totalEquity) * 100 : 0;
+
+      return {
+        success: true,
+        data: {
+          mode: 'target_avg',
+          scenario: {
+            currentPosition: {
+              direction,
+              avgPrice: currentAvg.toFixed(5),
+              volume: currentVolume.toFixed(2),
+              pair,
+            },
+            dcaPrice: dcaPrice.toFixed(5),
+            dcaPriceNote: args.dcaPrice ? undefined : (currentPrice > 0 ? `Using current market price (${currentPrice.toFixed(5)})` : 'Using provided dcaPrice'),
+            targetAvgPrice: targetAvg.toFixed(5),
+            requiredVolume: requiredVolume.toFixed(2),
+            requiredEUR: step.dcaCostEUR.toFixed(2),
+            result: {
+              newAvgPrice: step.newAvgPrice.toFixed(5),
+              newTotalVolume: step.newTotalVolume.toFixed(2),
+              breakevenPrice: step.breakevenPrice.toFixed(5),
+              liquidationPrice: step.newLiquidationPrice.toFixed(5),
+              liquidationDistance: step.newLiquidationDistance.toFixed(2) + '%',
+            },
+            margin: {
+              required: step.marginRequired.toFixed(2),
+              available: freeMargin.toFixed(2),
+              canAfford: step.canAfford,
+              utilizationAfter: marginUtilAfter.toFixed(1) + '%',
+              maxAllowed: strategy.positionSizing.maxTotalMarginPercent + '%',
+            },
+            fees: {
+              tradingFee: step.fees.tradingFee.toFixed(2),
+              marginOpenFee: step.fees.marginOpenFee.toFixed(2),
+              total: step.fees.total.toFixed(2),
+            },
+            warnings: [
+              ...(!step.canAfford ? [`Insufficient margin: need €${step.marginRequired.toFixed(2)} but only €${freeMargin.toFixed(2)} available`] : []),
+              ...(marginUtilAfter > strategy.positionSizing.maxTotalMarginPercent ? [`Margin utilization ${marginUtilAfter.toFixed(1)}% would exceed max ${strategy.positionSizing.maxTotalMarginPercent}%`] : []),
+              ...(requiredVolume > currentVolume * 5 ? [`Very large DCA: ${requiredVolume.toFixed(0)} XRP is ${(requiredVolume / currentVolume).toFixed(1)}x your current position size`] : []),
+            ],
+            currentPrice: currentPrice.toFixed(5),
+          },
+        },
+      };
+    }
+
+    // ========================================================================
+    // MODE: what_if_buy
+    // ========================================================================
+    if (mode === 'what_if_buy') {
+      const dcaPrice = Number(args.dcaPrice) || currentPrice;
+      let dcaVolume = Number(args.dcaVolume) || 0;
+      const dcaAmountEUR = Number(args.dcaAmountEUR) || 0;
+
+      if (dcaPrice <= 0) {
+        return { success: false, error: 'dcaPrice is required (could not determine from market data)' };
+      }
+
+      // Convert EUR to volume if EUR provided
+      if (dcaVolume <= 0 && dcaAmountEUR > 0) {
+        dcaVolume = dcaAmountEUR / dcaPrice;
+      }
+
+      if (dcaVolume <= 0) {
+        return { success: false, error: 'Provide either dcaVolume (XRP amount) or dcaAmountEUR (EUR amount) for the hypothetical buy' };
+      }
+
+      const step = computeScenarioStep(currentAvg, currentVolume, dcaPrice, dcaVolume, direction, leverage, freeMargin);
+
+      const totalMarginAfter = currentMarginUsed + step.marginRequired;
+      const totalEquity = freeMargin + currentMarginUsed;
+      const marginUtilAfter = totalEquity > 0 ? (totalMarginAfter / totalEquity) * 100 : 0;
+
+      // Price change needed to break even (use dcaPrice as reference if currentPrice unavailable)
+      const referencePrice = currentPrice > 0 ? currentPrice : dcaPrice;
+      const priceChangeToBreakeven = direction === 'long'
+        ? ((step.breakevenPrice - referencePrice) / referencePrice) * 100
+        : ((referencePrice - step.breakevenPrice) / referencePrice) * 100;
+
+      return {
+        success: true,
+        data: {
+          mode: 'what_if_buy',
+          scenario: {
+            currentPosition: {
+              direction,
+              avgPrice: currentAvg.toFixed(5),
+              volume: currentVolume.toFixed(2),
+              pair,
+            },
+            hypotheticalBuy: {
+              price: dcaPrice.toFixed(5),
+              priceNote: args.dcaPrice ? undefined : `Using current market price (${currentPrice.toFixed(5)})`,
+              volume: dcaVolume.toFixed(2),
+              costEUR: step.dcaCostEUR.toFixed(2),
+            },
+            result: {
+              newAvgPrice: step.newAvgPrice.toFixed(5),
+              avgPriceChange: ((step.newAvgPrice - currentAvg) / currentAvg * 100).toFixed(2) + '%',
+              newTotalVolume: step.newTotalVolume.toFixed(2),
+              breakevenPrice: step.breakevenPrice.toFixed(5),
+              priceChangeToBreakeven: priceChangeToBreakeven.toFixed(2) + '%',
+              liquidationPrice: step.newLiquidationPrice.toFixed(5),
+              liquidationDistance: step.newLiquidationDistance.toFixed(2) + '%',
+            },
+            margin: {
+              required: step.marginRequired.toFixed(2),
+              available: freeMargin.toFixed(2),
+              canAfford: step.canAfford,
+              utilizationAfter: marginUtilAfter.toFixed(1) + '%',
+            },
+            fees: {
+              tradingFee: step.fees.tradingFee.toFixed(2),
+              marginOpenFee: step.fees.marginOpenFee.toFixed(2),
+              total: step.fees.total.toFixed(2),
+            },
+            warnings: [
+              ...(!step.canAfford ? [`Insufficient margin: need €${step.marginRequired.toFixed(2)} but only €${freeMargin.toFixed(2)} available`] : []),
+              ...(marginUtilAfter > strategy.positionSizing.maxTotalMarginPercent ? [`Margin utilization ${marginUtilAfter.toFixed(1)}% would exceed max ${strategy.positionSizing.maxTotalMarginPercent}%`] : []),
+            ],
+            currentPrice: currentPrice.toFixed(5),
+          },
+        },
+      };
+    }
+
+    // ========================================================================
+    // MODE: multi_level_plan
+    // ========================================================================
+    if (mode === 'multi_level_plan') {
+      const priceLevels = args.priceLevels as number[] | undefined;
+      const amountPerLevelEUR = Number(args.amountPerLevelEUR) || 0;
+      const volumePerLevel = Number(args.volumePerLevel) || 0;
+
+      if (!priceLevels || !Array.isArray(priceLevels) || priceLevels.length === 0) {
+        return { success: false, error: 'priceLevels array is required for multi_level_plan mode' };
+      }
+
+      if (amountPerLevelEUR <= 0 && volumePerLevel <= 0) {
+        // Default: use strategy DCA sizing
+        // Calculate default EUR per level based on strategy config
+      }
+
+      // Sort levels: for long, descending (buy highest first as price drops);
+      // for short, ascending (sell lowest first as price rises)
+      const sortedLevels = direction === 'long'
+        ? [...priceLevels].sort((a, b) => b - a)
+        : [...priceLevels].sort((a, b) => a - b);
+
+      // Build progressive table
+      let runningAvg = currentAvg;
+      let runningVolume = currentVolume;
+      let runningMarginUsed = currentMarginUsed;
+      let runningFreeMargin = freeMargin;
+      let totalDCACost = 0;
+      let totalDCAVolume = 0;
+      let totalFees = 0;
+
+      const levels: Array<{
+        level: number;
+        price: string;
+        volume: string;
+        costEUR: string;
+        marginRequired: string;
+        newAvgPrice: string;
+        newTotalVolume: string;
+        liquidationPrice: string;
+        liquidationDistance: string;
+        breakevenPrice: string;
+        canAfford: boolean;
+        cumulativeCostEUR: string;
+        cumulativeVolume: string;
+        fees: string;
+      }> = [];
+
+      for (let i = 0; i < sortedLevels.length; i++) {
+        const lvlPrice = sortedLevels[i];
+        let lvlVolume: number;
+
+        if (volumePerLevel > 0) {
+          lvlVolume = volumePerLevel;
+        } else if (amountPerLevelEUR > 0) {
+          lvlVolume = amountPerLevelEUR / lvlPrice;
+        } else {
+          // Default: use strategy DCA margin percent
+          const totalEquity = runningFreeMargin + runningMarginUsed;
+          const dcaMargin = (totalEquity * strategy.positionSizing.dcaMarginPercent) / 100;
+          const posValue = dcaMargin * leverage;
+          lvlVolume = posValue / lvlPrice;
+        }
+
+        const step = computeScenarioStep(runningAvg, runningVolume, lvlPrice, lvlVolume, direction, leverage, runningFreeMargin);
+
+        totalDCACost += step.dcaCostEUR;
+        totalDCAVolume += lvlVolume;
+        totalFees += step.fees.total;
+
+        levels.push({
+          level: i + 1,
+          price: lvlPrice.toFixed(5),
+          volume: lvlVolume.toFixed(2),
+          costEUR: step.dcaCostEUR.toFixed(2),
+          marginRequired: step.marginRequired.toFixed(2),
+          newAvgPrice: step.newAvgPrice.toFixed(5),
+          newTotalVolume: step.newTotalVolume.toFixed(2),
+          liquidationPrice: step.newLiquidationPrice.toFixed(5),
+          liquidationDistance: step.newLiquidationDistance.toFixed(2) + '%',
+          breakevenPrice: step.breakevenPrice.toFixed(5),
+          canAfford: step.canAfford,
+          cumulativeCostEUR: totalDCACost.toFixed(2),
+          cumulativeVolume: (currentVolume + totalDCAVolume).toFixed(2),
+          fees: step.fees.total.toFixed(2),
+        });
+
+        // Update running state for next level
+        runningAvg = step.newAvgPrice;
+        runningVolume = step.newTotalVolume;
+        runningMarginUsed += step.marginRequired;
+        runningFreeMargin = Math.max(0, runningFreeMargin - step.marginRequired);
+      }
+
+      const totalEquity = freeMargin + currentMarginUsed;
+      const finalMarginUtil = totalEquity > 0 ? (runningMarginUsed / totalEquity) * 100 : 0;
+      const firstUnaffordable = levels.findIndex(l => !l.canAfford);
+
+      return {
+        success: true,
+        data: {
+          mode: 'multi_level_plan',
+          scenario: {
+            currentPosition: {
+              direction,
+              avgPrice: currentAvg.toFixed(5),
+              volume: currentVolume.toFixed(2),
+              pair,
+            },
+            plan: levels,
+            summary: {
+              totalLevels: levels.length,
+              totalDCACost: totalDCACost.toFixed(2),
+              totalDCAVolume: totalDCAVolume.toFixed(2),
+              totalFees: totalFees.toFixed(2),
+              finalAvgPrice: runningAvg.toFixed(5),
+              finalTotalVolume: runningVolume.toFixed(2),
+              avgPriceReduction: ((currentAvg - runningAvg) / currentAvg * 100).toFixed(2) + '%',
+              affordableLevels: firstUnaffordable === -1 ? levels.length : firstUnaffordable,
+              finalMarginUtilization: finalMarginUtil.toFixed(1) + '%',
+            },
+            warnings: [
+              ...(firstUnaffordable !== -1 ? [`Can only afford ${firstUnaffordable} of ${levels.length} levels with current margin`] : []),
+              ...(finalMarginUtil > strategy.positionSizing.maxTotalMarginPercent ? [`Final margin utilization ${finalMarginUtil.toFixed(1)}% exceeds strategy max ${strategy.positionSizing.maxTotalMarginPercent}%`] : []),
+              ...(levels.length > strategy.positionSizing.maxDCACount ? [`Plan has ${levels.length} levels but strategy allows max ${strategy.positionSizing.maxDCACount} DCAs`] : []),
+            ],
+            currentPrice: currentPrice.toFixed(5),
+          },
+        },
+      };
+    }
+
+    return { success: false, error: `Unhandled mode: ${mode}` };
+  } catch (error) {
+    return {
+      success: false,
+      error: `DCA scenario planner failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+// ============================================================================
+// NEW TOOLS: Fear & Greed, Funding/OI, Rollover, Session, Health, History
+// ============================================================================
+
+/**
+ * Get Fear & Greed Index
+ */
+async function getFearGreed(): Promise<ToolResult> {
+  try {
+    const res = await fetchWithTimeout(`${BASE_URL}/api/fear-greed`);
+    if (!res.ok) {
+      return { success: false, error: 'Failed to fetch Fear & Greed data' };
+    }
+
+    const data = await res.json();
+    const entry = data.data?.[0];
+
+    if (!entry) {
+      return { success: false, error: 'No Fear & Greed data available' };
+    }
+
+    return {
+      success: true,
+      data: {
+        value: parseInt(entry.value),
+        classification: entry.value_classification,
+        timestamp: new Date(parseInt(entry.timestamp) * 1000).toISOString(),
+        interpretation: parseInt(entry.value) <= 25
+          ? 'Extreme Fear — historically a buying opportunity'
+          : parseInt(entry.value) <= 40
+            ? 'Fear — market is cautious'
+            : parseInt(entry.value) <= 60
+              ? 'Neutral — no strong sentiment bias'
+              : parseInt(entry.value) <= 75
+                ? 'Greed — market is optimistic, potential for correction'
+                : 'Extreme Greed — historically a time for caution',
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Fear & Greed fetch failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+/**
+ * Get funding rates and open interest from derivatives data
+ */
+async function getFundingAndOI(args: Record<string, unknown>): Promise<ToolResult> {
+  try {
+    const res = await fetchWithTimeout(`${BASE_URL}/api/liquidation`);
+    if (!res.ok) {
+      return { success: false, error: 'Failed to fetch derivatives data' };
+    }
+
+    const data = await res.json();
+
+    return {
+      success: true,
+      data: {
+        xrp: {
+          price: data.xrp?.price,
+          openInterest: data.xrp?.openInterest,
+          openInterestUsd: data.xrp?.openInterestUsd,
+          fundingRate: data.xrp?.fundingRate,
+          fundingAnnualized: data.xrp?.fundingAnnualized?.toFixed(2) + '%',
+          fundingRatePrediction: data.xrp?.fundingRatePrediction,
+          vol24h: data.xrp?.vol24h,
+          change24h: data.xrp?.change24h,
+        },
+        btc: {
+          price: data.btc?.price,
+          openInterest: data.btc?.openInterest,
+          openInterestUsd: data.btc?.openInterestUsd,
+          fundingRate: data.btc?.fundingRate,
+          fundingAnnualized: data.btc?.fundingAnnualized?.toFixed(2) + '%',
+          change24h: data.btc?.change24h,
+        },
+        eth: {
+          price: data.eth?.price,
+          openInterest: data.eth?.openInterest,
+          openInterestUsd: data.eth?.openInterestUsd,
+          fundingRate: data.eth?.fundingRate,
+          fundingAnnualized: data.eth?.fundingAnnualized?.toFixed(2) + '%',
+          change24h: data.eth?.change24h,
+        },
+        marketBias: data.marketBias,
+        note: 'Positive funding = longs pay shorts (crowded long). Negative = shorts pay longs (crowded short).',
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Derivatives data fetch failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+/**
+ * Get rollover costs for current position
+ */
+async function getRolloverCosts(args: Record<string, unknown>): Promise<ToolResult> {
+  const positionType = String(args.positionType || 'kraken');
+  const pair = String(args.pair || 'XRPEUR').toUpperCase();
+  const asset = pair.replace(/EUR$/, '').replace(/USD$/, '');
+
+  try {
+    // Get position to determine open time
+    let openTimeMs: number | null = null;
+    let positionVolume = 0;
+    let positionCost = 0;
+
+    if (positionType === 'simulated') {
+      const simPos = await prisma.simulatedPosition.findFirst({
+        where: { isOpen: true },
+        orderBy: { openedAt: 'desc' },
+      });
+
+      if (!simPos) {
+        return { success: false, error: 'No open simulated position found' };
+      }
+
+      openTimeMs = new Date(simPos.openedAt).getTime();
+      positionVolume = simPos.volume;
+      positionCost = simPos.totalCost;
+    } else {
+      // Kraken position
+      try {
+        const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`);
+        if (res.ok) {
+          const data = await res.json();
+          const entries = Object.entries(data).filter(([, posData]) => {
+            const p = posData as Record<string, unknown>;
+            const pairStr = String(p.pair || '');
+            return pairStr.includes(asset) || pairStr.includes(`X${asset}`);
+          });
+
+          if (entries.length === 0) {
+            return { success: false, error: `No open ${asset} position found on Kraken` };
+          }
+
+          // Find earliest open time
+          let earliestTime = Infinity;
+          for (const [, posData] of entries) {
+            const p = posData as Record<string, unknown>;
+            const rawTime = p.time ? parseFloat(String(p.time)) : NaN;
+            const t = Number.isFinite(rawTime) ? rawTime * 1000 : Date.now();
+            if (t < earliestTime) earliestTime = t;
+            positionVolume += Number(p.vol) || 0;
+            positionCost += Number(p.cost) || 0;
+          }
+
+          openTimeMs = earliestTime < Infinity ? earliestTime : null;
+        }
+      } catch {
+        return { success: false, error: 'Failed to fetch Kraken positions for rollover calculation' };
+      }
+    }
+
+    if (!openTimeMs) {
+      return { success: false, error: 'Could not determine position open time' };
+    }
+
+    // Fetch rollover costs from API
+    const params = new URLSearchParams({
+      openTime: String(openTimeMs),
+      asset,
+    });
+
+    const res = await fetchWithTimeout(`${BASE_URL}/api/kraken/private/rollover-costs?${params}`);
+    if (!res.ok) {
+      return { success: false, error: 'Failed to fetch rollover cost data' };
+    }
+
+    const rolloverData = await res.json();
+    const hoursOpen = (Date.now() - openTimeMs) / 3600000;
+    const periodsOpen = Math.floor(hoursOpen / 4);
+
+    // Calculate daily rate and projected costs
+    const totalCost = rolloverData.totalRolloverCost || 0;
+    const dailyRate = hoursOpen > 0 ? (totalCost / hoursOpen) * 24 : 0;
+    const projectedWeekly = dailyRate * 7;
+
+    return {
+      success: true,
+      data: {
+        positionType,
+        pair,
+        hoursOpen: hoursOpen.toFixed(1),
+        rolloverPeriods: periodsOpen,
+        totalRolloverCost: totalCost.toFixed(4),
+        dailyRate: dailyRate.toFixed(4),
+        projectedWeekly: projectedWeekly.toFixed(4),
+        rolloverCount: rolloverData.rolloverCount || 0,
+        costAsPercentOfPosition: positionCost > 0
+          ? ((totalCost / positionCost) * 100).toFixed(4) + '%'
+          : 'N/A',
+        recentRollovers: (rolloverData.rollovers || []).slice(-5),
+        note: 'Kraken charges rollover fees every 4 hours on margin positions.',
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Rollover cost calculation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+/**
+ * Get current trading session
+ */
+async function getTradingSessionTool(): Promise<ToolResult> {
+  const session = getTradingSession();
+  const now = new Date();
+
+  return {
+    success: true,
+    data: {
+      ...session,
+      currentTimeUTC: now.toUTCString(),
+      utcHour: now.getUTCHours(),
+      dayOfWeek: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][now.getUTCDay()],
+    },
+  };
+}
+
+/**
+ * Get comprehensive position health metrics
+ */
+async function getPositionHealth(args: Record<string, unknown>): Promise<ToolResult> {
+  const positionType = String(args.positionType || 'kraken');
+
+  try {
+    if (positionType === 'simulated') {
+      const simPos = await prisma.simulatedPosition.findFirst({
+        where: { isOpen: true },
+        orderBy: { openedAt: 'desc' },
+      });
+
+      if (!simPos) {
+        return { success: false, error: 'No open simulated position found' };
+      }
+
+      // Get current price
+      const ticker = await fetchTicker(simPos.pair);
+      const currentPrice = parseFloat(String(ticker.price || (ticker as any).c?.[0])) || 0;
+
+      const side = simPos.side === 'buy' ? 'long' as const : 'short' as const;
+      const positionValue = simPos.volume * currentPrice;
+      const marginUsed = positionValue / simPos.leverage;
+
+      // Get simulated balance for equity
+      const balance = await prisma.simulatedBalance.findUnique({
+        where: { id: 'default' },
+      });
+      const equity = balance?.equity || 2000;
+
+      // Calculate liquidation using simple model
+      const liqResult = calculateLiquidationPrice(
+        simPos.avgEntryPrice, marginUsed, positionValue, side, simPos.leverage
+      );
+
+      const health = calculatePositionHealth({
+        side,
+        entryPrice: simPos.avgEntryPrice,
+        currentPrice,
+        liquidationPrice: liqResult.liquidationPrice,
+        leverage: simPos.leverage,
+        marginUsed,
+        equity,
+        openedAt: simPos.openedAt,
+      });
+
+      return {
+        success: true,
+        data: {
+          positionType: 'simulated',
+          pair: simPos.pair,
+          side: side.toUpperCase(),
+          entryPrice: simPos.avgEntryPrice.toFixed(5),
+          currentPrice: currentPrice.toFixed(5),
+          leverage: simPos.leverage + 'x',
+          health: {
+            riskLevel: health.riskLevel,
+            riskFactors: health.riskFactors,
+            liquidationDistance: health.liquidationDistance.toFixed(2) + '%',
+            liquidationStatus: health.liquidationStatus,
+            liquidationPrice: liqResult.liquidationPrice.toFixed(5),
+            marginLevel: health.marginLevel.toFixed(0) + '%',
+            marginStatus: health.marginStatus,
+            hoursOpen: health.hoursOpen.toFixed(1),
+            timeStatus: health.timeStatus,
+            estimatedRolloverFee: health.estimatedRolloverFee.toFixed(4),
+          },
+        },
+      };
+    }
+
+    // Kraken position health
+    const [posRes, tbRes] = await Promise.all([
+      fetchWithTimeout(`${BASE_URL}/api/kraken/private/positions`),
+      fetchWithTimeout(`${BASE_URL}/api/kraken/private/trade-balance`),
+    ]);
+
+    if (!posRes.ok) {
+      return { success: false, error: 'Failed to fetch Kraken positions' };
+    }
+
+    const posData = await posRes.json();
+    const entries = Object.entries(posData);
+
+    if (entries.length === 0) {
+      return { success: false, error: 'No open Kraken positions found' };
+    }
+
+    // Consolidate XRP positions
+    let totalVol = 0, totalCost = 0, totalMargin = 0, totalFee = 0;
+    let earliestTime = Infinity;
+    let firstType = 'buy';
+    let firstLeverage = 10;
+    let pair = 'XRPEUR';
+
+    for (const [, posEntry] of entries) {
+      const p = posEntry as Record<string, unknown>;
+      totalVol += Number(p.vol) || 0;
+      totalCost += Number(p.cost) || 0;
+      totalMargin += Number(p.margin) || 0;
+      totalFee += Number(p.fee) || 0;
+      const rawTime = p.time ? parseFloat(String(p.time)) : NaN;
+      const t = Number.isFinite(rawTime) ? rawTime * 1000 : Date.now();
+      if (t < earliestTime) {
+        earliestTime = t;
+        firstType = String(p.type || 'buy');
+      }
+      const rawLev = p.leverage ? parseFloat(String(p.leverage)) : NaN;
+      if (Number.isFinite(rawLev)) firstLeverage = rawLev;
+      if (p.pair) pair = String(p.pair);
+    }
+
+    const entryPrice = totalVol > 0 ? totalCost / totalVol : 0;
+    const side = firstType === 'sell' ? 'short' as const : 'long' as const;
+    const leverage = firstLeverage > 0 ? firstLeverage : (totalMargin > 0 ? Math.round(totalCost / totalMargin) : 10);
+    const openTime = earliestTime < Infinity ? earliestTime : Date.now();
+
+    // Get current price
+    const ticker = await fetchTicker(pair);
+    const currentPrice = parseFloat(String(ticker.price || (ticker as any).c?.[0])) || 0;
+
+    // Get trade balance for cross-margin liquidation calculation
+    let equity = 0;
+    let tradeBalanceVal = 0;
+
+    if (tbRes.ok) {
+      const tb = await tbRes.json();
+      equity = parseFloat(tb.e) || 0;
+      tradeBalanceVal = parseFloat(tb.tb) || 0;
+    }
+
+    // Calculate Kraken cross-margin liquidation price
+    const liquidationPrice = calculateKrakenLiquidationPrice({
+      side,
+      entryPrice,
+      volume: totalVol,
+      marginUsed: totalMargin,
+      leverage,
+      equity,
+      tradeBalance: tradeBalanceVal,
+    });
+
+    const health = calculatePositionHealth({
+      side,
+      entryPrice,
+      currentPrice,
+      liquidationPrice,
+      leverage,
+      marginUsed: totalMargin,
+      equity,
+      openedAt: new Date(openTime),
+    });
+
+    return {
+      success: true,
+      data: {
+        positionType: 'kraken',
+        pair,
+        side: side.toUpperCase(),
+        entryPrice: entryPrice.toFixed(5),
+        currentPrice: currentPrice.toFixed(5),
+        volume: totalVol,
+        leverage: leverage + 'x',
+        positionCount: entries.length,
+        health: {
+          riskLevel: health.riskLevel,
+          riskFactors: health.riskFactors,
+          liquidationDistance: health.liquidationDistance.toFixed(2) + '%',
+          liquidationStatus: health.liquidationStatus,
+          liquidationPrice: liquidationPrice.toFixed(5),
+          marginLevel: health.marginLevel.toFixed(0) + '%',
+          marginStatus: health.marginStatus,
+          hoursOpen: health.hoursOpen.toFixed(1),
+          timeStatus: health.timeStatus,
+          estimatedRolloverFee: health.estimatedRolloverFee.toFixed(4),
+        },
+        account: {
+          equity: equity.toFixed(2),
+          tradeBalance: tradeBalanceVal.toFixed(2),
+          marginUsed: totalMargin.toFixed(2),
+          totalFees: totalFee.toFixed(4),
+        },
+        note: 'Liquidation calculated using Kraken cross-margin formula (entire account trade balance supports position).',
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Position health check failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+/**
+ * Get trading history - past closed trades
+ */
+async function getTradingHistory(args: Record<string, unknown>): Promise<ToolResult> {
+  const pair = args.pair ? String(args.pair).toUpperCase() : undefined;
+  const limit = Math.min(Number(args.limit) || 20, 50);
+
+  try {
+    const params = new URLSearchParams();
+    if (pair) params.set('pair', pair);
+
+    const res = await fetchWithTimeout(`${BASE_URL}/api/trading/history?${params}`);
+    if (!res.ok) {
+      return { success: false, error: 'Failed to fetch trading history' };
+    }
+
+    const data = await res.json();
+    const positions = (data.positions || []).slice(0, limit);
+
+    if (positions.length === 0) {
+      return {
+        success: true,
+        data: { positions: [], summary: { totalTrades: 0, note: 'No closed trades found' } },
+      };
+    }
+
+    // Calculate summary stats
+    const wins = positions.filter((p: { outcome: string }) => p.outcome === 'win');
+    const losses = positions.filter((p: { outcome: string }) => p.outcome === 'loss');
+    const totalPnl = positions.reduce((sum: number, p: { realizedPnl: number }) => sum + (p.realizedPnl || 0), 0);
+    const totalFees = positions.reduce((sum: number, p: { totalFees: number }) => sum + (p.totalFees || 0), 0);
+    const avgDuration = positions.reduce((sum: number, p: { duration: number }) => sum + (p.duration || 0), 0) / positions.length;
+
+    return {
+      success: true,
+      data: {
+        positions: positions.map((p: Record<string, unknown>) => ({
+          id: p.id,
+          pair: p.pair,
+          side: p.side,
+          volume: p.volume,
+          entryPrice: p.entryPrice,
+          exitPrice: p.exitPrice,
+          leverage: p.leverage,
+          realizedPnl: typeof p.realizedPnl === 'number' ? p.realizedPnl.toFixed(2) : p.realizedPnl,
+          totalFees: typeof p.totalFees === 'number' ? p.totalFees.toFixed(4) : p.totalFees,
+          openedAt: p.openedAt,
+          closedAt: p.closedAt,
+          duration: typeof p.duration === 'number' ? p.duration.toFixed(1) + 'h' : p.duration,
+          outcome: p.outcome,
+        })),
+        summary: {
+          totalTrades: positions.length,
+          wins: wins.length,
+          losses: losses.length,
+          winRate: ((wins.length / positions.length) * 100).toFixed(1) + '%',
+          totalPnl: totalPnl.toFixed(2),
+          totalFees: totalFees.toFixed(4),
+          avgDuration: avgDuration.toFixed(1) + 'h',
+          avgPnlPerTrade: (totalPnl / positions.length).toFixed(2),
+        },
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Trading history fetch failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
     };
   }
 }

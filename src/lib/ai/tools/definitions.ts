@@ -408,6 +408,165 @@ export const assistantTools: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'get_fear_greed',
+      description:
+        'Get the current Bitcoin Fear & Greed Index value. Returns a 0-100 score with classification (Extreme Fear, Fear, Neutral, Greed, Extreme Greed). Use this for market sentiment context.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_funding_and_oi',
+      description:
+        'Get derivatives data: funding rates and open interest for XRP, BTC, and ETH perpetual futures from Kraken Futures. Returns funding rates (hourly and annualized), open interest, volume, and market bias assessment based on funding rate positioning.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pair: {
+            type: 'string',
+            description: 'Focus pair for analysis context (default: XRPEUR). Data always includes XRP, BTC, ETH.',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_rollover_costs',
+      description:
+        'Get actual rollover (financing) costs for the current open margin position. Queries the database for ROLLOVER ledger entries since position opened. Returns total costs, per-period breakdown, and projected future costs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          positionType: {
+            type: 'string',
+            enum: ['simulated', 'kraken'],
+            description: 'Position type (default: kraken)',
+          },
+          pair: {
+            type: 'string',
+            description: 'Trading pair (default: XRPEUR)',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_trading_session',
+      description:
+        'Get the current trading session phase (Asia, Europe, US, overlap, transition). Returns market hours, session description, and weekend status. Use this for timing entries/exits.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_position_health',
+      description:
+        'Get comprehensive position health and risk metrics using Kraken cross-margin liquidation formulas. Returns liquidation distance, margin level, risk level, risk factors, time status, and estimated rollover fees. More accurate than simple position analysis for risk assessment.',
+      parameters: {
+        type: 'object',
+        properties: {
+          positionType: {
+            type: 'string',
+            enum: ['simulated', 'kraken'],
+            description: 'Position type (default: kraken)',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_trading_history',
+      description:
+        'Get past closed trade history with entry/exit prices, P&L, duration, and outcome. Merges database records with live Kraken API data for complete history. Use this for win rate analysis and trade performance review.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pair: {
+            type: 'string',
+            description: 'Filter by trading pair (optional)',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of trades to return (default: 20)',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dca_scenario_planner',
+      description:
+        'Calculate DCA "what-if" scenarios with exact math. Use this for ANY question about averaging down/up, DCA plans, or "what would my average be if I buy X at Y?". Three modes: target_avg (solve for volume needed to reach a target average price), what_if_buy (compute new average after a hypothetical buy), multi_level_plan (progressive DCA table across multiple price levels). NEVER attempt manual math for these — always use this tool.',
+      parameters: {
+        type: 'object',
+        properties: {
+          mode: {
+            type: 'string',
+            enum: ['target_avg', 'what_if_buy', 'multi_level_plan'],
+            description: 'Scenario mode: target_avg = solve for volume to reach target avg, what_if_buy = compute new avg after buying, multi_level_plan = progressive table for multiple levels',
+          },
+          positionType: {
+            type: 'string',
+            enum: ['simulated', 'kraken'],
+            description: 'Position type (default: from trading mode context)',
+          },
+          pair: {
+            type: 'string',
+            description: 'Trading pair (default: XRPEUR)',
+          },
+          targetAvgPrice: {
+            type: 'number',
+            description: '[target_avg] The desired average entry price after DCA',
+          },
+          dcaPrice: {
+            type: 'number',
+            description: '[target_avg, what_if_buy] Price to buy at. Omit to use current market price',
+          },
+          dcaAmountEUR: {
+            type: 'number',
+            description: '[what_if_buy] EUR amount to spend on the DCA buy (provide this OR dcaVolume)',
+          },
+          dcaVolume: {
+            type: 'number',
+            description: '[target_avg result, what_if_buy] Volume (XRP) to buy in the DCA',
+          },
+          priceLevels: {
+            type: 'array',
+            items: { type: 'number' },
+            description: '[multi_level_plan] Array of price levels to DCA at, e.g. [1.15, 1.10, 1.05]',
+          },
+          amountPerLevelEUR: {
+            type: 'number',
+            description: '[multi_level_plan] EUR to spend at each level (provide this OR volumePerLevel)',
+          },
+          volumePerLevel: {
+            type: 'number',
+            description: '[multi_level_plan] XRP volume to buy at each level',
+          },
+        },
+        required: ['mode'],
+      },
+    },
+  },
 ];
 
 export type ToolName =
@@ -427,4 +586,11 @@ export type ToolName =
   | 'analyze_position'
   | 'get_strategy_config'
   | 'get_chart_analysis'
-  | 'get_v2_engine_state';
+  | 'get_v2_engine_state'
+  | 'dca_scenario_planner'
+  | 'get_fear_greed'
+  | 'get_funding_and_oi'
+  | 'get_rollover_costs'
+  | 'get_trading_session'
+  | 'get_position_health'
+  | 'get_trading_history';

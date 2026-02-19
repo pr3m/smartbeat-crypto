@@ -48,7 +48,7 @@ interface ChatState {
 
   // Streaming state
   isStreaming: boolean;
-  currentToolCall: string | null; // Shows what tool is being executed
+  activeToolCalls: string[]; // Accumulated tool names during streaming
 
   // Context (current view)
   currentContext: 'general' | 'trading' | 'tax' | 'transactions';
@@ -76,7 +76,8 @@ interface ChatState {
   clearMessages: () => void;
 
   setStreaming: (streaming: boolean) => void;
-  setCurrentToolCall: (toolName: string | null) => void;
+  addToolCall: (name: string) => void;
+  clearToolCalls: () => void;
 
   setContext: (context: 'general' | 'trading' | 'tax' | 'transactions') => void;
   setTradingMode: (mode: 'paper' | 'live') => void;
@@ -112,7 +113,7 @@ export const useChatStore = create<ChatState>((set) => ({
   messages: [],
   messagesLoading: false,
   isStreaming: false,
-  currentToolCall: null,
+  activeToolCalls: [],
   currentContext: 'general',
   tradingMode: 'paper',
   agentAlerts: [],
@@ -191,7 +192,13 @@ export const useChatStore = create<ChatState>((set) => ({
   clearMessages: () => set({ messages: [] }),
 
   setStreaming: (streaming) => set({ isStreaming: streaming }),
-  setCurrentToolCall: (toolName) => set({ currentToolCall: toolName }),
+  addToolCall: (name) =>
+    set((state) => ({
+      activeToolCalls: state.activeToolCalls.includes(name)
+        ? state.activeToolCalls
+        : [...state.activeToolCalls, name],
+    })),
+  clearToolCalls: () => set({ activeToolCalls: [] }),
 
   setContext: (context) => set({ currentContext: context }),
   setTradingMode: (mode) => set({ tradingMode: mode }),

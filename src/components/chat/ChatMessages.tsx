@@ -5,9 +5,10 @@
 
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { useChatStore } from '@/stores/chatStore';
 import { ChatMessage } from './ChatMessage';
+import { TOOL_DISPLAY_NAMES } from '@/lib/ai/tool-display-names';
 
 interface ChatMessagesProps {
   isStreaming: boolean;
@@ -16,16 +17,78 @@ interface ChatMessagesProps {
 export function ChatMessages({ isStreaming }: ChatMessagesProps) {
   const messages = useChatStore((state) => state.messages);
   const messagesLoading = useChatStore((state) => state.messagesLoading);
-  const currentToolCall = useChatStore((state) => state.currentToolCall);
+  const activeToolCalls = useChatStore((state) => state.activeToolCalls);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const userScrolledAwayRef = useRef(false);
+  const scrollRafRef = useRef<number | null>(null);
+  const prevMessageCountRef = useRef(messages.length);
 
-  // Auto-scroll to bottom on new messages
-  useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+  // Detect if user has scrolled away from the bottom
+  const handleScroll = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    // Consider "at bottom" if within 80px of the bottom
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+    userScrolledAwayRef.current = !atBottom;
+  }, []);
+
+  // Scroll to bottom using rAF to avoid overlapping scroll commands
+  const scrollToBottom = useCallback((instant: boolean) => {
+    if (userScrolledAwayRef.current) return;
+
+    // Cancel any pending scroll to avoid fighting animations
+    if (scrollRafRef.current !== null) {
+      cancelAnimationFrame(scrollRafRef.current);
     }
-  }, [messages, isStreaming]);
+
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const container = containerRef.current;
+      if (!container) return;
+      // Use scrollTop instead of scrollIntoView to avoid layout thrash
+      container.scrollTop = container.scrollHeight;
+    });
+  }, []);
+
+  // Reset user-scrolled-away when a new user message is sent
+  useEffect(() => {
+    if (messages.length > prevMessageCountRef.current) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg?.role === 'user') {
+        userScrolledAwayRef.current = false;
+      }
+    }
+    prevMessageCountRef.current = messages.length;
+  }, [messages.length]);
+
+  // During streaming: use instant scroll on each content update
+  useEffect(() => {
+    if (isStreaming) {
+      scrollToBottom(true);
+    }
+  }, [messages, isStreaming, scrollToBottom]);
+
+  // When streaming ends or new messages arrive (non-streaming), smooth scroll
+  useEffect(() => {
+    if (!isStreaming && messages.length > 0) {
+      scrollToBottom(false);
+    }
+  }, [isStreaming, messages.length, scrollToBottom]);
+
+  // Also scroll when tool calls change (keeps indicator visible)
+  useEffect(() => {
+    scrollToBottom(true);
+  }, [activeToolCalls, scrollToBottom]);
+
+  // Cleanup rAF on unmount
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+      }
+    };
+  }, []);
 
   if (messagesLoading) {
     return (
@@ -69,36 +132,52 @@ export function ChatMessages({ isStreaming }: ChatMessagesProps) {
   return (
     <div
       ref={containerRef}
+      onScroll={handleScroll}
       className="flex-1 overflow-y-auto p-4 space-y-1"
     >
       {messages.map((message) => (
         <ChatMessage key={message.id} message={message} />
       ))}
 
-      {/* Tool execution indicator */}
-      {currentToolCall && (
+      {/* Tool execution indicator - stacked list */}
+      {activeToolCalls.length > 0 && (
         <div className="flex justify-start mb-4">
-          <div className="flex items-center gap-2 px-4 py-2 bg-secondary border border-primary rounded-2xl rounded-bl-sm">
-            <svg
-              className="w-4 h-4 text-info animate-spin"
-              fill="none"
-              viewBox="0 0 24 24"
-            >
-              <circle
-                className="opacity-25"
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="currentColor"
-                strokeWidth="4"
-              />
-              <path
-                className="opacity-75"
-                fill="currentColor"
-                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-              />
-            </svg>
-            <span className="text-sm text-secondary">{currentToolCall}</span>
+          <div className="flex flex-col gap-1.5 px-4 py-2.5 bg-secondary border border-primary rounded-2xl rounded-bl-sm">
+            {activeToolCalls.map((tool, i) => {
+              const isLatest = i === activeToolCalls.length - 1;
+              return (
+                <div key={tool} className="flex items-center gap-2 text-xs">
+                  {isLatest ? (
+                    <svg
+                      className="w-3.5 h-3.5 text-info animate-spin flex-shrink-0"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      />
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      />
+                    </svg>
+                  ) : (
+                    <svg className="w-3.5 h-3.5 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
+                  <span className={isLatest ? 'text-secondary' : 'text-tertiary'}>
+                    {TOOL_DISPLAY_NAMES[tool] || tool}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

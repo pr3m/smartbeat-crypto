@@ -25,7 +25,8 @@ export function ChatPanel() {
     setStreaming,
     addMessage,
     appendToLastMessage,
-    setCurrentToolCall,
+    addToolCall,
+    clearToolCalls,
     setConversations,
     finishLastMessage,
     deleteMessagesAfter,
@@ -73,15 +74,13 @@ export function ChatPanel() {
           throw new Error(errorData.error || 'Failed to send message');
         }
 
-        // Add empty assistant message for streaming
-        addMessage({ role: 'assistant', content: '', isStreaming: true });
-
         const reader = response.body?.getReader();
         if (!reader) throw new Error('No response body');
 
         const decoder = new TextDecoder();
         let buffer = '';
         let newConversationId: string | null = null;
+        let assistantMessageAdded = false;
 
         const processLine = async (line: string) => {
           if (!line.startsWith('data: ')) return;
@@ -100,20 +99,32 @@ export function ChatPanel() {
 
               case 'text':
                 if (data.content) {
-                  appendToLastMessage(data.content);
+                  if (!assistantMessageAdded) {
+                    // Clear tool indicators, then show response
+                    clearToolCalls();
+                    addMessage({ role: 'assistant', content: data.content, isStreaming: true });
+                    assistantMessageAdded = true;
+                  } else {
+                    appendToLastMessage(data.content);
+                  }
                 }
                 break;
 
               case 'tool_start':
-                setCurrentToolCall(data.name);
+                addToolCall(data.name);
                 break;
 
               case 'tool_end':
-                setCurrentToolCall(null);
+                // Keep showing completed tools (no-op)
                 break;
 
               case 'error':
-                appendToLastMessage(`\n\nError: ${data.message}`);
+                if (!assistantMessageAdded) {
+                  addMessage({ role: 'assistant', content: `Error: ${data.message}`, isStreaming: true });
+                  assistantMessageAdded = true;
+                } else {
+                  appendToLastMessage(`\n\nError: ${data.message}`);
+                }
                 break;
 
               case 'done':
@@ -160,7 +171,7 @@ export function ChatPanel() {
         });
       } finally {
         setStreaming(false);
-        setCurrentToolCall(null);
+        clearToolCalls();
         finishLastMessage();
         abortControllerRef.current = null;
       }
@@ -172,7 +183,8 @@ export function ChatPanel() {
       addMessage,
       appendToLastMessage,
       setStreaming,
-      setCurrentToolCall,
+      addToolCall,
+      clearToolCalls,
       setCurrentConversation,
       setConversations,
       finishLastMessage,

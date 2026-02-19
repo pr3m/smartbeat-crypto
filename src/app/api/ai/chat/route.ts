@@ -31,6 +31,12 @@ ${strategySection}
 - \`get_ohlc_data\`: Get candlestick data for specific timeframe analysis
 - \`get_strategy_config\`: Get current strategy configuration (weights, thresholds, DCA rules, exit rules)
 - \`get_v2_engine_state\`: Get v2 engine state (DCA signal, exit signal, timebox status, anti-greed, position sizing)
+- \`get_fear_greed\`: Bitcoin Fear & Greed Index for market sentiment
+- \`get_funding_and_oi\`: Derivatives data — funding rates, open interest, market bias
+- \`get_rollover_costs\`: Actual rollover/financing costs for open positions
+- \`get_trading_session\`: Current trading session (Asia/EU/US) and market hours
+- \`get_position_health\`: Comprehensive position risk using Kraken cross-margin liquidation formulas
+- \`get_trading_history\`: Past closed trades with P&L, win rate, performance stats
 
 **Tool Usage Pattern:**
 1. For "what's the price?" or "where are we?" → call \`get_market_data\`
@@ -40,6 +46,14 @@ ${strategySection}
 5. For "how's my position?" → call \`get_positions\` then \`get_v2_engine_state\`
 6. For "what's the strategy?" → call \`get_strategy_config\`
 7. NEVER output JSON tool calls as text - use actual function calling
+8. For "what would my average be if I buy at X?" or "how much to buy to get average to X?" or "DCA scenarios" → call \`dca_scenario_planner\`
+   - NEVER attempt manual math for DCA scenarios — ALWAYS use the dca_scenario_planner tool
+9. For market sentiment → call \`get_fear_greed\`
+10. For funding rates, open interest, liquidation bias → call \`get_funding_and_oi\`
+11. For rollover/holding costs on a position → call \`get_rollover_costs\`
+12. For current trading session (Asia/EU/US) → call \`get_trading_session\`
+13. For position health, liquidation risk, margin level → call \`get_position_health\`
+14. For past trade history, win rate → call \`get_trading_history\`
 
 **Response Format:**
 - Be direct and concise
@@ -157,39 +171,23 @@ export async function POST(request: NextRequest) {
         },
       ];
 
-      // Add conversation history (last 30 messages, including tool calls/results)
+      // Add conversation history (last 30 messages)
+      // Skip tool-role messages and assistant messages with tool_calls — they were
+      // only needed during the original request. Including them in history risks
+      // orphaned tool messages (if the window slices off their parent assistant
+      // message), which causes OpenAI 400 errors.
       for (const msg of conversation.messages.slice(-30)) {
         if (msg.role === 'user') {
           messages.push({ role: 'user', content: msg.content });
         } else if (msg.role === 'assistant') {
-          // Reconstruct assistant message with tool calls if present
-          if (msg.toolCalls) {
-            try {
-              const toolCalls = JSON.parse(msg.toolCalls) as { id: string; name: string; arguments: string }[];
-              if (toolCalls.length > 0) {
-                messages.push({
-                  role: 'assistant',
-                  content: msg.content || null,
-                  tool_calls: toolCalls.map(tc => ({
-                    id: tc.id,
-                    type: 'function' as const,
-                    function: { name: tc.name, arguments: tc.arguments },
-                  })),
-                });
-                continue; // Don't add as plain assistant message
-              }
-            } catch {
-              // Invalid JSON, fall through to plain message
-            }
+          // Skip intermediate assistant messages that only had tool calls (no text)
+          if (msg.toolCalls && !msg.content?.trim()) {
+            continue;
           }
+          // For assistant messages with both text and tool calls, keep only the text
           messages.push({ role: 'assistant', content: msg.content });
-        } else if (msg.role === 'tool' && msg.toolCallId && msg.name) {
-          messages.push({
-            role: 'tool',
-            tool_call_id: msg.toolCallId,
-            content: msg.content,
-          });
         }
+        // Skip tool-role messages entirely — they're not needed for context
       }
 
       // Add current message
@@ -199,7 +197,8 @@ export async function POST(request: NextRequest) {
       // The model may need multiple rounds: e.g., get positions first, then analyze them
       const MAX_TOOL_ROUNDS = 5;
       let fullResponse = '';
-      let allToolCallsData: { id: string; name: string; arguments: string }[] = [];
+      let totalToolCalls = 0;
+      let totalDbMessages = 1; // Start at 1 for the user message already saved
       let toolRound = 0;
       let needsMoreToolCalls = true;
 
@@ -279,9 +278,9 @@ export async function POST(request: NextRequest) {
         }
 
         // Tool calls found — execute them
-        allToolCallsData.push(...roundToolCalls);
+        totalToolCalls += roundToolCalls.length;
 
-        // Add assistant message with tool calls to conversation
+        // Add assistant message with tool calls to in-memory conversation
         messages.push({
           role: 'assistant',
           content: roundContent || null,
@@ -291,6 +290,18 @@ export async function POST(request: NextRequest) {
             function: { name: tc.name, arguments: tc.arguments },
           })),
         });
+
+        // Save assistant message with tool calls to DB BEFORE tool results
+        // This ensures correct ordering: assistant(tool_calls) -> tool results
+        await prisma.chatMessage.create({
+          data: {
+            conversationId: conversation.id,
+            role: 'assistant',
+            content: roundContent || '',
+            toolCalls: JSON.stringify(roundToolCalls),
+          },
+        });
+        totalDbMessages++;
 
         // Execute each tool and save results to DB for conversation history
         for (const toolCall of roundToolCalls) {
@@ -335,6 +346,7 @@ export async function POST(request: NextRequest) {
               name: toolCall.name,
             },
           });
+          totalDbMessages++;
         }
 
         // Continue the loop — the next iteration will send tool results back
@@ -342,7 +354,7 @@ export async function POST(request: NextRequest) {
       }
 
       // Safety: if the loop ended without a text response (all rounds were tool calls)
-      if (!fullResponse.trim() && allToolCallsData.length > 0) {
+      if (!fullResponse.trim() && totalToolCalls > 0) {
         try {
           // One final call to generate the response (with tools available in case model still needs data)
           const finalResponse = await openai.chat.completions.create({
@@ -378,18 +390,18 @@ export async function POST(request: NextRequest) {
         await send({ type: 'text', content: fullResponse });
       }
 
-      // Save assistant message
+      // Save final assistant text response to DB
       await prisma.chatMessage.create({
         data: {
           conversationId: conversation.id,
           role: 'assistant',
           content: fullResponse,
-          toolCalls: allToolCallsData.length > 0 ? JSON.stringify(allToolCallsData) : null,
         },
       });
+      totalDbMessages++;
 
-      // Update conversation (user + assistant + tool result messages)
-      const totalNewMessages = 2 + allToolCallsData.length; // user + assistant + N tool results
+      // Update conversation message count
+      const totalNewMessages = totalDbMessages;
       await prisma.chatConversation.update({
         where: { id: conversation.id },
         data: {
@@ -478,7 +490,8 @@ function buildContextInfo(context: string, tradingMode: 'paper' | 'live' = 'pape
 **When answering trading questions:**
 - Always analyze BOTH long AND short setups with strength grades
 - Reference the multi-timeframe analysis (1D, 4H, 1H, 15m, 5m)
-- For DCA questions, use \`get_v2_engine_state\` - DCA is momentum exhaustion based, NOT fixed % drops
+- For DCA "what-if" scenarios and average price calculations, use \`dca_scenario_planner\` — NEVER do manual math
+- For DCA signal/timing questions, use \`get_v2_engine_state\` - DCA is momentum exhaustion based, NOT fixed % drops
 - For exit questions, use \`get_v2_engine_state\` - exits are pressure-based, NOT stop losses
 - Highlight momentum alerts and spike opportunities
 - Be direct about risks and invalidation levels

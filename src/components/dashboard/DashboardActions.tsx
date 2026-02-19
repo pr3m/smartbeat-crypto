@@ -201,6 +201,8 @@ export function DashboardActions({
                   volume: dcaVolume,
                   marginToUse: Math.min(dcaMargin, marginAvailable),
                   confidence: dcaSignal.confidence,
+                  currentAvgPrice: pos.avgPrice,
+                  currentVolume: pos.totalVolume,
                 },
               });
             }}
