@@ -45,6 +45,7 @@ export interface Position {
   openTime: number;
   rollovertm: number;
   actualRolloverCost: number; // From ledger
+  rolloverRatePer4h: number;  // Parsed from Kraken's terms field (e.g. 0.0001 for 0.01%)
   rawEntries: RawPositionEntry[]; // Individual Kraken position entries for DCA detection
 }
 
@@ -578,6 +579,15 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
         const parsedFee = parseFloat(pos.fee || '0');
         const parsedMargin = parseFloat(pos.margin || '0');
 
+        // Parse rollover rate from Kraken's terms field (e.g. "0.0100% per 4 hours")
+        let rolloverRatePer4h = 0;
+        if (pos.terms) {
+          const match = pos.terms.match(/([\d.]+)%\s*per\s*4\s*hours?/i);
+          if (match) {
+            rolloverRatePer4h = parseFloat(match[1]) / 100; // Convert "0.0100" % to 0.0001
+          }
+        }
+
         return {
           id,
           pair: pos.pair || '',
@@ -592,6 +602,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
           openTime,
           rollovertm: pos.rollovertm ? parseFloat(pos.rollovertm) * 1000 : 0,
           actualRolloverCost: 0, // Will be fetched separately from ledger
+          rolloverRatePer4h,
           rawEntries: [{
             id,
             ordertxid: pos.ordertxid || '',
@@ -631,6 +642,7 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
             openTime: Math.min(existing.openTime, pos.openTime), // Earliest open time
             rollovertm: Math.max(existing.rollovertm, pos.rollovertm),
             actualRolloverCost: existing.actualRolloverCost + pos.actualRolloverCost,
+            rolloverRatePer4h: pos.rolloverRatePer4h || existing.rolloverRatePer4h, // Use any non-zero rate
             rawEntries: [...existing.rawEntries, ...pos.rawEntries],
           });
         } else {

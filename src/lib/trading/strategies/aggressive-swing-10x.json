@@ -236,6 +236,25 @@
     "acceptLiquidation": true
   },
 
+  "underwaterPolicy": {
+    "enabled": true,
+    "suppressTimeboxPressureWhenUnderwater": true,
+    "underwaterTimeboxWeightMultiplier": 0.0,
+    "maxUrgencyWhenUnderwater": "consider",
+    "showRecoveryPanel": true,
+    "showThesisReviewPrompt": true,
+    "overdueDCA": {
+      "confidenceAdjustment": -15,
+      "minDrawdownAdjustment": -1.5,
+      "timeSpacingMultiplier": 0.5
+    },
+    "alertMessages": {
+      "overdueUnderwater": "Extended hold — DCA or wait for recovery.",
+      "dcaEncourage": "DCA capacity available. Watching for exhaustion signals.",
+      "costWarning": "Rollover cost accumulating — review position thesis."
+    }
+  },
+
   "aiInstructions": {
     "personality": "Direct, data-driven, no hand-holding. Speak like a trading desk analyst. Use numbers, not feelings. If the data says exit, say exit. If the setup is garbage, say so.",
     "corePhilosophy": [

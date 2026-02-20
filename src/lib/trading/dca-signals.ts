@@ -28,6 +28,8 @@ import type {
   DCAConfig,
   DCAExhaustionThresholds,
   TradingStrategy,
+  PositionSizingConfig,
+  UnderwaterPolicy,
 } from './v2-types';
 import { NO_DCA_SIGNAL, DEFAULT_DCA_CONFIG, DEFAULT_POSITION_SIZING } from './v2-types';
 
@@ -54,14 +56,16 @@ export function analyzeDCAOpportunity(
   ind5m: Indicators | null,
   ohlc5m: OHLCData[],
   currentPrice: number,
-  config: DCAConfig = DEFAULT_DCA_CONFIG
+  config: DCAConfig = DEFAULT_DCA_CONFIG,
+  positionSizingConfig: PositionSizingConfig = DEFAULT_POSITION_SIZING,
+  underwaterPolicy?: UnderwaterPolicy | null
 ): DCASignal {
   // No position or position not open - no DCA
   if (!position.isOpen || position.phase === 'closed' || position.phase === 'idle') {
     return NO_DCA_SIGNAL;
   }
 
-  const maxDCA = DEFAULT_POSITION_SIZING.maxDCACount;
+  const maxDCA = positionSizingConfig.maxDCACount;
 
   // Already at max DCAs
   if (position.dcaCount >= maxDCA) {
@@ -80,12 +84,19 @@ export function analyzeDCAOpportunity(
   const nextDCALevel = position.dcaCount + 1;
   const thresholds = config.exhaustionThresholds;
 
-  // Check time spacing from strategy config
+  // Recovery mode: overdue + underwater + policy active
+  const isOverdue = position.timeboxProgress >= 1.0;
+  const isRecoveryMode = underwaterPolicy?.enabled === true && position.unrealizedPnL < 0;
+
+  // Check time spacing from strategy config (reduced in recovery mode)
   const lastEntryTime = position.entries.length > 0
     ? position.entries[position.entries.length - 1].timestamp
     : position.openedAt;
   const timeSinceLastEntry = Date.now() - lastEntryTime;
-  const minHours = thresholds.minHoursBetweenByLevel[nextDCALevel] || 1;
+  let minHours = thresholds.minHoursBetweenByLevel[nextDCALevel] || 1;
+  if (isRecoveryMode && isOverdue && underwaterPolicy.overdueDCA.timeSpacingMultiplier > 0) {
+    minHours = minHours * underwaterPolicy.overdueDCA.timeSpacingMultiplier;
+  }
   const minTimeMs = minHours * 60 * 60 * 1000;
 
   if (timeSinceLastEntry < minTimeMs) {
@@ -98,10 +109,16 @@ export function analyzeDCAOpportunity(
   }
 
   // After timebox midpoint (24h): allow DCA only with higher confidence threshold
+  // In recovery mode + overdue: LOWER the bar instead using overdueDCA.confidenceAdjustment
   const isPostMidpoint = position.timeboxProgress > 0.5;
-  const effectiveMinConfidence = isPostMidpoint
-    ? Math.max(config.minExhaustionConfidence, 75) // Require 75%+ confidence after 24h
-    : config.minExhaustionConfidence;
+  let effectiveMinConfidence: number;
+  if (isRecoveryMode && isOverdue) {
+    effectiveMinConfidence = Math.max(0, config.minExhaustionConfidence + (underwaterPolicy.overdueDCA.confidenceAdjustment));
+  } else if (isPostMidpoint) {
+    effectiveMinConfidence = Math.max(config.minExhaustionConfidence, 75); // Require 75%+ confidence after 24h
+  } else {
+    effectiveMinConfidence = config.minExhaustionConfidence;
+  }
 
   if (!config.allowDCAAfterMidpoint && isPostMidpoint) {
     return {
@@ -118,11 +135,15 @@ export function analyzeDCAOpportunity(
     : ((currentPrice - position.avgPrice) / position.avgPrice) * 100;
 
   // Only consider DCA when underwater with minimum drawdown
-  if (drawdownPercent < config.minDrawdownForDCA) {
+  // In recovery mode: lower the drawdown threshold
+  const effectiveMinDrawdown = isRecoveryMode && isOverdue
+    ? Math.max(0, config.minDrawdownForDCA + underwaterPolicy.overdueDCA.minDrawdownAdjustment)
+    : config.minDrawdownForDCA;
+  if (drawdownPercent < effectiveMinDrawdown) {
     return {
       ...NO_DCA_SIGNAL,
       reason: drawdownPercent > 0
-        ? `Drawdown ${drawdownPercent.toFixed(1)}% below minimum ${config.minDrawdownForDCA}%`
+        ? `Drawdown ${drawdownPercent.toFixed(1)}% below minimum ${effectiveMinDrawdown.toFixed(1)}%`
         : 'Position in profit - no DCA needed',
       dcaLevel: nextDCALevel,
       drawdownPercent: Math.max(0, drawdownPercent),
@@ -151,17 +172,23 @@ export function analyzeDCAOpportunity(
   const exhaustionType = determineExhaustionType(activeSignals);
 
   // DCA sizing: DCA3 is LARGER (deepest exhaustion = strongest conviction)
-  const baseDCAMarginPercent = DEFAULT_POSITION_SIZING.dcaMarginPercent;
+  const baseDCAMarginPercent = positionSizingConfig.dcaMarginPercent;
   const levelMultiplier = nextDCALevel === 1 ? 1.0 : nextDCALevel === 2 ? 1.0 : config.dcaSizeScaleFactor > 1.0 ? config.dcaSizeScaleFactor : 1.3;
   const suggestedMarginPercent = baseDCAMarginPercent * levelMultiplier;
 
   // Build warnings
   const warnings: string[] = [];
   if (drawdownPercent > 5) {
-    warnings.push(`Large drawdown: ${drawdownPercent.toFixed(1)}%`);
+    if (isRecoveryMode && underwaterPolicy.alertMessages.dcaEncourage) {
+      warnings.push(underwaterPolicy.alertMessages.dcaEncourage);
+    } else {
+      warnings.push(`Large drawdown: ${drawdownPercent.toFixed(1)}%`);
+    }
   }
-  if (position.hoursRemaining < 12) {
+  if (position.hoursRemaining < 12 && !isRecoveryMode) {
     warnings.push(`Only ${position.hoursRemaining.toFixed(0)}h left in timebox`);
+  } else if (isRecoveryMode && isOverdue && underwaterPolicy.alertMessages.overdueUnderwater) {
+    warnings.push(underwaterPolicy.alertMessages.overdueUnderwater);
   }
   if (nextDCALevel === maxDCA) {
     warnings.push('Final DCA - no more capacity after this');

@@ -31,6 +31,7 @@ import type {
   DerivativesConfig,
   RejectionConfig,
   BTCAlignmentConfig,
+  UnderwaterPolicy,
 } from '../v2-types';
 import type { MarketRegimeConfig } from '../market-regime';
 
@@ -82,6 +83,7 @@ function hydrateStrategy(raw: Record<string, unknown>): TradingStrategy {
     rejection: json.rejection ? json.rejection as unknown as RejectionConfig : undefined,
     btcAlignment: json.btcAlignment ? json.btcAlignment as unknown as BTCAlignmentConfig : undefined,
     aiInstructions: json.aiInstructions as unknown as TradingStrategy['aiInstructions'],
+    underwaterPolicy: json.underwaterPolicy ? json.underwaterPolicy as unknown as UnderwaterPolicy : undefined,
   };
 }
 
@@ -186,6 +188,21 @@ export function validateStrategy(strategy: TradingStrategy): ValidationError[] {
     }
     if (btc.emaPeriod < 5 || btc.emaPeriod > 200) {
       errors.push({ field: 'btcAlignment.emaPeriod', message: 'Must be 5-200' });
+    }
+  }
+
+  // Underwater policy (optional)
+  if (strategy.underwaterPolicy) {
+    const up = strategy.underwaterPolicy;
+    if (up.underwaterTimeboxWeightMultiplier < 0 || up.underwaterTimeboxWeightMultiplier > 1) {
+      errors.push({ field: 'underwaterPolicy.underwaterTimeboxWeightMultiplier', message: 'Must be 0-1' });
+    }
+    const validUrgencies = ['monitor', 'consider', 'soon'];
+    if (!validUrgencies.includes(up.maxUrgencyWhenUnderwater)) {
+      errors.push({ field: 'underwaterPolicy.maxUrgencyWhenUnderwater', message: `Must be one of: ${validUrgencies.join(', ')}` });
+    }
+    if (up.overdueDCA.timeSpacingMultiplier <= 0) {
+      errors.push({ field: 'underwaterPolicy.overdueDCA.timeSpacingMultiplier', message: 'Must be > 0' });
     }
   }
 

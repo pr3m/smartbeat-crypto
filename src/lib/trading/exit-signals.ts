@@ -38,6 +38,7 @@ import type {
   AntiGreedConfig,
   TimeboxConfig,
   TradingStrategy,
+  UnderwaterPolicy,
 } from './v2-types';
 import {
   NO_EXIT_SIGNAL,
@@ -306,32 +307,61 @@ export function detectTrendReversal(
 // URGENCY DETERMINATION
 // ============================================================================
 
+/** Urgency rank for comparison/clamping */
+const URGENCY_RANK: Record<ExitUrgency, number> = {
+  monitor: 0,
+  consider: 1,
+  soon: 2,
+  immediate: 3,
+};
+const URGENCY_BY_RANK: ExitUrgency[] = ['monitor', 'consider', 'soon', 'immediate'];
+
 /**
  * Map time phase and profit status to exit urgency.
+ * When underwaterPolicy is active and position is at a loss, caps urgency.
  */
 export function determineUrgency(
   timePhase: TimePhase,
   isInProfit: boolean,
-  totalPressure: number
+  totalPressure: number,
+  underwaterPolicy?: UnderwaterPolicy | null
 ): ExitUrgency {
   // Critical signals override time phase
-  if (totalPressure >= 90) return 'immediate';
-
-  switch (timePhase) {
-    case 'overdue':
-      return isInProfit ? 'immediate' : 'soon';
-    case 'urgent':
-      return isInProfit ? 'soon' : 'consider';
-    case 'escalating':
-      if (totalPressure >= 60) return 'soon';
-      return isInProfit ? 'consider' : 'monitor';
-    case 'monitor':
-      if (totalPressure >= 70) return 'consider';
-      return 'monitor';
-    case 'normal':
-      if (totalPressure >= 80) return 'consider';
-      return 'monitor';
+  let raw: ExitUrgency;
+  if (totalPressure >= 90) {
+    raw = 'immediate';
+  } else {
+    switch (timePhase) {
+      case 'overdue':
+        raw = isInProfit ? 'immediate' : 'soon';
+        break;
+      case 'urgent':
+        raw = isInProfit ? 'soon' : 'consider';
+        break;
+      case 'escalating':
+        if (totalPressure >= 60) raw = 'soon';
+        else raw = isInProfit ? 'consider' : 'monitor';
+        break;
+      case 'monitor':
+        raw = totalPressure >= 70 ? 'consider' : 'monitor';
+        break;
+      case 'normal':
+        raw = totalPressure >= 80 ? 'consider' : 'monitor';
+        break;
+    }
   }
+
+  // Cap urgency when underwater with recovery policy active
+  if (!isInProfit && underwaterPolicy?.enabled) {
+    const maxAllowed = underwaterPolicy.maxUrgencyWhenUnderwater;
+    const maxRank = URGENCY_RANK[maxAllowed];
+    const rawRank = URGENCY_RANK[raw];
+    if (rawRank > maxRank) {
+      raw = URGENCY_BY_RANK[maxRank];
+    }
+  }
+
+  return raw;
 }
 
 // ============================================================================
@@ -370,12 +400,15 @@ export function analyzeExitConditions(
   const antiGreedConfig = strategy.antiGreed;
   const timeboxConfig = strategy.timebox;
   const exitConfig = strategy.exit;
+  const underwaterPolicy = strategy.underwaterPolicy;
+
   // No position open - nothing to exit
   if (!position.isOpen) {
     return NO_EXIT_SIGNAL;
   }
 
   const isInProfit = position.unrealizedPnL > 0;
+  const isRecoveryMode = underwaterPolicy?.enabled === true && !isInProfit;
   const hoursInTrade = position.timeInTradeMs / (1000 * 60 * 60);
 
   // Use regime-adjusted maxHours if available, otherwise fall back to strategy config
@@ -388,14 +421,24 @@ export function analyzeExitConditions(
   // --- Calculate all pressures ---
   const pressures: ExitPressure[] = [];
 
-  // 1. Timebox pressure (regime-aware weight)
-  const timeboxPressureValue = calculateTimeboxPressure(hoursInTrade, timeboxConfig);
+  // 1. Timebox pressure (regime-aware weight, recovery-aware)
+  const rawTimeboxPressure = calculateTimeboxPressure(hoursInTrade, timeboxConfig);
+  let timeboxPressureValue = rawTimeboxPressure;
+  let effectiveTimeboxWeight = timeboxWeight;
+  if (isRecoveryMode && underwaterPolicy.suppressTimeboxPressureWhenUnderwater) {
+    timeboxPressureValue = 0;
+    effectiveTimeboxWeight = 0;
+  } else if (isRecoveryMode) {
+    effectiveTimeboxWeight = timeboxWeight * underwaterPolicy.underwaterTimeboxWeightMultiplier;
+  }
   if (timeboxPressureValue > 0) {
     pressures.push({
       source: 'timebox_expired' as ExitReason,
       value: timeboxPressureValue,
-      weight: timeboxWeight,
-      detail: `${hoursInTrade.toFixed(1)}h in trade (${timePhase}, max ${effectiveMaxHours}h) - pressure ${timeboxPressureValue.toFixed(0)}%`,
+      weight: effectiveTimeboxWeight,
+      detail: isRecoveryMode
+        ? `${hoursInTrade.toFixed(1)}h in trade (${timePhase}, recovery mode)`
+        : `${hoursInTrade.toFixed(1)}h in trade (${timePhase}, max ${effectiveMaxHours}h) - pressure ${timeboxPressureValue.toFixed(0)}%`,
     });
   }
 
@@ -638,7 +681,8 @@ export function analyzeExitConditions(
 
   // Soft backstop: overdue AND profitable → floor at 60 (not 90)
   // No forced minimum for 'urgent' — let real signals drive exits
-  if (timePhase === 'overdue' && isInProfit) {
+  // Skip floor when in recovery mode (underwater + policy active)
+  if (timePhase === 'overdue' && isInProfit && !isRecoveryMode) {
     totalPressure = Math.max(totalPressure, 60);
   }
 
@@ -660,7 +704,7 @@ export function analyzeExitConditions(
   }
 
   // --- Determine urgency ---
-  const urgency = determineUrgency(timePhase, isInProfit, totalPressure);
+  const urgency = determineUrgency(timePhase, isInProfit, totalPressure, underwaterPolicy);
 
   // --- Determine shouldExit ---
   // CRITICAL RULE: Never exit at a loss (trader prefers liquidation)
@@ -695,6 +739,8 @@ export function analyzeExitConditions(
   const explanationParts: string[] = [];
   if (shouldExit) {
     explanationParts.push(`Exit recommended (pressure ${totalPressure.toFixed(0)}%, threshold ${effectiveExitThreshold}).`);
+  } else if (isRecoveryMode) {
+    explanationParts.push(`Recovery mode — holding underwater position. DCA or wait for recovery.`);
   } else if (isInProfit) {
     explanationParts.push(`In profit but pressure low (${totalPressure.toFixed(0)}%, need ${effectiveExitThreshold}).`);
   } else {
@@ -773,11 +819,19 @@ export function isAntiGreedTriggered(
 
 /**
  * Get a summary of exit status for display.
+ * When isRecoveryMode is true, returns blue recovery status instead of panic signals.
  */
-export function getExitStatusSummary(signal: ExitSignal): {
+export function getExitStatusSummary(
+  signal: ExitSignal,
+  isRecoveryMode = false
+): {
   label: string;
-  color: 'green' | 'yellow' | 'orange' | 'red' | 'gray';
+  color: 'green' | 'yellow' | 'orange' | 'red' | 'gray' | 'blue';
 } {
+  if (isRecoveryMode) {
+    return { label: 'Recovery Mode', color: 'blue' };
+  }
+
   if (!signal.shouldExit && signal.totalPressure === 0) {
     return { label: 'Holding', color: 'green' };
   }

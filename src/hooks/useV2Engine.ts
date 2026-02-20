@@ -108,6 +108,7 @@ function bridgeToPositionState(
     openTime?: number;
     openedAt?: string;
     actualRolloverCost?: number;
+    rolloverRatePer4h?: number;
     avgEntryPrice?: number;
     totalCost?: number;
     totalFees?: number;
@@ -273,9 +274,34 @@ function bridgeToPositionState(
     liquidationDistancePercent = ((liquidationPrice - currentPrice) / currentPrice) * 100;
   }
 
-  // Rollover cost per 4h (estimate from actual if available)
+  // Rollover cost calculation:
+  // Per-4h rate: always compute from Kraken's terms field rate × position cost
+  //   (this represents what Kraken charges each period — most accurate for display)
+  // Total cost: use actual from API/DB when available, else estimate from rate × periods
   const hours = hoursInTrade || 1;
-  const rolloverPer4h = rolloverCost > 0 ? (rolloverCost / hours) * 4 : 0;
+  const rolloverPeriods = Math.floor(hours / 4);
+  const krakenRate = pos.rolloverRatePer4h || 0;
+  const positionCost = isSimulated ? (pos.totalCost ?? pos.cost ?? 0) : (pos.cost ?? 0);
+
+  let rolloverPer4h: number;
+  let effectiveRolloverCost: number;
+
+  // Per-4h: prefer Kraken's terms rate × cost (matches Kraken's "estimated margin fee")
+  if (krakenRate > 0 && positionCost > 0) {
+    rolloverPer4h = positionCost * krakenRate;
+  } else if (positionCost > 0) {
+    // Fallback estimate: 0.02% per 4h (Kraken's typical margin rollover rate)
+    rolloverPer4h = positionCost * 0.0002;
+  } else {
+    rolloverPer4h = 0;
+  }
+
+  // Total: use actual from DB/API if available, else estimate from per-4h × periods
+  if (rolloverCost > 0) {
+    effectiveRolloverCost = rolloverCost;
+  } else {
+    effectiveRolloverCost = rolloverPer4h * rolloverPeriods;
+  }
 
   return {
     isOpen: true,
@@ -301,7 +327,7 @@ function bridgeToPositionState(
     liquidationPrice,
     liquidationDistancePercent,
     leverage,
-    totalFees: fees + rolloverCost,
+    totalFees: fees + effectiveRolloverCost,
     rolloverCostPer4h: rolloverPer4h,
   };
 }
@@ -315,7 +341,8 @@ function buildEngineSummary(
   config: TradingEngineConfig,
   recommendation: TradingRecommendation | null,
   exitSignal: ReturnType<typeof analyzeExitConditions> | null,
-  dcaSignal: ReturnType<typeof analyzeDCAOpportunity> | null
+  dcaSignal: ReturnType<typeof analyzeDCAOpportunity> | null,
+  isRecoveryMode = false
 ): EngineSummary {
   // Idle state
   if (!position.isOpen || position.phase === 'idle') {
@@ -341,7 +368,9 @@ function buildEngineSummary(
 
   // Determine status color from exit urgency + time
   let statusColor: EngineSummary['statusColor'] = 'green';
-  if (exitSignal?.shouldExit) {
+  if (isRecoveryMode) {
+    statusColor = 'blue';
+  } else if (exitSignal?.shouldExit) {
     statusColor = 'red';
   } else if (exitSignal && exitSignal.urgency === 'soon') {
     statusColor = 'orange';
@@ -357,7 +386,9 @@ function buildEngineSummary(
 
   // Headline
   let headline: string;
-  if (exitSignal?.shouldExit) {
+  if (isRecoveryMode) {
+    headline = `Recovery Mode — Holding at ${position.unrealizedPnL.toFixed(0)} EUR`;
+  } else if (exitSignal?.shouldExit) {
     const exitStatus = getExitStatusSummary(exitSignal);
     headline = `${exitStatus.label} - ${exitSignal.explanation.split('.')[0]}`;
   } else if (dcaSignal?.shouldDCA) {
@@ -395,11 +426,22 @@ function buildEngineSummary(
 
   // Alerts
   const alerts: string[] = [];
-  if (isOverdue) {
-    alerts.push(`Timebox expired (${hoursElapsed.toFixed(1)}h). Exit on any profit.`);
-  }
-  if (exitSignal?.shouldExit) {
-    alerts.push(exitSignal.explanation);
+  const underwaterPolicy = config.underwaterPolicy;
+  if (isRecoveryMode && underwaterPolicy?.alertMessages) {
+    // Recovery mode uses calm, strategy-defined alerts
+    if (isOverdue) {
+      alerts.push(underwaterPolicy.alertMessages.overdueUnderwater);
+    }
+    if (position.rolloverCostPer4h > 0) {
+      alerts.push(`${underwaterPolicy.alertMessages.costWarning} (${position.rolloverCostPer4h.toFixed(2)} EUR/4h)`);
+    }
+  } else {
+    if (isOverdue) {
+      alerts.push(`Timebox expired (${hoursElapsed.toFixed(1)}h). Exit on any profit.`);
+    }
+    if (exitSignal?.shouldExit) {
+      alerts.push(exitSignal.explanation);
+    }
   }
   if (dcaSignal?.shouldDCA) {
     alerts.push(dcaSignal.reason);
@@ -429,6 +471,8 @@ export interface V2EngineResult {
   strategyName: string;
   /** Engine config in use */
   config: TradingEngineConfig;
+  /** Whether position is in recovery mode (underwater + policy active) */
+  isRecoveryMode: boolean;
 }
 
 export function useV2Engine(
@@ -462,6 +506,7 @@ export function useV2Engine(
     timeframeWeights: strategy.timeframeWeights,
     dca: strategy.dca,
     exit: strategy.exit,
+    underwaterPolicy: strategy.underwaterPolicy,
   }), [strategy]);
 
   // Build the full v2 engine output
@@ -522,7 +567,9 @@ export function useV2Engine(
         ind5m,
         ohlc5m,
         price,
-        config.dca
+        config.dca,
+        config.positionSizing,
+        strategy.underwaterPolicy
       );
     }
 
@@ -587,8 +634,13 @@ export function useV2Engine(
       }
     }
 
+    // Compute recovery mode flag
+    const isRecoveryMode = positionState.isOpen
+      && strategy.underwaterPolicy?.enabled === true
+      && positionState.unrealizedPnL < 0;
+
     // Build summary
-    const summary = buildEngineSummary(positionState, config, recommendation, exitSignal, dcaSignal);
+    const summary = buildEngineSummary(positionState, config, recommendation, exitSignal, dcaSignal, isRecoveryMode);
 
     return {
       position: positionState,
@@ -602,6 +654,7 @@ export function useV2Engine(
       hasPosition: positionState.isOpen,
       strategyName: strategy.meta.name,
       config,
+      isRecoveryMode,
     };
   }, [positions, price, availableMargin, isSimulated, tradeBalance, tfData, config, recommendation, strategy]);
 

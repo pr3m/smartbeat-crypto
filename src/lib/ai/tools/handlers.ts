@@ -328,6 +328,7 @@ async function getPositions(args: Record<string, unknown>): Promise<ToolResult> 
               openTime,
               rollovertm: p.rollovertm ? parseFloat(String(p.rollovertm)) * 1000 : 0,
               actualRolloverCost: 0,
+              rolloverRatePer4h: 0,
             };
           });
           results.krakenPositions = positions;

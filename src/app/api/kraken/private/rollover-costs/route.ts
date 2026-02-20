@@ -1,14 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
+import { krakenClient } from '@/lib/kraken/client';
 
 /**
- * Get actual rollover costs for open margin positions
- * Queries the Transaction table for ROLLOVER entries since the position opened
+ * Get actual rollover costs for open margin positions.
+ *
+ * Strategy:
+ * 1. Query local SQLite DB for ROLLOVER transactions (fast, works if synced)
+ * 2. If DB returns nothing, query Kraken Ledger API live for type=rollover entries
  *
  * Query params:
- * - positionId: The Kraken position ID (optional, filters to specific position)
  * - openTime: Unix timestamp in milliseconds when position opened
  * - asset: The asset to filter by (e.g., "XRP")
+ * - positionId: (optional) Kraken position ID
  */
 export async function GET(request: NextRequest) {
   try {
@@ -24,63 +28,102 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const openTime = new Date(parseInt(openTimeMs, 10));
+    const openTimeDate = new Date(parseInt(openTimeMs, 10));
+    const openTimeSec = Math.floor(parseInt(openTimeMs, 10) / 1000);
 
-    // Query ROLLOVER transactions for this asset since position opened
-    // Rollover fees in Kraken ledger are typically recorded as the fee asset (EUR)
-    // but the transaction is linked to the borrowed/margin asset
-    const rollovers = await prisma.transaction.findMany({
-      where: {
-        type: 'ROLLOVER',
-        timestamp: {
-          gte: openTime,
+    // --- Strategy 1: Query local DB ---
+    let totalRolloverCost = 0;
+    let rolloverCount = 0;
+    let source = 'none';
+
+    try {
+      const rollovers = await prisma.transaction.findMany({
+        where: {
+          type: 'ROLLOVER',
+          timestamp: { gte: openTimeDate },
+          OR: [
+            { asset: asset },
+            { asset: asset.replace(/^X/, '') },
+            { asset: 'EUR' },
+            { asset: 'ZEUR' },
+          ],
         },
-        // Filter by asset - rollovers could be for the crypto asset
-        // or the quote currency, so check both
-        OR: [
-          { asset: asset },
-          { asset: asset.replace(/^X/, '') }, // Handle Kraken's X prefix
-          { asset: 'EUR' }, // Rollover fees are often in EUR
-          { asset: 'ZEUR' }, // Kraken's EUR symbol
-        ],
-      },
-      orderBy: { timestamp: 'asc' },
-      select: {
-        id: true,
-        timestamp: true,
-        asset: true,
-        amount: true,
-        fee: true,
-      },
-    });
+        orderBy: { timestamp: 'asc' },
+        select: {
+          id: true,
+          timestamp: true,
+          asset: true,
+          amount: true,
+          fee: true,
+        },
+      });
 
-    // Filter to only rollovers that are likely for this position
-    // For margin positions, rollover fees show as negative amounts
-    const relevantRollovers = rollovers.filter(r => {
-      // Rollover entries typically have a negative amount (fee charged)
-      // or a positive fee field
-      return r.amount < 0 || (r.fee && r.fee > 0);
-    });
+      const relevantRollovers = rollovers.filter(r => r.amount < 0 || (r.fee && r.fee > 0));
 
-    // Calculate total rollover cost
-    // The cost is the absolute value of amount (which is negative) plus any explicit fees
-    const totalRolloverCost = relevantRollovers.reduce((sum, r) => {
-      const cost = Math.abs(r.amount || 0) + Math.abs(r.fee || 0);
-      return sum + cost;
-    }, 0);
+      if (relevantRollovers.length > 0) {
+        totalRolloverCost = relevantRollovers.reduce((sum, r) => {
+          return sum + Math.abs(r.amount || 0) + Math.abs(r.fee || 0);
+        }, 0);
+        rolloverCount = relevantRollovers.length;
+        source = 'database';
+      }
+    } catch (dbErr) {
+      // DB might not be set up, continue to API fallback
+      console.warn('Rollover DB query failed, trying API:', dbErr);
+    }
+
+    // --- Strategy 2: If DB had nothing, query Kraken Ledger API live ---
+    if (rolloverCount === 0 && krakenClient.hasCredentials()) {
+      try {
+        // Query ledger for rollover entries since position opened
+        // Kraken Ledger API uses unix seconds for start/end
+        const result = await krakenClient.getLedgers(
+          undefined, // all assets (rollover can be in EUR/ZEUR)
+          'currency',
+          'rollover',
+          openTimeSec,
+          undefined, // no end (until now)
+          0
+        );
+
+        if (result.ledger) {
+          const entries = Object.values(result.ledger);
+
+          // Filter to entries related to this asset or EUR (rollover fees)
+          const assetVariants = [
+            asset.toUpperCase(),
+            asset.replace(/^X/, '').toUpperCase(),
+            `X${asset.toUpperCase()}`,
+            'EUR', 'ZEUR',
+          ];
+
+          const relevant = entries.filter(e =>
+            assetVariants.includes(e.asset.toUpperCase())
+          );
+
+          if (relevant.length > 0) {
+            totalRolloverCost = relevant.reduce((sum, e) => {
+              const amount = parseFloat(e.amount || '0');
+              const fee = parseFloat(e.fee || '0');
+              // Rollover entries: amount is typically negative (fee charged), fee field may also have a value
+              return sum + Math.abs(amount) + Math.abs(fee);
+            }, 0);
+            rolloverCount = relevant.length;
+            source = 'kraken_api';
+          }
+        }
+      } catch (apiErr) {
+        console.warn('Kraken Ledger API query for rollovers failed:', apiErr);
+      }
+    }
 
     return NextResponse.json({
       positionId,
       asset,
-      openTime: openTime.toISOString(),
-      rolloverCount: relevantRollovers.length,
+      openTime: openTimeDate.toISOString(),
+      rolloverCount,
       totalRolloverCost,
-      rollovers: relevantRollovers.map(r => ({
-        timestamp: r.timestamp.toISOString(),
-        asset: r.asset,
-        amount: r.amount,
-        fee: r.fee,
-      })),
+      source,
     });
   } catch (error) {
     console.error('Rollover costs error:', error);

@@ -37,6 +37,9 @@ export interface DashboardActionsProps {
   config: TradingEngineConfig;
   recommendation: TradingRecommendation | null;
 
+  // Recovery mode flag
+  recoveryMode?: boolean;
+
   // Action callbacks
   onEntryExecute?: (params: QuickEntryParams) => Promise<void>;
   onCloseExecute?: (params: QuickCloseParams) => Promise<void>;
@@ -61,6 +64,7 @@ export function DashboardActions({
   exitSignal,
   config,
   recommendation,
+  recoveryMode = false,
   onEntryExecute,
   onCloseExecute,
   onDCAExecute,
@@ -132,92 +136,114 @@ export function DashboardActions({
   const hasDCA = dcaSignal?.shouldDCA && pos.dcaCount < config.positionSizing.maxDCACount;
   const defaultExitPercent = exitSignal?.suggestedExitPercent || 100;
 
+  // DCA button element (shared between recovery and normal mode)
+  const dcaButton = onDCAExecute ? (
+    <button
+      disabled={disabled || !hasDCA}
+      onClick={() => {
+        if (!dcaSignal || !hasDCA) return;
+        const marginAvailable = pos.totalMarginUsed > 0
+          ? (pos.totalMarginUsed / (pos.totalMarginPercent / 100)) - pos.totalMarginUsed
+          : 0;
+        const dcaMarginPercent = dcaSignal.suggestedMarginPercent || config.positionSizing.dcaMarginPercent;
+        const totalEquity = pos.totalMarginUsed / (pos.totalMarginPercent / 100);
+        const dcaMargin = totalEquity * (dcaMarginPercent / 100);
+        const dcaVolume = currentPrice > 0 ? (dcaMargin * config.positionSizing.leverage) / currentPrice : 0;
+
+        setModalAction({
+          type: 'dca',
+          params: {
+            dcaLevel: dcaSignal.dcaLevel,
+            direction: pos.direction,
+            volume: dcaVolume,
+            marginToUse: Math.min(dcaMargin, marginAvailable),
+            confidence: dcaSignal.confidence,
+            currentAvgPrice: pos.avgPrice,
+            currentVolume: pos.totalVolume,
+          },
+        });
+      }}
+      className={`w-full py-2 rounded-lg text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+        hasDCA
+          ? recoveryMode
+            ? 'bg-blue-500 hover:bg-blue-400 text-white'
+            : 'bg-blue-500 hover:bg-blue-400 text-white'
+          : 'bg-gray-700 text-gray-500'
+      }`}
+    >
+      {pos.dcaCount >= config.positionSizing.maxDCACount
+        ? 'MAX DCA REACHED'
+        : hasDCA
+          ? `DCA LEVEL ${dcaSignal!.dcaLevel} - ${dcaSignal!.confidence}%`
+          : 'DCA (waiting for signal)'}
+    </button>
+  ) : null;
+
+  // Close button element
+  const closeButton = onCloseExecute ? (
+    <div className="space-y-2">
+      {!recoveryMode && (
+        <div className="flex gap-1.5">
+          {([25, 50, 75, 100] as const).map((pct) => (
+            <button
+              key={pct}
+              onClick={() => setSelectedExitPercent(pct)}
+              className={`flex-1 py-1 text-xs font-semibold rounded transition-colors ${
+                selectedExitPercent === pct
+                  ? 'bg-white/20 text-primary'
+                  : 'bg-tertiary/50 text-tertiary hover:text-secondary'
+              }`}
+            >
+              {pct}%
+            </button>
+          ))}
+        </div>
+      )}
+      <button
+        disabled={disabled}
+        onClick={() => {
+          const pct = selectedExitPercent || defaultExitPercent;
+          setModalAction({
+            type: 'close',
+            params: {
+              exitPercent: pct,
+              volumeToClose: pos.totalVolume * pct / 100,
+              isEngineRecommended: hasExitSignal,
+            },
+          });
+        }}
+        className={`w-full py-2 rounded-lg text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+          recoveryMode
+            ? 'bg-gray-600 hover:bg-gray-500 text-gray-300 text-xs'
+            : hasExitSignal
+              ? 'bg-red-500 hover:bg-red-400 text-white animate-pulse'
+              : 'bg-gray-600 hover:bg-gray-500 text-white'
+        }`}
+      >
+        {recoveryMode
+          ? `CLOSE ${selectedExitPercent}% (at loss)`
+          : hasExitSignal
+            ? `EXIT ${selectedExitPercent}% - ${exitSignal?.urgency?.toUpperCase()}`
+            : `CLOSE ${selectedExitPercent}%`}
+      </button>
+    </div>
+  ) : null;
+
   return (
     <>
       <div className="space-y-2">
-        {/* Close Position */}
-        {onCloseExecute && (
-          <div className="space-y-2">
-            <div className="flex gap-1.5">
-              {([25, 50, 75, 100] as const).map((pct) => (
-                <button
-                  key={pct}
-                  onClick={() => setSelectedExitPercent(pct)}
-                  className={`flex-1 py-1 text-xs font-semibold rounded transition-colors ${
-                    selectedExitPercent === pct
-                      ? 'bg-white/20 text-primary'
-                      : 'bg-tertiary/50 text-tertiary hover:text-secondary'
-                  }`}
-                >
-                  {pct}%
-                </button>
-              ))}
-            </div>
-            <button
-              disabled={disabled}
-              onClick={() => {
-                const pct = selectedExitPercent || defaultExitPercent;
-                setModalAction({
-                  type: 'close',
-                  params: {
-                    exitPercent: pct,
-                    volumeToClose: pos.totalVolume * pct / 100,
-                    isEngineRecommended: hasExitSignal,
-                  },
-                });
-              }}
-              className={`w-full py-2 rounded-lg text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
-                hasExitSignal
-                  ? 'bg-red-500 hover:bg-red-400 text-white animate-pulse'
-                  : 'bg-gray-600 hover:bg-gray-500 text-white'
-              }`}
-            >
-              {hasExitSignal
-                ? `EXIT ${selectedExitPercent}% - ${exitSignal?.urgency?.toUpperCase()}`
-                : `CLOSE ${selectedExitPercent}%`}
-            </button>
-          </div>
-        )}
-
-        {/* DCA Button */}
-        {onDCAExecute && (
-          <button
-            disabled={disabled || !hasDCA}
-            onClick={() => {
-              if (!dcaSignal || !hasDCA) return;
-              const marginAvailable = pos.totalMarginUsed > 0
-                ? (pos.totalMarginUsed / (pos.totalMarginPercent / 100)) - pos.totalMarginUsed
-                : 0;
-              const dcaMarginPercent = dcaSignal.suggestedMarginPercent || config.positionSizing.dcaMarginPercent;
-              const totalEquity = pos.totalMarginUsed / (pos.totalMarginPercent / 100);
-              const dcaMargin = totalEquity * (dcaMarginPercent / 100);
-              const dcaVolume = currentPrice > 0 ? (dcaMargin * config.positionSizing.leverage) / currentPrice : 0;
-
-              setModalAction({
-                type: 'dca',
-                params: {
-                  dcaLevel: dcaSignal.dcaLevel,
-                  direction: pos.direction,
-                  volume: dcaVolume,
-                  marginToUse: Math.min(dcaMargin, marginAvailable),
-                  confidence: dcaSignal.confidence,
-                  currentAvgPrice: pos.avgPrice,
-                  currentVolume: pos.totalVolume,
-                },
-              });
-            }}
-            className={`w-full py-2 rounded-lg text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
-              hasDCA
-                ? 'bg-blue-500 hover:bg-blue-400 text-white'
-                : 'bg-gray-700 text-gray-500'
-            }`}
-          >
-            {pos.dcaCount >= config.positionSizing.maxDCACount
-              ? 'MAX DCA REACHED'
-              : hasDCA
-                ? `DCA LEVEL ${dcaSignal!.dcaLevel} - ${dcaSignal!.confidence}%`
-                : 'DCA (waiting for signal)'}
-          </button>
+        {recoveryMode ? (
+          <>
+            {/* Recovery mode: DCA first (primary), Close second (demoted) */}
+            {dcaButton}
+            {closeButton}
+          </>
+        ) : (
+          <>
+            {/* Normal mode: Close first, DCA second */}
+            {closeButton}
+            {dcaButton}
+          </>
         )}
 
         {/* Trailing Stop + Take Profit row */}

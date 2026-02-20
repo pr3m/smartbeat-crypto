@@ -716,6 +716,44 @@ export interface RiskConfig {
 }
 
 // ============================================================================
+// UNDERWATER POLICY (recovery mode for positions at loss)
+// ============================================================================
+
+/**
+ * Strategy-driven policy for handling underwater (at-loss) positions.
+ * When present and enabled, replaces panic exit signals with calm recovery UI.
+ * When absent, current behavior (red EXIT NOW, timebox pressure) is preserved.
+ */
+export interface UnderwaterPolicy {
+  enabled: boolean;
+  /** Zero out timebox pressure entirely when position is at a loss */
+  suppressTimeboxPressureWhenUnderwater: boolean;
+  /** Multiplier for timebox weight when underwater (0.0 = no timebox influence) */
+  underwaterTimeboxWeightMultiplier: number;
+  /** Cap urgency at this level when position is underwater */
+  maxUrgencyWhenUnderwater: 'monitor' | 'consider' | 'soon';
+  /** Show the recovery panel UI instead of exit monitor */
+  showRecoveryPanel: boolean;
+  /** Show thesis review prompt in alerts */
+  showThesisReviewPrompt: boolean;
+  /** DCA adjustments when position is overdue + underwater */
+  overdueDCA: {
+    /** Confidence adjustment (e.g. -15 → 60% becomes 45%) */
+    confidenceAdjustment: number;
+    /** Min drawdown adjustment (e.g. -1.5 → 4% becomes 2.5%) */
+    minDrawdownAdjustment: number;
+    /** Time spacing multiplier (e.g. 0.5 → half the wait) */
+    timeSpacingMultiplier: number;
+  };
+  /** Alert messages for recovery mode UI */
+  alertMessages: {
+    overdueUnderwater: string;
+    dcaEncourage: string;
+    costWarning: string;
+  };
+}
+
+// ============================================================================
 // AI INSTRUCTIONS
 // ============================================================================
 
@@ -806,6 +844,8 @@ export interface TradingStrategy {
   btcAlignment?: BTCAlignmentConfig;
   /** Optional AI instructions for strategy-aware assistant */
   aiInstructions?: AIInstructions;
+  /** Optional underwater position management policy */
+  underwaterPolicy?: UnderwaterPolicy;
 }
 
 // ============================================================================
@@ -829,6 +869,8 @@ export interface TradingEngineConfig {
   dca: DCAConfig;
   /** Exit signal thresholds */
   exit: ExitConfig;
+  /** Optional underwater position management policy */
+  underwaterPolicy?: UnderwaterPolicy;
 }
 
 /** v2 timeframe weights - rebalanced for trader's preference */
@@ -903,6 +945,7 @@ export const DEFAULT_ENGINE_CONFIG: TradingEngineConfig = {
   timeframeWeights: _defaults().timeframeWeights,
   dca: _defaults().dca,
   exit: _defaults().exit,
+  underwaterPolicy: _defaults().underwaterPolicy,
 };
 export const DEFAULT_STRATEGY: TradingStrategy = _defaults();
 
@@ -964,7 +1007,7 @@ export interface EngineSummary {
   /** Current status headline */
   headline: string;
   /** Status color for UI */
-  statusColor: 'green' | 'yellow' | 'orange' | 'red' | 'gray';
+  statusColor: 'green' | 'yellow' | 'orange' | 'red' | 'gray' | 'blue';
   /** Key metrics for quick glance */
   metrics: {
     label: string;

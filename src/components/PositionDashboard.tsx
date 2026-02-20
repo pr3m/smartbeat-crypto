@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
-import { Tooltip } from '@/components/Tooltip';
+import { Tooltip, HelpIcon } from '@/components/Tooltip';
 import type {
   PositionState,
   PositionPhase,
@@ -49,6 +49,9 @@ export interface PositionDashboardProps {
   /** Strategy display name */
   strategyName?: string;
 
+  // --- Recovery mode (strategy-driven underwater handling) ---
+  isRecoveryMode?: boolean;
+
   // --- Execution context (all optional for backwards compat) ---
   testMode?: boolean;
   recommendation?: TradingRecommendation | null;
@@ -73,6 +76,7 @@ const STATUS_COLORS: Record<EngineSummary['statusColor'], string> = {
   orange: 'bg-orange-500/15 border-orange-500/40 text-orange-400',
   red: 'bg-red-500/15 border-red-500/40 text-red-400',
   gray: 'bg-tertiary border-primary text-secondary',
+  blue: 'bg-blue-500/15 border-blue-500/40 text-blue-400',
 };
 
 const URGENCY_STYLES: Record<ExitUrgency, { bg: string; text: string; label: string; pulse: boolean }> = {
@@ -90,6 +94,14 @@ const PHASE_LABELS: Record<PositionPhase, string> = {
   exit_watch: 'Exit Watch',
   exiting: 'Exiting',
   closed: 'Closed',
+};
+
+const EXHAUSTION_TOOLTIPS: Record<string, string> = {
+  'RSI Exhaustion': 'RSI (Relative Strength Index) on the 15m timeframe. Active when RSI hits oversold/overbought, meaning selling/buying pressure is exhausted.',
+  'Volume Declining': 'Trading volume on 5m and 15m candles. Active when volume is dropping, indicating the move against your position is losing steam.',
+  'MACD Contracting': 'MACD histogram on the 15m timeframe. Active when the histogram is contracting toward zero, showing momentum is fading.',
+  'Volatility Calming': 'Bollinger Band position and volume on 15m. Active when price is near the middle band with calm volume — the volatility spike is settling.',
+  'Price Stabilizing': 'Recent 5m candle structure. Active when higher lows (long) or lower highs (short) are forming — a price base/top is developing.',
 };
 
 function getTimeColor(hoursElapsed: number, maxHours: number): string {
@@ -498,6 +510,126 @@ function ExitUrgencyMeter({ exitSignal }: { exitSignal: ExitSignal }) {
   );
 }
 
+/** Recovery panel — calm blue view for underwater positions with recovery policy */
+function RecoveryPanel({
+  position,
+  currentPrice,
+  dcaSignal,
+  config,
+}: {
+  position: PositionState;
+  currentPrice: number;
+  dcaSignal: DCASignal | null;
+  config: TradingEngineConfig;
+}) {
+  const breakEvenPrice = position.avgPrice;
+  const breakEvenDistance = position.direction === 'long'
+    ? ((breakEvenPrice - currentPrice) / currentPrice) * 100
+    : ((currentPrice - breakEvenPrice) / currentPrice) * 100;
+
+  // DCA impact preview: how would a DCA at current price change avg entry?
+  const dcaMarginPercent = config.positionSizing.dcaMarginPercent;
+  const totalEquity = position.totalMarginPercent > 0 ? position.totalMarginUsed / (position.totalMarginPercent / 100) : 0;
+  const dcaMargin = totalEquity * (dcaMarginPercent / 100);
+  const dcaVolume = currentPrice > 0 ? (dcaMargin * config.positionSizing.leverage) / currentPrice : 0;
+  const newTotalVolume = position.totalVolume + dcaVolume;
+  const newAvgPrice = newTotalVolume > 0
+    ? (position.avgPrice * position.totalVolume + currentPrice * dcaVolume) / newTotalVolume
+    : position.avgPrice;
+  const avgImprovement = position.avgPrice > 0
+    ? ((position.avgPrice - newAvgPrice) / position.avgPrice) * 100
+    : 0;
+
+  const hoursElapsed = position.timeInTradeMs / (1000 * 60 * 60);
+
+  return (
+    <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-3 space-y-3">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-blue-400">Recovery Monitor</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded font-bold bg-blue-500/20 text-blue-400">
+          RECOVERY
+        </span>
+      </div>
+
+      {/* Break-even tracker */}
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <Tooltip content="The price where your position breaks even (average entry price). The percentage shows how far the current market price is from break-even." position="bottom" block>
+          <div className="p-2 rounded bg-blue-500/10">
+            <div className="text-blue-400/60">Break-even</div>
+            <div className="mono font-semibold text-blue-300">{breakEvenPrice.toFixed(4)}</div>
+            <div className="mono text-blue-400/80 text-[10px]">{breakEvenDistance.toFixed(1)}% away</div>
+          </div>
+        </Tooltip>
+        <Tooltip content="Total accumulated fees (opening fee + rollover charges). The /4h value is Kraken's margin fee charged every 4 hours for holding the leveraged position." position="bottom" block>
+          <div className="p-2 rounded bg-blue-500/10">
+            <div className="text-blue-400/60">Rolling Cost</div>
+            <div className="mono font-semibold text-blue-300">{position.totalFees.toFixed(2)} EUR</div>
+            <div className="mono text-blue-400/80 text-[10px]">{position.rolloverCostPer4h.toFixed(2)}/4h</div>
+          </div>
+        </Tooltip>
+      </div>
+
+      {/* DCA impact preview */}
+      {position.dcaCount < config.positionSizing.maxDCACount && dcaVolume > 0 && (
+        <Tooltip content="Simulates a DCA (Dollar-Cost Average) entry at the current price. Shows how your average entry price would improve, bringing the break-even closer to the current market price." position="bottom" block>
+          <div className="p-2 rounded bg-blue-500/10 text-xs">
+            <div className="text-blue-400/60 mb-1">DCA Impact Preview</div>
+            <div className="flex items-center justify-between">
+              <span className="text-blue-300">New avg: <span className="mono font-semibold">{newAvgPrice.toFixed(4)}</span></span>
+              <span className="mono text-blue-400">-{Math.abs(avgImprovement).toFixed(1)}% improvement</span>
+            </div>
+          </div>
+        </Tooltip>
+      )}
+
+      {/* Exhaustion radar (compact DCA signal tags) */}
+      {dcaSignal && dcaSignal.signals.length > 0 && (
+        <div>
+          <div className="flex items-center gap-1 mb-1">
+            <span className="text-[10px] text-blue-400/50">Exhaustion Radar</span>
+            <HelpIcon tooltip="Momentum exhaustion signals that detect when selling/buying pressure is fading. Blue (active) = signal confirms exhaustion. 3+ active signals needed to trigger a DCA entry." position="bottom" />
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {dcaSignal.signals.map((sig, i) => {
+              const tooltipText = EXHAUSTION_TOOLTIPS[sig.name] || sig.value;
+              return (
+                <Tooltip key={i} content={<><div className="font-semibold mb-1">{sig.name}</div><div>{tooltipText}</div><div className="mt-1 text-gray-400">{sig.value}</div></>} position="bottom">
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded ${
+                      sig.active
+                        ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                        : 'bg-gray-700/30 text-gray-500 border border-gray-600/20'
+                    }`}
+                  >
+                    {sig.name.replace('Exhaustion', '').replace('Declining', '').replace('Calming', '').replace('Stabilizing', '').trim()}
+                    {sig.active ? ' >' : ''}
+                  </span>
+                </Tooltip>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Neutral time display */}
+      <div className="flex items-center gap-2 text-[11px] text-blue-400/70">
+        <Tooltip content="How long this position has been open. In recovery mode, time pressure is suppressed — no rush to exit at a loss." position="top">
+          <span className="mono">
+            {hoursElapsed >= 24
+              ? `${Math.floor(hoursElapsed / 24)}d ${Math.floor(hoursElapsed % 24)}h open`
+              : `${hoursElapsed.toFixed(1)}h open`}
+          </span>
+        </Tooltip>
+        <span className="text-blue-400/40">|</span>
+        <Tooltip content={`DCA entries used out of ${config.positionSizing.maxDCACount} maximum. Each DCA lowers your average entry price when the position is underwater.`} position="top">
+          <span>DCA {position.dcaCount}/{config.positionSizing.maxDCACount}</span>
+        </Tooltip>
+      </div>
+    </div>
+  );
+}
+
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
@@ -511,6 +643,7 @@ export function PositionDashboard({
   currentPrice,
   config = DEFAULT_ENGINE_CONFIG,
   strategyName,
+  isRecoveryMode = false,
   testMode = true,
   recommendation,
   orderInFlight = false,
@@ -584,6 +717,7 @@ export function PositionDashboard({
         <div className={`px-4 py-2 border-b ${STATUS_COLORS[summary.statusColor]} flex items-center justify-between`}>
           <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${
+              summary.statusColor === 'blue' ? 'bg-blue-500' :
               summary.statusColor === 'green' ? 'bg-green-500' :
               summary.statusColor === 'yellow' ? 'bg-yellow-500' :
               summary.statusColor === 'orange' ? 'bg-orange-500' :
@@ -654,9 +788,21 @@ export function PositionDashboard({
         </div>
 
         {/* ============================================================ */}
+        {/* RECOVERY PANEL — calm blue view for underwater positions    */}
+        {/* ============================================================ */}
+        {isRecoveryMode && !isProfitable && (
+          <RecoveryPanel
+            position={pos}
+            currentPrice={currentPrice}
+            dcaSignal={dcaSignal}
+            config={config}
+          />
+        )}
+
+        {/* ============================================================ */}
         {/* EXIT MONITORING SECTION — decision-focused                  */}
         {/* ============================================================ */}
-        {exitSignal && pos.phase !== 'idle' && (
+        {!isRecoveryMode && exitSignal && pos.phase !== 'idle' && (
           <div className={`rounded-lg border p-3 space-y-2 ${
             exitSignal.urgency === 'immediate' ? 'border-red-500/50 bg-red-500/5' :
             exitSignal.urgency === 'soon' ? 'border-orange-500/40 bg-orange-500/5' :
@@ -845,6 +991,7 @@ export function PositionDashboard({
             exitSignal={exitSignal}
             config={config}
             recommendation={recommendation ?? null}
+            recoveryMode={isRecoveryMode}
             onEntryExecute={onEntryExecute}
             onCloseExecute={onCloseExecute}
             onDCAExecute={onDCAExecute}
@@ -934,13 +1081,15 @@ export function PositionDashboard({
           <div className="space-y-1">
             {summary.alerts.map((alert, i) => (
               <div key={i} className={`flex items-center gap-2 text-xs px-2 py-1.5 rounded ${
-                summary.statusColor === 'red'
+                summary.statusColor === 'blue'
+                  ? 'text-blue-400 bg-blue-500/10'
+                  : summary.statusColor === 'red'
                   ? 'text-red-400 bg-red-500/10'
                   : summary.statusColor === 'orange'
                   ? 'text-orange-400 bg-orange-500/10'
                   : 'text-yellow-400 bg-yellow-500/10'
               }`}>
-                <span className="flex-shrink-0">!</span>
+                <span className="flex-shrink-0">{isRecoveryMode ? 'i' : '!'}</span>
                 <span>{alert}</span>
               </div>
             ))}

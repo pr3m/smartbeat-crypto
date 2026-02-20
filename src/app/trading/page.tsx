@@ -1125,6 +1125,7 @@ function TradingPageContent({ testMode, setTestMode }: TradingPageContentProps) 
             currentPrice={price}
             config={v2.config}
             strategyName={v2.strategyName}
+            isRecoveryMode={v2.isRecoveryMode}
             testMode={testMode}
             recommendation={recommendation}
             orderInFlight={orderInFlight}
