@@ -657,11 +657,16 @@ export function TradingDataProvider({ children, testMode, enabled = true }: Trad
           try {
             // Extract asset from pair (e.g., "XRPEUR" -> "XRP")
             const asset = position.pair.replace(/EUR$|USD$|GBP$|ZEUR$|ZUSD$|ZGBP$/, '').replace(/^X/, '');
-            const res = await fetch(
-              `/api/kraken/private/rollover-costs?openTime=${position.openTime}&asset=${asset}`
-            );
+            const params = new URLSearchParams({
+              openTime: String(position.openTime),
+              asset,
+              costBasis: String(position.cost),
+              rolloverRate: String(position.rolloverRatePer4h),
+            });
+            const res = await fetch(`/api/kraken/private/rollover-costs?${params}`);
             if (res.ok) {
               const data = await res.json();
+              console.log('[Rollover] Response for', asset, data);
               return { ...position, actualRolloverCost: data.totalRolloverCost || 0 };
             }
           } catch (err) {

@@ -136,6 +136,8 @@ export interface PositionState {
   // --- Fees ---
   /** Total fees paid so far (trading + rollover) */
   totalFees: number;
+  /** Accumulated rollover cost only (excludes opening trading fee) */
+  rolloverCost: number;
   /** Estimated rollover cost per 4h */
   rolloverCostPer4h: number;
 }
@@ -168,6 +170,7 @@ export const EMPTY_POSITION_STATE: PositionState = {
   liquidationDistancePercent: 0,
   leverage: 10,
   totalFees: 0,
+  rolloverCost: 0,
   rolloverCostPer4h: 0,
 };
 

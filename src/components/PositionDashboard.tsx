@@ -561,10 +561,10 @@ function RecoveryPanel({
             <div className="mono text-blue-400/80 text-[10px]">{breakEvenDistance.toFixed(1)}% away</div>
           </div>
         </Tooltip>
-        <Tooltip content="Total accumulated fees (opening fee + rollover charges). The /4h value is Kraken's margin fee charged every 4 hours for holding the leveraged position." position="bottom" block>
+        <Tooltip content="Accumulated rollover (margin) fees charged by Kraken for holding the leveraged position. The /4h value is the rate charged every 4 hours." position="bottom" block>
           <div className="p-2 rounded bg-blue-500/10">
-            <div className="text-blue-400/60">Rolling Cost</div>
-            <div className="mono font-semibold text-blue-300">{position.totalFees.toFixed(2)} EUR</div>
+            <div className="text-blue-400/60">Rollover</div>
+            <div className="mono font-semibold text-blue-300">{position.rolloverCost.toFixed(2)} EUR</div>
             <div className="mono text-blue-400/80 text-[10px]">{position.rolloverCostPer4h.toFixed(2)}/4h</div>
           </div>
         </Tooltip>

@@ -328,6 +328,7 @@ function bridgeToPositionState(
     liquidationDistancePercent,
     leverage,
     totalFees: fees + effectiveRolloverCost,
+    rolloverCost: effectiveRolloverCost,
     rolloverCostPer4h: rolloverPer4h,
   };
 }
