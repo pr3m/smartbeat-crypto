@@ -2346,7 +2346,9 @@ function computeScenarioStep(
   dcaVolume: number,
   direction: TradeDirection,
   leverage: number,
-  freeMargin: number
+  freeMargin: number,
+  krakenTradeBalance?: number,
+  krakenEquity?: number
 ): ScenarioStep {
   const newAvgPrice = calculateNewAvgPrice(currentAvg, currentVolume, dcaPrice, dcaVolume);
   const newTotalVolume = currentVolume + dcaVolume;
@@ -2355,16 +2357,35 @@ function computeScenarioStep(
   const dcaCostEUR = dcaPrice * dcaVolume;
   const marginRequired = dcaCostEUR / leverage;
 
-  // New position value for liquidation calc
-  const newPositionValue = newTotalVolume * newAvgPrice; // approximate at avg entry
+  // New total margin after DCA
   const newTotalMargin = (currentVolume * currentAvg / leverage) + marginRequired;
-  const liqResult = calculateLiquidationPrice(newAvgPrice, newTotalMargin, newPositionValue, direction, leverage);
+
+  // Liquidation price: use Kraken cross-margin formula when trade balance is available
+  let liqPrice: number;
+  if (krakenTradeBalance && krakenTradeBalance > 0) {
+    // Kraken cross-margin: trade balance doesn't change when opening a position
+    // (it's equity minus unrealized P&L, margin moves from free to used)
+    liqPrice = calculateKrakenLiquidationPrice({
+      side: direction === 'long' ? 'long' : 'short',
+      entryPrice: newAvgPrice,
+      volume: newTotalVolume,
+      marginUsed: newTotalMargin,
+      leverage,
+      equity: krakenEquity || krakenTradeBalance,
+      tradeBalance: krakenTradeBalance,
+    });
+  } else {
+    // Fallback to simplified leverage-based model
+    const newPositionValue = newTotalVolume * newAvgPrice;
+    const liqResult = calculateLiquidationPrice(newAvgPrice, newTotalMargin, newPositionValue, direction, leverage);
+    liqPrice = liqResult.liquidationPrice;
+  }
 
   // Liquidation distance from DCA price (more relevant)
   const liqDistFromCurrent = dcaPrice > 0
     ? direction === 'long'
-      ? ((dcaPrice - liqResult.liquidationPrice) / dcaPrice) * 100
-      : ((liqResult.liquidationPrice - dcaPrice) / dcaPrice) * 100
+      ? ((dcaPrice - liqPrice) / dcaPrice) * 100
+      : ((liqPrice - dcaPrice) / dcaPrice) * 100
     : 0;
 
   // Fee estimate (market order for worst-case)
@@ -2386,7 +2407,7 @@ function computeScenarioStep(
     dcaVolume,
     dcaCostEUR,
     marginRequired,
-    newLiquidationPrice: liqResult.liquidationPrice,
+    newLiquidationPrice: liqPrice,
     newLiquidationDistance: liqDistFromCurrent,
     breakevenPrice,
     fees: {
@@ -2436,6 +2457,8 @@ async function dcaScenarioPlanner(args: Record<string, unknown>): Promise<ToolRe
     let direction: TradeDirection = 'long';
     let hasPosition = false;
     let freeMargin = 0;
+    let krakenTradeBalance = 0;
+    let krakenEquity = 0;
     let currentMarginUsed = 0;
 
     if (positionType === 'simulated') {
@@ -2502,6 +2525,8 @@ async function dcaScenarioPlanner(args: Record<string, unknown>): Promise<ToolRe
         if (tbRes.ok) {
           const tb = await tbRes.json();
           freeMargin = parseFloat(tb.mf) || 0;
+          krakenTradeBalance = parseFloat(tb.tb) || 0;
+          krakenEquity = parseFloat(tb.e) || 0;
         }
       } catch {
         // Balance fetch failed
@@ -2592,7 +2617,7 @@ async function dcaScenarioPlanner(args: Record<string, unknown>): Promise<ToolRe
       }
 
       // Compute full scenario step
-      const step = computeScenarioStep(currentAvg, currentVolume, dcaPrice, requiredVolume, direction, leverage, freeMargin);
+      const step = computeScenarioStep(currentAvg, currentVolume, dcaPrice, requiredVolume, direction, leverage, freeMargin, krakenTradeBalance, krakenEquity);
 
       const maxDCA = strategy.positionSizing.maxDCACount;
       const totalMarginAfter = currentMarginUsed + step.marginRequired;
@@ -2666,7 +2691,7 @@ async function dcaScenarioPlanner(args: Record<string, unknown>): Promise<ToolRe
         return { success: false, error: 'Provide either dcaVolume (XRP amount) or dcaAmountEUR (EUR amount) for the hypothetical buy' };
       }
 
-      const step = computeScenarioStep(currentAvg, currentVolume, dcaPrice, dcaVolume, direction, leverage, freeMargin);
+      const step = computeScenarioStep(currentAvg, currentVolume, dcaPrice, dcaVolume, direction, leverage, freeMargin, krakenTradeBalance, krakenEquity);
 
       const totalMarginAfter = currentMarginUsed + step.marginRequired;
       const totalEquity = freeMargin + currentMarginUsed;
@@ -2790,7 +2815,7 @@ async function dcaScenarioPlanner(args: Record<string, unknown>): Promise<ToolRe
           lvlVolume = posValue / lvlPrice;
         }
 
-        const step = computeScenarioStep(runningAvg, runningVolume, lvlPrice, lvlVolume, direction, leverage, runningFreeMargin);
+        const step = computeScenarioStep(runningAvg, runningVolume, lvlPrice, lvlVolume, direction, leverage, runningFreeMargin, krakenTradeBalance, krakenEquity);
 
         totalDCACost += step.dcaCostEUR;
         totalDCAVolume += lvlVolume;
