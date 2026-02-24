@@ -128,6 +128,30 @@ export class KrakenClient {
     return result[key];
   }
 
+  /**
+   * Get recent public trades
+   */
+  async getRecentTrades(
+    pair: string,
+    since?: number,
+    count = 1000
+  ): Promise<{
+    trades: Array<[string, string, number, string, string, string, number]>;
+    last: string;
+  }> {
+    const params: Record<string, string | number> = { pair };
+    if (since) params.since = since;
+    if (count) params.count = count;
+    const result = await this.publicRequest<Record<string, unknown>>('Trades', params);
+    const dataKey = Object.keys(result).find(k => k !== 'last');
+    return {
+      trades: (dataKey ? result[dataKey] : []) as Array<
+        [string, string, number, string, string, string, number]
+      >,
+      last: String(result.last || ''),
+    };
+  }
+
   // ==================== PRIVATE ENDPOINTS ====================
 
   /**

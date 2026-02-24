@@ -21,6 +21,7 @@ import type { PositionState, TradeDirection } from '@/lib/trading/v2-types';
 import { EMPTY_POSITION_STATE } from '@/lib/trading/v2-types';
 import { getTradingSession } from '@/lib/trading/session';
 import { calculatePositionHealth, calculateKrakenLiquidationPrice } from '@/lib/trading/position-health';
+import { buildHeatmapFromAPIs } from '@/lib/trading/liquidation-heatmap';
 
 // Base URL for internal API calls
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:4000';
@@ -85,6 +86,8 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>)
         return await getPositionHealth(args);
       case 'get_trading_history':
         return await getTradingHistory(args);
+      case 'get_liquidation_heatmap':
+        return await getLiquidationHeatmap(args);
       default:
         return { success: false, error: `Unknown tool: ${name}` };
     }
@@ -1390,6 +1393,37 @@ async function getCurrentSetup(args: Record<string, unknown>): Promise<ToolResul
         value: recommendation.checklist.liqBias.value,
         requirement: 'short squeeze for LONG, long squeeze for SHORT',
       };
+    }
+
+    // Add heatmap summary for liquidation landscape context
+    try {
+      const krakenPair = `X${pair.replace('EUR', '')}ZEUR`;
+      const heatmap = await buildHeatmapFromAPIs(krakenPair, currentPrice, BASE_URL, [15, 60, 240], 15);
+      data.liquidationHeatmap = {
+        magnetDirection: heatmap.magnetDirection,
+        sweepRisk: heatmap.sweepRisk,
+        asymmetryRatio: heatmap.asymmetryRatio,
+        summary: heatmap.summary,
+        topMagnets: heatmap.topMagnets.slice(0, 3).map(z => ({
+          price: `€${z.priceMid.toFixed(4)}`,
+          score: z.score,
+          type: z.type,
+          distance: z.distancePercent.toFixed(2) + '%',
+          signals: z.signals.length,
+        })),
+        nearestAbove: heatmap.aboveZones[0] ? {
+          price: `€${heatmap.aboveZones[0].priceMid.toFixed(4)}`,
+          score: heatmap.aboveZones[0].score,
+          distance: heatmap.aboveZones[0].distancePercent.toFixed(2) + '%',
+        } : null,
+        nearestBelow: heatmap.belowZones[0] ? {
+          price: `€${heatmap.belowZones[0].priceMid.toFixed(4)}`,
+          score: heatmap.belowZones[0].score,
+          distance: heatmap.belowZones[0].distancePercent.toFixed(2) + '%',
+        } : null,
+      };
+    } catch {
+      // Heatmap is supplementary
     }
 
     // Add rejection if available in checklist
@@ -3306,6 +3340,62 @@ async function getPositionHealth(args: Record<string, unknown>): Promise<ToolRes
         note: 'Liquidation calculated using Kraken cross-margin formula (entire account trade balance supports position).',
       },
     };
+
+    // Enhance with heatmap cluster overlap detection
+    try {
+      const krakenPair = pair.startsWith('X') ? pair : `X${pair.replace(/EUR$/, '')}ZEUR`;
+      const heatmap = await buildHeatmapFromAPIs(krakenPair, currentPrice, BASE_URL, [15, 60, 240], 20);
+
+      // Check if our liquidation price overlaps with a high-density zone
+      const allZones = [...heatmap.belowZones, ...heatmap.aboveZones];
+      const overlappingZone = allZones.find(z =>
+        liquidationPrice >= z.priceFrom && liquidationPrice <= z.priceTo
+      );
+      const nearbyZones = allZones
+        .filter(z => Math.abs(z.priceMid - liquidationPrice) / liquidationPrice * 100 < 3)
+        .sort((a, b) => b.score - a.score);
+
+      const liqHeatmapContext: Record<string, unknown> = {
+        magnetDirection: heatmap.magnetDirection,
+        sweepRisk: heatmap.sweepRisk,
+        asymmetryRatio: heatmap.asymmetryRatio,
+      };
+
+      if (overlappingZone) {
+        liqHeatmapContext.cascadeWarning = {
+          alert: `YOUR LIQUIDATION PRICE (€${liquidationPrice.toFixed(4)}) IS INSIDE A LIQUIDATION CLUSTER (score ${overlappingZone.score}/100)`,
+          zoneScore: overlappingZone.score,
+          zoneRange: `€${overlappingZone.priceFrom.toFixed(4)} – €${overlappingZone.priceTo.toFixed(4)}`,
+          risk: overlappingZone.score > 60 ? 'CASCADE RISK: If price reaches this zone, many positions liquidate simultaneously — yours included. Consider reducing size.' :
+                overlappingZone.score > 30 ? 'MODERATE: Your liq price is near other liquidations. Cascading effect possible.' :
+                'LOW: Some overlap with estimated cluster, but density is low.',
+          dominantLeverages: overlappingZone.dominantLeverages,
+        };
+      } else if (nearbyZones.length > 0) {
+        const nearest = nearbyZones[0];
+        const distToCluster = Math.abs(nearest.priceMid - liquidationPrice) / liquidationPrice * 100;
+        liqHeatmapContext.nearbyCluster = {
+          distance: distToCluster.toFixed(2) + '%',
+          zoneScore: nearest.score,
+          zonePrice: `€${nearest.priceMid.toFixed(4)}`,
+          note: `Nearest liq cluster is ${distToCluster.toFixed(1)}% from your liq price`,
+        };
+      }
+
+      // Add top 3 magnets for context
+      liqHeatmapContext.topMagnets = heatmap.topMagnets.slice(0, 3).map(z => ({
+        price: `€${z.priceMid.toFixed(4)}`,
+        score: z.score,
+        type: z.type,
+        distance: z.distancePercent.toFixed(2) + '%',
+      }));
+
+      (result.data as Record<string, unknown>).liquidationHeatmap = liqHeatmapContext;
+    } catch {
+      // Heatmap is supplementary — don't fail the whole tool
+    }
+
+    return result;
   } catch (error) {
     return {
       success: false,
@@ -3381,6 +3471,73 @@ async function getTradingHistory(args: Record<string, unknown>): Promise<ToolRes
     return {
       success: false,
       error: `Trading history fetch failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
+/**
+ * Get liquidation heatmap — composite probability map of where liq clusters sit
+ */
+async function getLiquidationHeatmap(args: Record<string, unknown>): Promise<ToolResult> {
+  const pair = String(args.pair || 'XRPEUR').toUpperCase();
+  const krakenPair = pair.startsWith('X') ? pair : `X${pair.replace('EUR', '')}ZEUR`;
+  const rangePercent = Number(args.rangePercent) || 15;
+  const timeframes = (Array.isArray(args.timeframes) ? args.timeframes.map(Number) : [15, 60, 240])
+    .filter(tf => [5, 15, 60, 240, 1440].includes(tf));
+  const topN = Math.min(Number(args.topN) || 10, 20);
+
+  try {
+    // Get current price first
+    const ticker = await fetchTicker(krakenPair);
+    const c = ticker.c as string[] | undefined;
+    const currentPrice = parseFloat(String(ticker.price || c?.[0] || 0));
+    if (!currentPrice) {
+      return { success: false, error: 'Could not fetch current price' };
+    }
+
+    // Build the full heatmap
+    const heatmap = await buildHeatmapFromAPIs(krakenPair, currentPrice, BASE_URL, timeframes, rangePercent);
+
+    // Format for AI consumption — trim to topN per side
+    const formatZone = (z: typeof heatmap.aboveZones[0]) => ({
+      priceRange: `€${z.priceFrom.toFixed(4)} – €${z.priceTo.toFixed(4)}`,
+      midPrice: z.priceMid.toFixed(4),
+      score: z.score,
+      type: z.type,
+      distancePercent: z.distancePercent.toFixed(2) + '%',
+      signals: z.signals.map(s => `${s.source}: ${s.detail} (${s.contribution.toFixed(0)})`),
+      recentlySweep: z.recentlySweep,
+      leverages: z.dominantLeverages,
+      ...(z.estimatedValueAtRisk ? { eurAtRisk: `€${z.estimatedValueAtRisk.toFixed(0)}` } : {}),
+    });
+
+    return {
+      success: true,
+      data: {
+        currentPrice: currentPrice.toFixed(5),
+        pair,
+        magnetDirection: heatmap.magnetDirection,
+        asymmetryRatio: heatmap.asymmetryRatio,
+        sweepRisk: heatmap.sweepRisk,
+        summary: heatmap.summary,
+        topMagnets: heatmap.topMagnets.map(formatZone),
+        aboveZones: heatmap.aboveZones.slice(0, topN).map(formatZone),
+        belowZones: heatmap.belowZones.slice(0, topN).map(formatZone),
+        aboveZoneCount: heatmap.aboveZones.length,
+        belowZoneCount: heatmap.belowZones.length,
+        dataAvailability: {
+          volumeProfile: Object.keys(heatmap.dataAge).includes('volumeProfile'),
+          orderBook: heatmap.dataAge.orderBook >= 0,
+          recentTrades: heatmap.dataAge.trades >= 0,
+          futuresData: heatmap.dataAge.futures >= 0,
+        },
+        note: 'Scores 0-100 indicate estimated liquidation cluster probability. Higher score = more likely that leveraged positions will be liquidated at that level. Zones with recentlySweep=true have been partially cleared by recent cascades.',
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Liquidation heatmap failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
     };
   }
 }

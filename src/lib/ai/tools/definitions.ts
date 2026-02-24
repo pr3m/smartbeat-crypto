@@ -567,6 +567,36 @@ export const assistantTools: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'get_liquidation_heatmap',
+      description:
+        'Get a composite liquidation probability heatmap showing where leveraged positions are likely clustered and where price is magnetically drawn. Fuses 7 data signals: volume profile (multi-TF entry clusters → liq price estimates), order book depth walls (visible liquidity defense/attack levels), round number gravity (psychological magnets), open interest + funding rate (directional crowding), trade cascade detection (past liquidation events), ATR-scaled leverage mapping (volatility-adjusted estimates), and swing level structure. Returns scored zones with probability 0-100, magnet direction, asymmetry ratio, and sweep risk. Use this for ANY question about liquidation levels, where the money is sitting, price magnets, sweep targets, or liquidity analysis.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pair: {
+            type: 'string',
+            description: 'Trading pair (default: XRPEUR)',
+          },
+          rangePercent: {
+            type: 'number',
+            description: 'How far above/below current price to analyze, in % (default: 15)',
+          },
+          timeframes: {
+            type: 'array',
+            items: { type: 'number', enum: [5, 15, 60, 240, 1440] },
+            description: 'Timeframe intervals in minutes for volume profile analysis (default: [15, 60, 240])',
+          },
+          topN: {
+            type: 'number',
+            description: 'Number of top zones to return per side (default: 10)',
+          },
+        },
+      },
+    },
+  },
 ];
 
 export type ToolName =
@@ -593,4 +623,5 @@ export type ToolName =
   | 'get_rollover_costs'
   | 'get_trading_session'
   | 'get_position_health'
-  | 'get_trading_history';
+  | 'get_trading_history'
+  | 'get_liquidation_heatmap';
