@@ -3361,15 +3361,16 @@ async function getPositionHealth(args: Record<string, unknown>): Promise<ToolRes
         asymmetryRatio: heatmap.asymmetryRatio,
       };
 
-      if (overlappingZone) {
+      if (overlappingZone != null) {
+        const oz = overlappingZone;
         liqHeatmapContext.cascadeWarning = {
-          alert: `YOUR LIQUIDATION PRICE (€${liquidationPrice.toFixed(4)}) IS INSIDE A LIQUIDATION CLUSTER (score ${overlappingZone.score}/100)`,
-          zoneScore: overlappingZone.score,
-          zoneRange: `€${overlappingZone.priceFrom.toFixed(4)} – €${overlappingZone.priceTo.toFixed(4)}`,
-          risk: overlappingZone.score > 60 ? 'CASCADE RISK: If price reaches this zone, many positions liquidate simultaneously — yours included. Consider reducing size.' :
-                overlappingZone.score > 30 ? 'MODERATE: Your liq price is near other liquidations. Cascading effect possible.' :
+          alert: `YOUR LIQUIDATION PRICE (€${liquidationPrice.toFixed(4)}) IS INSIDE A LIQUIDATION CLUSTER (score ${oz.score}/100)`,
+          zoneScore: oz.score,
+          zoneRange: `€${oz.priceFrom.toFixed(4)} – €${oz.priceTo.toFixed(4)}`,
+          risk: oz.score > 60 ? 'CASCADE RISK: If price reaches this zone, many positions liquidate simultaneously — yours included. Consider reducing size.' :
+                oz.score > 30 ? 'MODERATE: Your liq price is near other liquidations. Cascading effect possible.' :
                 'LOW: Some overlap with estimated cluster, but density is low.',
-          dominantLeverages: overlappingZone.dominantLeverages,
+          dominantLeverages: oz.dominantLeverages,
         };
       } else if (nearbyZones.length > 0) {
         const nearest = nearbyZones[0];
